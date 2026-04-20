@@ -1,0 +1,120 @@
+name: Build macOS DMG
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system dependencies
+        run: |
+          brew install cmake xz
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          # Installa tutto tranne llama-cpp-python
+          grep -v "llama" requirements.txt > /tmp/req_no_llama.txt || true
+          pip install -r /tmp/req_no_llama.txt
+          pip install pyinstaller pyarmor
+
+      - name: Install llama-cpp-python (Apple Silicon Metal)
+        run: |
+          # FONDAMENTALE: compilazione nativa per macOS con GPU Metal
+          CMAKE_ARGS="-DLLAMA_METAL=on" \
+          FORCE_CMAKE=1 \
+          pip install llama-cpp-python --no-cache-dir
+
+      - name: Obfuscate source code (PyArmor)
+        run: |
+          python -m pyarmor.cli gen -O obfuscated main.py ai_engine.py license_manager.py
+
+      - name: Build macOS .app (PyInstaller)
+        run: |
+          pyinstaller \
+            --windowed \
+            --noconsole \
+            --noconfirm \
+            --onedir \
+            --name "Datarium" \
+            --icon "icon.png" \
+            --paths obfuscated \
+            --collect-all customtkinter \
+            --collect-all llama_cpp \
+            --collect-all huggingface_hub \
+            --collect-binaries llama_cpp \
+            --hidden-import customtkinter \
+            --hidden-import llama_cpp \
+            --hidden-import llama_cpp.lib \
+            --hidden-import llama_cpp.llama_chat_format \
+            --hidden-import ai_engine \
+            --hidden-import license_manager \
+            --hidden-import PIL \
+            --hidden-import fitz \
+            --hidden-import docx \
+            --hidden-import jwt \
+            --hidden-import cryptography \
+            --add-data "obfuscated/ai_engine.py:." \
+            --add-data "obfuscated/license_manager.py:." \
+            --osx-bundle-identifier "com.datarium.app" \
+            obfuscated/main.py
+
+      - name: Create models folder inside app
+        run: |
+          mkdir -p "dist/Datarium.app/Contents/MacOS/models"
+
+      - name: Create DMG (create-dmg)
+        run: |
+          brew install create-dmg
+          mkdir -p dmg
+          create-dmg \
+            --volname "Datarium" \
+            --volicon "icon.png" \
+            --window-pos 200 120 \
+            --window-size 800 450 \
+            --icon-size 120 \
+            --icon "Datarium.app" 200 200 \
+            --hide-extension "Datarium.app" \
+            --app-drop-link 600 200 \
+            "dmg/Datarium_macOS.dmg" \
+            "dist/Datarium.app"
+
+      - name: Upload DMG as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Datarium-macOS-DMG
+          path: dmg/Datarium_macOS.dmg
+          retention-days: 30
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: "v${{ github.run_number }}"
+          name: "Datarium macOS v${{ github.run_number }}"
+          files: dmg/Datarium_macOS.dmg
+          body: |
+            ## Datarium per macOS
+            
+            ### Come installare:
+            1. Scarica `Datarium_macOS.dmg`
+            2. Apri il DMG e trascina l'app in **Applicazioni**
+            3. Avvia normalmente
+            
+            > Compatibile con Apple Silicon (M1/M2/M3) e Intel Mac
