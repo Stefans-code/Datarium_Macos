@@ -134,14 +134,15 @@ class AIEngine:
                     
                     if progress_callback: progress_callback(f"Scaricamento {filename}...")
                     try:
-                        # Usiamo disable_tqdm=True per evitare il crash in modalità senza console
+                        # Sopprimiamo le barre di progresso tramite env var (compatibile con TUTTE le versioni di huggingface_hub)
+                        import os as _os
+                        _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
                         hf_hub_download(
                             repo_id=repo, 
                             filename=filename, 
                             cache_dir=download_dir, 
                             local_dir=download_dir, 
-                            local_dir_use_symlinks=False,
-                            disable_tqdm=True
+                            local_dir_use_symlinks=False
                         )
                     except Exception as e:
                         return False, f"Network Error: {str(e)}"
