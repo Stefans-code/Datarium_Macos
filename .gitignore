@@ -1,0 +1,37 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# PyArmor
+obfuscated/
+
+# App artifacts
+*.dmg
+*.app
+
+# Logs
+*.log
+llama.log
+crash_log.txt
+
+# Models (troppo grandi per git)
+models/
+
+# License file utente
+license.datarium
+
+# macOS system files
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
