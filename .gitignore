@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# Build
+build/
+dist/
+*.spec
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Workspace
+.gemini/
+scratch/
+llama.log
+*.datarium
+crash_log.txt
+pyarmor.bug.log
+obfuscated/

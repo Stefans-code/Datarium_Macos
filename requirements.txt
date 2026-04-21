@@ -1,0 +1,8 @@
+customtkinter
+Pillow
+llama-cpp-python
+huggingface-hub
+pymupdf
+python-docx
+PyJWT
+cryptography
