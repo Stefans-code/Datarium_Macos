@@ -6,6 +6,16 @@ from io import BytesIO
 from PIL import Image, ExifTags
 from huggingface_hub import hf_hub_download
 
+# Ottimizzazione SSL per macOS (Critico per il download dei modelli)
+try:
+    import certifi
+    import platform
+    if platform.system() == "Darwin":
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+except:
+    pass
+
 class AIEngine:
     def __init__(self):
         self.llm = None

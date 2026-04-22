@@ -4,8 +4,15 @@ import sys
 # Ridirezione standard output/error per evitare crash in modalità --noconsole
 # se qualche libreria (es. tqdm/huggingface) prova a scrivere sul terminale inesistente.
 if getattr(sys, 'frozen', False):
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
+    import platform
+    if platform.system() == "Darwin":
+        # Su Mac è vitale loggare se il setup fallisce
+        log_path = os.path.join(os.path.expanduser("~"), "Desktop", "datarium_debug.log")
+        sys.stdout = open(log_path, 'a')
+        sys.stderr = open(log_path, 'a')
+    else:
+        sys.stdout = open(os.devnull, 'w')
+        sys.stderr = open(os.devnull, 'w')
 
 import customtkinter as ctk
 import os
