@@ -7,3 +7,5 @@ pymupdf
 python-docx
 PyJWT
 cryptography
+xxhash
+pillow-heif

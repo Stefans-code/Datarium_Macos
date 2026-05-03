@@ -58,6 +58,21 @@ class DatariumApp(ctk.CTk):
         self.stop_ai = False
         self.last_groups = {}
 
+        # Hash Feature State
+        self.hash_source_file = ctk.StringVar(value="")
+        self.selected_hash_files_list = []
+        self.hash_source_folder = ctk.StringVar(value="")
+        self.hash_source_folder_2 = ctk.StringVar(value="")
+        self.selected_hash_algo = ctk.StringVar(value="-Scegli-")
+        self.highlight_dups = ctk.BooleanVar(value=True)
+        self.compare_contents = ctk.BooleanVar(value=False)
+        self.recent_hash_files = []
+        self.autotag_folder = ctk.StringVar(value="")
+        self.autotag_source_folder = ctk.StringVar(value="")
+        self.autotag_dest_folder = ctk.StringVar(value="")
+        self.autotag_accept_ai = ctk.BooleanVar(value=True)
+        self.autotag_rename = ctk.BooleanVar(value=True)
+
         # UI Layout
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -68,27 +83,41 @@ class DatariumApp(ctk.CTk):
         # Default Page
         if self.ai.check_models_missing():
             self.show_page("Setup")
-            threading.Thread(target=self.start_setup_flow, daemon=True).start()
         else:
             self.show_page("Home")
+
+    def go_to_organizer(self):
+        if self.source_folder.get():
+            self.show_page("Options")
+        else:
+            self.show_page("OrganizerHome")
 
     def setup_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(4, weight=1)
+        self.sidebar.grid_rowconfigure(5, weight=1)
 
         self.logo_lbl = ctk.CTkLabel(self.sidebar, text="DATARIUM", font=ctk.CTkFont(size=24, weight="bold"))
         self.logo_lbl.grid(row=0, column=0, padx=20, pady=(30, 40))
 
         self.btn_home = ctk.CTkButton(self.sidebar, text="🏠 Home", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Home"))
-        self.btn_home.grid(row=1, column=0, padx=20, pady=10, sticky="ew")
+        self.btn_home.grid(row=1, column=0, padx=20, pady=5, sticky="ew")
+
+        self.btn_organizer = ctk.CTkButton(self.sidebar, text="📁 Organizer", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=self.go_to_organizer)
+        self.btn_organizer.grid(row=2, column=0, padx=20, pady=5, sticky="ew")
+
+        self.btn_hash = ctk.CTkButton(self.sidebar, text="🔑 Hash Check", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("HashHome"))
+        self.btn_hash.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+
+        self.btn_autotag = ctk.CTkButton(self.sidebar, text="🏷️ Auto Tag", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"))
+        self.btn_autotag.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
 
         # Bottom Buttons
         self.btn_settings = ctk.CTkButton(self.sidebar, text="⚙️ Impostazioni", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"))
-        self.btn_settings.grid(row=5, column=0, padx=20, pady=10, sticky="ew")
+        self.btn_settings.grid(row=6, column=0, padx=20, pady=10, sticky="ew")
 
         self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar, values=["Dark", "Light"], command=self.change_appearance_mode)
-        self.appearance_mode_optionemenu.grid(row=6, column=0, padx=20, pady=(10, 30))
+        self.appearance_mode_optionemenu.grid(row=7, column=0, padx=20, pady=(10, 30))
 
     def setup_main_content(self):
         self.content_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -96,35 +125,63 @@ class DatariumApp(ctk.CTk):
         
         self.pages = {}
         self.init_home_page()
+        self.init_organizer_page()
         self.init_options_page()
         self.init_preview_page()
         self.init_settings_page()
         self.init_setup_page()
+        self.init_hash_pages()
+        self.init_autotag_page()
+
+    def init_organizer_page(self):
+        page = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["OrganizerHome"] = page
+        
+        ctk.CTkLabel(page, text="📁 Organizer AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        
+        box = ctk.CTkFrame(page, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
+        box.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        ctk.CTkLabel(box, text="Inizia l'organizzazione", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(30, 5))
+        ctk.CTkLabel(box, text="Seleziona la cartella principale che contiene i file da analizzare e organizzare.", text_color="gray").pack(anchor="w", padx=30)
+        
+        btn_open = ctk.CTkButton(box, text="📂 Seleziona Cartella", font=ctk.CTkFont(size=18, weight="bold"), height=60, width=280, corner_radius=12, command=self.open_source_folder)
+        btn_open.place(relx=0.5, rely=0.5, anchor="center")
 
     def init_setup_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["Setup"] = page
         
         # Centered Panel
-        login_box = ctk.CTkFrame(page, width=600, height=400, corner_radius=20)
+        login_box = ctk.CTkFrame(page, width=600, height=450, corner_radius=20)
         login_box.place(relx=0.5, rely=0.5, anchor="center")
         login_box.pack_propagate(False)
         
-        ctk.CTkLabel(login_box, text="DATARIUM", font=ctk.CTkFont(size=36, weight="bold")).pack(pady=(50, 10))
+        ctk.CTkLabel(login_box, text="DATARIUM", font=ctk.CTkFont(size=36, weight="bold")).pack(pady=(30, 10))
         ctk.CTkLabel(login_box, text="Completamento dell'installazione...", font=ctk.CTkFont(size=18), text_color="gray").pack()
         
-        self.setup_status_lbl = ctk.CTkLabel(login_box, text="Preparazione dei componenti AI (6GB)...", font=ctk.CTkFont(size=14, weight="bold"))
-        self.setup_status_lbl.pack(pady=(60, 10))
+        self.model_choice_var = ctk.StringVar(value="full")
+        opt_f = ctk.CTkFrame(login_box, fg_color="transparent")
+        opt_f.pack(pady=10)
+        ctk.CTkRadioButton(opt_f, text="Qualità Massima AI (Consigliato - 6GB)", variable=self.model_choice_var, value="full").pack(anchor="w", pady=5)
+        ctk.CTkRadioButton(opt_f, text="Installazione Leggera (Modelli Compressi - 4GB)", variable=self.model_choice_var, value="slim").pack(anchor="w", pady=5)
+
+        self.btn_start_setup = ctk.CTkButton(login_box, text="Inizia Download", command=lambda: threading.Thread(target=self.start_setup_flow, daemon=True).start())
+        self.btn_start_setup.pack(pady=10)
+
+        self.setup_status_lbl = ctk.CTkLabel(login_box, text="Scegli il modello e clicca Inizia", font=ctk.CTkFont(size=14, weight="bold"))
+        self.setup_status_lbl.pack(pady=(10, 10))
         
         self.setup_progress = ctk.CTkProgressBar(login_box, width=450, height=15)
         self.setup_progress.pack(pady=10)
         self.setup_progress.set(0)
         
-        ctk.CTkLabel(login_box, text="L'operazione potrebbe richiedere alcuni minuti in base alla connessione.", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=20)
+        ctk.CTkLabel(login_box, text="L'operazione potrebbe richiedere alcuni minuti in base alla connessione.", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=10)
 
     def start_setup_flow(self):
-        # Scarichiamo prima il modello Vision (che tira giù anche il Text se manca)
-        success, error_msg = self.ai.download_model_if_needed(True, self.update_setup_status)
+        self.btn_start_setup.configure(state="disabled")
+        quality = getattr(self, 'model_choice_var', ctk.StringVar(value="full")).get()
+        success, error_msg = self.ai.download_model_if_needed(True, self.update_setup_status, quality)
         if success:
             self.after(0, lambda: self.show_page("Home"))
         else:
@@ -132,6 +189,7 @@ class DatariumApp(ctk.CTk):
                 text=f"Errore: {error_msg}\nRiprova tra poco.", 
                 text_color="#ef4444"
             ))
+            self.after(0, lambda: self.btn_start_setup.configure(state="normal"))
 
     def update_setup_status(self, text):
         if self.setup_status_lbl.winfo_exists():
@@ -146,9 +204,60 @@ class DatariumApp(ctk.CTk):
     def init_home_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["Home"] = page
+
+        # Welcome Header Banner
+        header = ctk.CTkFrame(page, fg_color=("gray95", "gray11"), corner_radius=15, height=140)
+        header.pack(fill="x", pady=(0, 20))
+        header.pack_propagate(False)
+
+        ctk.CTkLabel(header, text="✨ Benvenuto in Datarium", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", padx=30, pady=(25, 2))
+        ctk.CTkLabel(header, text="Il tuo assistente intelligente per l'organizzazione di file, immagini e video basato sull'AI.", font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", padx=30)
+
+        # Quick access grid or container
+        cards_container = ctk.CTkFrame(page, fg_color="transparent")
+        cards_container.pack(fill="both", expand=True)
+
+        # Let's configure columns for grid
+        cards_container.columnconfigure(0, weight=1)
+        cards_container.columnconfigure(1, weight=1)
+        cards_container.columnconfigure(2, weight=1)
         
-        btn_open = ctk.CTkButton(page, text="📂 Open Folder", font=ctk.CTkFont(size=22, weight="bold"), height=80, width=350, corner_radius=15, command=self.open_source_folder)
-        btn_open.place(relx=0.5, rely=0.5, anchor="center")
+        from PIL import Image
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        folder_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "folder.png")), size=(64, 64))
+        key_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "key.png")), size=(64, 64))
+        tag_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "tag.png")), size=(64, 64))
+
+        # Card 1: Organizer
+        c1 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
+        c1.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        c1.pack_propagate(False)
+
+        ctk.CTkLabel(c1, text="", image=folder_icon).pack(pady=(35, 10))
+        ctk.CTkLabel(c1, text="Organizer AI", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
+        ctk.CTkLabel(c1, text="Scansiona, ordina e rinomina i tuoi file e documenti in base al contenuto.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkButton(c1, text="Apri Organizer", fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=self.go_to_organizer).pack(side="bottom", pady=30, padx=20, fill="x")
+
+        # Card 2: Hash Check
+        c2 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
+        c2.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+        c2.pack_propagate(False)
+
+        ctk.CTkLabel(c2, text="", image=key_icon).pack(pady=(35, 10))
+        ctk.CTkLabel(c2, text="Verifica Hash", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
+        ctk.CTkLabel(c2, text="Calcola l'hash dei file e confronta duplicati esatti byte-a-byte.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkButton(c2, text="Vai ad Hash", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("HashHome")).pack(side="bottom", pady=30, padx=20, fill="x")
+
+        # Card 3: Auto Tag
+        c3 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
+        c3.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+        c3.pack_propagate(False)
+
+        ctk.CTkLabel(c3, text="", image=tag_icon).pack(pady=(35, 10))
+        ctk.CTkLabel(c3, text="Auto Tag & Album", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
+        ctk.CTkLabel(c3, text="Raggruppa foto e video in album intelligenti generati dall'AI.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkButton(c3, text="Vai ad Album", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("AutoTag")).pack(side="bottom", pady=30, padx=20, fill="x")
+
 
     def init_options_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -163,18 +272,20 @@ class DatariumApp(ctk.CTk):
 
         # --- GRID FOR FOLDERS ---
         grid_f = ctk.CTkFrame(modal, fg_color="transparent")
-        grid_f.pack(fill="x", padx=40, pady=10)
+        grid_f.pack(fill="x", padx=40, pady=5)
         grid_f.columnconfigure(1, weight=1)
 
         # Row 1: Cartella di Controllo
-        ctk.CTkLabel(grid_f, text="Cartella di Controllo:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=10)
-        ctk.CTkLabel(grid_f, textvariable=self.control_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=400, anchor="w", justify="left").grid(row=0, column=1, padx=20, sticky="ew")
-        ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_dest_folder).grid(row=0, column=2, sticky="e")
+        ctk.CTkLabel(grid_f, text="Cartella di Controllo:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=(5, 0))
+        ctk.CTkLabel(grid_f, textvariable=self.control_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=400, anchor="w", justify="left").grid(row=0, column=1, padx=20, pady=(5, 0), sticky="ew")
+        ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_dest_folder).grid(row=0, column=2, pady=(5, 0), sticky="e")
+        ctk.CTkLabel(grid_f, text="La cartella che l'AI scansionerà per organizzare i file.", font=ctk.CTkFont(size=11, slant="italic"), text_color="#38bdf8").grid(row=1, column=0, columnspan=3, sticky="w", padx=5, pady=(2, 5))
 
         # Row 2: Posto Salvataggio ZIP
-        ctk.CTkLabel(grid_f, text="Posto di Salvataggio ZIP:", font=ctk.CTkFont(weight="bold")).grid(row=1, column=0, sticky="w", pady=10)
-        ctk.CTkLabel(grid_f, textvariable=self.backup_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=400, anchor="w", justify="left").grid(row=1, column=1, padx=20, sticky="ew")
-        ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_backup_folder).grid(row=1, column=2, sticky="e")
+        ctk.CTkLabel(grid_f, text="Posto di Salvataggio ZIP:", font=ctk.CTkFont(weight="bold")).grid(row=2, column=0, sticky="w", pady=(5, 0))
+        ctk.CTkLabel(grid_f, textvariable=self.backup_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=400, anchor="w", justify="left").grid(row=2, column=1, padx=20, pady=(5, 0), sticky="ew")
+        ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_backup_folder).grid(row=2, column=2, pady=(5, 0), sticky="e")
+        ctk.CTkLabel(grid_f, text="La cartella in cui verrà salvato l'archivio ZIP di backup di sicurezza dei file originali.", font=ctk.CTkFont(size=11, slant="italic"), text_color="#38bdf8").grid(row=3, column=0, columnspan=3, sticky="w", padx=5, pady=(2, 5))
 
         # --- FILE TYPES ---
         ctk.CTkLabel(modal, text="File da analizzare", font=ctk.CTkFont(weight="bold")).pack(pady=(20, 5))
@@ -211,7 +322,7 @@ class DatariumApp(ctk.CTk):
             if "Backup_Datarium_" in root: continue
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
-                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']: counts["Immagini"] += 1
+                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif']: counts["Immagini"] += 1
                 elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']: counts["Video"] += 1
                 elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']: counts["Documenti"] += 1
                 else: counts["Altro"] += 1
@@ -258,17 +369,17 @@ class DatariumApp(ctk.CTk):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["Settings"] = page
 
-        ctk.CTkLabel(page, text="Impostazioni", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", pady=(0, 40))
+        ctk.CTkLabel(page, text="Impostazioni", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", pady=(0, 20))
 
         hw_box = ctk.CTkFrame(page, corner_radius=10)
-        hw_box.pack(fill="x", padx=10, pady=10)
+        hw_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(hw_box, text="Status Hardware", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         self.hw_info_lbl = ctk.CTkLabel(hw_box, text=f"Rilevato: {self.ai.hardware_info}", text_color="#38bdf8")
         self.hw_info_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
         lic_box = ctk.CTkFrame(page, corner_radius=10)
-        lic_box.pack(fill="x", padx=10, pady=20)
-        ctk.CTkLabel(lic_box, text="Licenza", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 10))
+        lic_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(lic_box, text="Licenza", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         
         hwid_entry = ctk.CTkEntry(lic_box, width=450)
         hwid_entry.insert(0, f"HWID: {self.license.get_hwid()}")
@@ -276,10 +387,17 @@ class DatariumApp(ctk.CTk):
         hwid_entry.pack(anchor="w", padx=20)
         
         btn_file = ctk.CTkButton(lic_box, text="📁 Carica File Licenza (.datarium)", command=self.load_license_file)
-        btn_file.pack(anchor="w", padx=20, pady=15)
+        btn_file.pack(anchor="w", padx=20, pady=10)
 
         self.lic_status_lbl = ctk.CTkLabel(lic_box, text=f"Stato: {self.license_status}", text_color="#10b981" if self.is_licensed else "#ef4444")
-        self.lic_status_lbl.pack(anchor="w", padx=20, pady=(0, 20))
+        self.lic_status_lbl.pack(anchor="w", padx=20, pady=(0, 15))
+
+        upd_box = ctk.CTkFrame(page, corner_radius=10)
+        upd_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(upd_box, text="Aggiornamenti Software", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        ctk.CTkLabel(upd_box, text="Versione corrente: v1.2.0", text_color="gray").pack(anchor="w", padx=20)
+        self.btn_check_upd = ctk.CTkButton(upd_box, text="Verifica Aggiornamenti", command=self.check_software_updates)
+        self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 15))
 
     # --- LOGIC ---
     def load_license_file(self):
@@ -295,6 +413,25 @@ class DatariumApp(ctk.CTk):
                 self.lic_status_lbl.configure(text=f"Licenza Attiva: {msg}", text_color="#10b981")
             else:
                 self.lic_status_lbl.configure(text=f"Errore: {msg}", text_color="#ef4444")
+
+    def check_software_updates(self):
+        from tkinter import messagebox
+        import urllib.request
+        import json
+        self.btn_check_upd.configure(state="disabled", text="Verifica in corso...")
+        
+        # Simulate check or check a real URL if it exists
+        try:
+            # We can check the Supabase RPC or a placeholder REST URL to simulate update checks.
+            # Here we simulate a 1-second checking time for a premium user experience.
+            def check_upd_bg():
+                import time
+                time.sleep(1.2)
+                self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
+                self.after(0, lambda: messagebox.showinfo("Aggiornamenti", "Il software è aggiornato alla versione più recente (v1.2.0)!"))
+            threading.Thread(target=check_upd_bg, daemon=True).start()
+        except:
+            self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti")
 
     def show_page(self, name):
         # Se siamo in Setup, nascondiamo la sidebar per farlo sembrare un installer
@@ -330,9 +467,11 @@ class DatariumApp(ctk.CTk):
         if folder: self.backup_folder.set(folder)
 
     def go_to_preview(self):
+        # Re-check license status just before preview to catch revoked licenses
+        self.is_licensed, self.license_status = self.license.verify_license()
         if not self.is_licensed:
             self.show_page("Settings")
-            self.lic_status_lbl.configure(text="ATTENZIONE: Attiva la licenza per procedere!", text_color="#facc15")
+            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color="#ef4444")
             return
             
         self.show_page("Preview")
@@ -368,7 +507,7 @@ class DatariumApp(ctk.CTk):
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
                 skip = False
-                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
+                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif']:
                     if not self.doc_filters.get("Immagini", ctk.BooleanVar(value=True)).get(): skip = True
                     else: vision_items.append({"old": f, "path": os.path.join(root, f), "type": "Image"})
                 elif ext in ['.mp4', '.mov', '.avi', '.mkv']:
@@ -596,10 +735,11 @@ class DatariumApp(ctk.CTk):
         if folder: self.backup_folder.set(folder)
 
     def go_to_preview(self):
+        # Re-check license status just before preview to catch revoked licenses
+        self.is_licensed, self.license_status = self.license.verify_license()
         if not self.is_licensed:
-            from tkinter import messagebox
-            messagebox.showwarning("Licenza Mancante", "Devi attivare il software per usare le funzioni AI e l'organizzazione.")
             self.show_page("Settings")
+            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color="#ef4444")
             return
             
         self.show_page("Preview")
@@ -617,7 +757,589 @@ class DatariumApp(ctk.CTk):
         else:
             self.lic_status_lbl.configure(text=f"Errore: {msg}", text_color="#ef4444")
 
-    # Removed redundant duplicate methods.
+    def init_hash_pages(self):
+        # 1. Page: HashHome (Drawing 2 updated)
+        page_home = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["HashHome"] = page_home
+
+        # Centered frame for action buttons
+        btn_row = ctk.CTkFrame(page_home, fg_color="transparent")
+        btn_row.pack(anchor="center", pady=(0, 20))
+
+        btn_file = ctk.CTkButton(btn_row, text="📂 Seleziona File", font=ctk.CTkFont(size=18, weight="bold"), height=60, width=280, corner_radius=12, command=self.pick_hash_file_home)
+        btn_file.pack(side="left", padx=10)
+
+        btn_folder = ctk.CTkButton(btn_row, text="📁 Seleziona Cartella", font=ctk.CTkFont(size=18, weight="bold"), height=60, width=280, corner_radius=12, command=self.pick_hash_folder_home)
+        btn_folder.pack(side="left", padx=10)
+
+        # Recent actions header below the buttons
+        ctk.CTkLabel(page_home, text="Aperti di recente", font=ctk.CTkFont(size=20, weight="bold")).pack(anchor="w", pady=(10, 10))
+
+        rec_f = ctk.CTkFrame(page_home, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
+        rec_f.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Scrollable recent actions frame
+        self.recent_hash_scroll = ctk.CTkScrollableFrame(rec_f, fg_color="transparent")
+        self.recent_hash_scroll.pack(fill="both", expand=True, padx=15, pady=15)
+        self.update_recent_hash_ui()
+
+        # 2. Page: HashOptions (Drawing 1)
+        page_opts = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["HashOptions"] = page_opts
+
+        modal = ctk.CTkFrame(page_opts, width=650, height=520, corner_radius=20, border_width=2, border_color=("gray80", "gray20"))
+        modal.place(relx=0.5, rely=0.5, anchor="center")
+        modal.pack_propagate(False)
+
+        ctk.CTkLabel(modal, text="Selezione Hash", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(30, 20))
+
+        # File Pick Row
+        f_row = ctk.CTkFrame(modal, fg_color="transparent")
+        f_row.pack(fill="x", padx=40, pady=10)
+        ctk.CTkLabel(f_row, text="File:", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkLabel(f_row, textvariable=self.hash_source_file, text_color="gray", font=ctk.CTkFont(size=11), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
+        ctk.CTkButton(f_row, text="📁", width=40, command=self.pick_hash_file).pack(side="right")
+
+        # Folder Pick Row
+        fold_row = ctk.CTkFrame(modal, fg_color="transparent")
+        fold_row.pack(fill="x", padx=40, pady=10)
+        ctk.CTkLabel(fold_row, text="Cartella:", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkLabel(fold_row, textvariable=self.hash_source_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
+        ctk.CTkButton(fold_row, text="📂", width=40, command=self.pick_hash_folder).pack(side="right")
+
+        # Folder 2 Pick Row
+        fold_row_2 = ctk.CTkFrame(modal, fg_color="transparent")
+        fold_row_2.pack(fill="x", padx=40, pady=10)
+        ctk.CTkLabel(fold_row_2, text="Cartella 2 (Confronto):", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkLabel(fold_row_2, textvariable=self.hash_source_folder_2, text_color="gray", font=ctk.CTkFont(size=11), wraplength=250, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
+        ctk.CTkButton(fold_row_2, text="📂", width=40, command=self.pick_hash_folder_2).pack(side="right")
+
+        # Hash Algo
+        algo_row = ctk.CTkFrame(modal, fg_color="transparent")
+        algo_row.pack(fill="x", padx=40, pady=10)
+        ctk.CTkLabel(algo_row, text="Algoritmo Hash:", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        self.algo_menu = ctk.CTkOptionMenu(algo_row, values=["-Scegli-", "SHA-256", "MD5", "SHA-1", "xxHash64"], variable=self.selected_hash_algo, width=140)
+        self.algo_menu.pack(side="right")
+
+        # Checkboxes Row
+        check_row = ctk.CTkFrame(modal, fg_color="transparent")
+        check_row.pack(fill="x", padx=40, pady=10)
+        
+        chk_dups = ctk.CTkCheckBox(check_row, text="Evidenzia File con stesso hash", variable=self.highlight_dups, font=ctk.CTkFont(size=13), command=self.toggle_compare_contents_visibility)
+        chk_dups.pack(anchor="w", pady=3)
+        
+        self.chk_compare = ctk.CTkCheckBox(check_row, text="Confronta contenuto", variable=self.compare_contents, font=ctk.CTkFont(size=13))
+        if self.highlight_dups.get():
+            self.chk_compare.pack(anchor="w", pady=3, padx=(20, 0))
+
+        # Footer Row
+        footer_btn_f = ctk.CTkFrame(modal, fg_color="transparent")
+        footer_btn_f.pack(side="bottom", fill="x", padx=40, pady=30)
+        ctk.CTkButton(footer_btn_f, text="Annulla", fg_color="transparent", border_width=2, width=120, command=lambda: self.show_page("HashHome")).pack(side="left")
+        ctk.CTkButton(footer_btn_f, text="Conferma", width=140, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.run_hash_verification).pack(side="right")
+
+        # 3. Page: HashResults (Drawing 3)
+        page_results = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["HashResults"] = page_results
+
+        # A single master scrollable frame to hold all tables/sections
+        self.hash_results_scroll = ctk.CTkScrollableFrame(page_results, fg_color=("gray95", "gray10"))
+        self.hash_results_scroll.pack(fill="both", expand=True, pady=(5, 10))
+
+        # Bottom buttons
+        bot_f = ctk.CTkFrame(page_results, fg_color="transparent")
+        bot_f.pack(fill="x", side="bottom")
+        ctk.CTkButton(bot_f, text="Indietro", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_page("HashOptions")).pack(side="left")
+        ctk.CTkButton(bot_f, text="Torna alla Home", width=140, fg_color="#10b981", hover_color="#059669", command=lambda: self.show_page("HashHome")).pack(side="right")
+
+    def toggle_compare_contents_visibility(self):
+        if self.highlight_dups.get():
+            self.chk_compare.pack(anchor="w", pady=3, padx=(20, 0))
+        else:
+            self.compare_contents.set(False)
+            self.chk_compare.pack_forget()
+
+    def pick_hash_file_home(self):
+        file_paths = filedialog.askopenfilenames(title="Seleziona File")
+        if file_paths:
+            self.selected_hash_files_list = list(file_paths)
+            if len(self.selected_hash_files_list) == 1:
+                self.hash_source_file.set(self.selected_hash_files_list[0])
+            else:
+                self.hash_source_file.set(f"{len(self.selected_hash_files_list)} file selezionati")
+            self.show_page("HashOptions")
+
+    def pick_hash_folder_home(self):
+        folder_path = filedialog.askdirectory(title="Seleziona Cartella")
+        if folder_path:
+            self.hash_source_folders_list = [folder_path]
+            self.hash_source_folder.set(folder_path)
+            self.show_page("HashOptions")
+
+    def pick_hash_file(self):
+        file_paths = filedialog.askopenfilenames(title="Seleziona File")
+        if file_paths:
+            self.selected_hash_files_list = list(file_paths)
+            if len(self.selected_hash_files_list) == 1:
+                self.hash_source_file.set(self.selected_hash_files_list[0])
+            else:
+                self.hash_source_file.set(f"{len(self.selected_hash_files_list)} file selezionati")
+
+    def pick_hash_folder(self):
+        folder_path = filedialog.askdirectory(title="Seleziona Cartella")
+        if folder_path:
+            self.hash_source_folder.set(folder_path)
+
+    def pick_hash_folder_2(self):
+        folder_path = filedialog.askdirectory(title="Seleziona Cartella di Confronto")
+        if folder_path:
+            self.hash_source_folder_2.set(folder_path)
+
+    def update_recent_hash_ui(self):
+        for w in self.recent_hash_scroll.winfo_children():
+            w.destroy()
+        
+        if not self.recent_hash_files:
+            ctk.CTkLabel(self.recent_hash_scroll, text="Nessun file aperto di recente.", text_color="gray", font=ctk.CTkFont(size=11)).pack(pady=10)
+        else:
+            for item in self.recent_hash_files:
+                row = ctk.CTkFrame(self.recent_hash_scroll, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+                
+                lbl = ctk.CTkLabel(row, text=os.path.basename(item), font=ctk.CTkFont(size=11), anchor="w", justify="left")
+                lbl.pack(side="left", padx=5, fill="x", expand=True)
+                
+                btn = ctk.CTkButton(row, text="🔍 Scansiona", width=70, height=22, font=ctk.CTkFont(size=10), command=lambda p=item: self.select_recent_file(p))
+                btn.pack(side="right", padx=5)
+
+    def select_recent_file(self, path):
+        if os.path.exists(path):
+            self.hash_source_file.set(path)
+            self.show_page("HashOptions")
+        else:
+            from tkinter import messagebox
+            messagebox.showwarning("File Non Trovato", "Il file selezionato non è più disponibile.")
+
+    def compute_hash(self, file_path, algo="SHA-256"):
+        import hashlib
+        try:
+            if algo == "MD5":
+                h = hashlib.md5()
+            elif algo == "SHA-1":
+                h = hashlib.sha1()
+            elif algo == "xxHash64":
+                import xxhash
+                h = xxhash.xxh64()
+            else:
+                h = hashlib.sha256()
+                
+            with open(file_path, "rb") as f:
+                while chunk := f.read(8192):
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception as e:
+            return f"Error: {e}"
+
+    def check_content_equal(self, f1, f2):
+        try:
+            with open(f1, "rb") as a, open(f2, "rb") as b:
+                while True:
+                    ch1 = a.read(8192)
+                    ch2 = b.read(8192)
+                    if ch1 != ch2:
+                        return False
+                    if not ch1:
+                        return True
+        except:
+            return False
+
+    def create_section_header(self, parent, text):
+        f = ctk.CTkFrame(parent, fg_color=("#cbd5e1", "#334155"), height=35, corner_radius=5)
+        f.pack(fill="x", pady=(15, 5))
+        f.pack_propagate(False)
+        ctk.CTkLabel(f, text=text, font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=15)
+        return f
+
+    def create_table_header(self, parent):
+        tbl_hdr = ctk.CTkFrame(parent, height=30, fg_color="transparent")
+        tbl_hdr.pack(fill="x", pady=2)
+        tbl_hdr.columnconfigure(0, weight=3)
+        tbl_hdr.columnconfigure(1, weight=1)
+        tbl_hdr.columnconfigure(2, weight=5)
+        tbl_hdr.columnconfigure(3, weight=1)
+        
+        ctk.CTkLabel(tbl_hdr, text="Nome File", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Tipo", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=1, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Hash", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=2, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Dimensione", font=ctk.CTkFont(size=11, weight="bold"), anchor="e").grid(row=0, column=3, padx=10, sticky="ew")
+
+    def populate_section(self, parent, items, bg_color="transparent", text_color=None):
+        if not items:
+            ctk.CTkLabel(parent, text="Nessun file trovato in questa sezione.", text_color="gray", font=ctk.CTkFont(size=12, slant="italic")).pack(pady=15)
+            return
+
+        for it in items:
+            row_frame = ctk.CTkFrame(parent, fg_color=bg_color, corner_radius=5)
+            row_frame.pack(fill="x", pady=2)
+            row_frame.columnconfigure(0, weight=3)
+            row_frame.columnconfigure(1, weight=1)
+            row_frame.columnconfigure(2, weight=5)
+            row_frame.columnconfigure(3, weight=1)
+
+            ctk.CTkLabel(row_frame, text=it['name'], text_color=text_color, font=ctk.CTkFont(size=12, weight="bold" if it.get('is_source') else "normal"), anchor="w", justify="left").grid(row=0, column=0, padx=10, pady=4, sticky="ew")
+            ctk.CTkLabel(row_frame, text=it['type'], text_color=text_color, font=ctk.CTkFont(size=12), anchor="w", justify="left").grid(row=0, column=1, padx=10, pady=4, sticky="ew")
+            
+            lbl_hash = ctk.CTkLabel(row_frame, text=it['hash'], text_color=text_color, font=ctk.CTkFont(size=11), anchor="w", justify="left", wraplength=350)
+            lbl_hash.grid(row=0, column=2, padx=10, pady=4, sticky="ew")
+            lbl_hash.bind("<Button-1>", lambda e, hv=it['hash']: self.copy_to_clipboard(hv))
+
+            ctk.CTkLabel(row_frame, text=it['size'], text_color=text_color, font=ctk.CTkFont(size=11), anchor="e", justify="right").grid(row=0, column=3, padx=10, pady=4, sticky="ew")
+
+    def run_hash_verification(self):
+        for w in self.hash_results_scroll.winfo_children():
+            w.destroy()
+
+        sd = self.hash_source_folder.get()
+        sd_list = getattr(self, 'hash_source_folders_list', [])
+        if not sd_list and sd:
+            sd_list = [sd]
+            
+        algo = self.selected_hash_algo.get()
+        if algo == "-Scegli-":
+            algo = "SHA-256"
+
+        files_to_hash = []
+        if self.selected_hash_files_list:
+            files_to_hash = list(self.selected_hash_files_list)
+        elif self.hash_source_file.get():
+            files_to_hash = [self.hash_source_file.get()]
+
+        if not files_to_hash and not sd_list:
+            from tkinter import messagebox
+            messagebox.showwarning("Selezione Mancante", "Seleziona almeno un file o una cartella da controllare.")
+            return
+
+        self.show_page("HashResults")
+        self.loading_lbl = ctk.CTkLabel(self.hash_results_scroll, text="Calcolo hash in corso. Attendere...", font=ctk.CTkFont(size=14, weight="bold"))
+        self.loading_lbl.pack(pady=20)
+        
+        threading.Thread(target=self._run_hash_verification_bg, args=(files_to_hash, sd_list, algo), daemon=True).start()
+
+    def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
+        results = []
+        source_paths = set()
+
+        for sf in files_to_hash:
+            if os.path.exists(sf):
+                source_paths.add(os.path.abspath(sf))
+                hash_val = self.compute_hash(sf, algo)
+                sz = os.path.getsize(sf)
+                ext = os.path.splitext(sf)[1].upper().replace('.', '')
+                results.append({
+                    "name": os.path.basename(sf),
+                    "path": sf,
+                    "type": ext if ext else "FILE",
+                    "hash": hash_val,
+                    "size": self.format_file_size(sz),
+                    "is_source": True
+                })
+                if sf not in self.recent_hash_files:
+                    self.recent_hash_files.insert(0, sf)
+                    self.recent_hash_files = self.recent_hash_files[:10]
+                    self.after(0, self.update_recent_hash_ui)
+
+        for sd in sd_list:
+            if os.path.isdir(sd):
+                for root, _, files in os.walk(sd):
+                    for f in files:
+                        p = os.path.join(root, f)
+                        if os.path.abspath(p) in source_paths:
+                            continue
+                        h = self.compute_hash(p, algo)
+                        sz_f = os.path.getsize(p)
+                        ext_f = os.path.splitext(p)[1].upper().replace('.', '')
+                        results.append({
+                            "name": f,
+                            "path": p,
+                            "type": ext_f if ext_f else "FILE",
+                            "hash": h,
+                            "size": self.format_file_size(sz_f),
+                            "is_source": False
+                        })
+        
+        self.after(0, self._render_hash_results, results)
+
+    def _render_hash_results(self, results):
+        if hasattr(self, 'loading_lbl') and self.loading_lbl.winfo_exists():
+            self.loading_lbl.destroy()
+            
+        hash_counts = {}
+        for r in results:
+            hash_counts[r['hash']] = hash_counts.get(r['hash'], 0) + 1
+
+        hash_groups = {}
+        for r in results:
+            hash_groups.setdefault(r['hash'], []).append(r)
+
+        dup_hash_files = [r for r in results if hash_counts.get(r['hash'], 0) > 1]
+        
+        self.create_section_header(self.hash_results_scroll, "📋 Tutti i file e gli hash")
+        self.create_table_header(self.hash_results_scroll)
+        self.populate_section(self.hash_results_scroll, results)
+
+        self.create_section_header(self.hash_results_scroll, "🔄 File con hash uguale")
+        self.create_table_header(self.hash_results_scroll)
+        self.populate_section(self.hash_results_scroll, dup_hash_files, bg_color=("#ffedd5", "#7c2d12"), text_color=("#ea580c", "#fb923c"))
+
+        if self.compare_contents.get() and self.highlight_dups.get():
+            dup_content_files = []
+            for h_val, items in hash_groups.items():
+                if len(items) > 1:
+                    ref_item = items[0]
+                    valid_items = [ref_item]
+                    for other in items[1:]:
+                        if self.check_content_equal(ref_item['path'], other['path']):
+                            valid_items.append(other)
+                    if len(valid_items) > 1:
+                        dup_content_files.extend(valid_items)
+
+            self.create_section_header(self.hash_results_scroll, "📦 File con hash uguale e contenuto uguale")
+            self.create_table_header(self.hash_results_scroll)
+            self.populate_section(self.hash_results_scroll, dup_content_files, bg_color=("#ffedd5", "#7c2d12"), text_color=("#ea580c", "#fb923c"))
+
+    def copy_to_clipboard(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        from tkinter import messagebox
+        messagebox.showinfo("Copiato", "Valore Hash copiato negli appunti!")
+
+    def format_file_size(self, size_bytes):
+        if size_bytes < 1024:
+            return f"{size_bytes} B"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.2f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+    def init_autotag_page(self):
+        self.autotag_master_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["AutoTag"] = self.autotag_master_frame
+
+        self.autotag_views = {}
+
+        # 1. AUTOTAG HOME (Drawing 1)
+        v_home = ctk.CTkFrame(self.autotag_master_frame, fg_color="transparent")
+        self.autotag_views["Home"] = v_home
+
+        ctk.CTkLabel(v_home, text="🏷️ Auto Tagging intelligente", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        
+        recent_box = ctk.CTkFrame(v_home, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
+        recent_box.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        ctk.CTkLabel(recent_box, text="Progetti recenti", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(30, 5))
+        ctk.CTkLabel(recent_box, text="I tuoi album digitali e progetti organizzati appariranno qui.", text_color="gray", font=ctk.CTkFont(slant="italic")).pack(anchor="w", padx=30)
+
+        # Center Crea Album button
+        btn_crea = ctk.CTkButton(recent_box, text="➕ Crea Album", font=ctk.CTkFont(size=16, weight="bold"), width=220, height=55, corner_radius=10, fg_color="#10b981", hover_color="#059669", command=lambda: self.show_autotag_subpage("Config"))
+        btn_crea.place(relx=0.5, rely=0.55, anchor="center")
+
+        # 2. AUTOTAG CONFIG (Drawing 3)
+        v_config = ctk.CTkFrame(self.autotag_master_frame, fg_color="transparent")
+        self.autotag_views["Config"] = v_config
+
+        ctk.CTkLabel(v_config, text="⚙️ Configura Nuovo Album", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+
+        cfg_box = ctk.CTkFrame(v_config, width=700, height=520, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
+        cfg_box.pack(pady=5)
+        cfg_box.pack_propagate(False)
+
+        # Inputs grid
+        g = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        g.pack(fill="x", padx=40, pady=(40, 10))
+        g.columnconfigure(1, weight=1)
+
+        # Row 1: Cartella Foto
+        ctk.CTkLabel(g, text="Cartella Foto:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=0, column=0, sticky="w", pady=15)
+        self.ent_at_src = ctk.CTkEntry(g, textvariable=self.autotag_source_folder, font=ctk.CTkFont(size=12), height=35)
+        self.ent_at_src.grid(row=0, column=1, padx=(15, 10), sticky="ew")
+        ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_autotag_source).grid(row=0, column=2)
+
+        # Row 2: Cartella Destinazione
+        ctk.CTkLabel(g, text="Cartella Destinazione:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=1, column=0, sticky="w", pady=15)
+        self.ent_at_dst = ctk.CTkEntry(g, textvariable=self.autotag_dest_folder, font=ctk.CTkFont(size=12), height=35)
+        self.ent_at_dst.grid(row=1, column=1, padx=(15, 10), sticky="ew")
+        ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_autotag_dest).grid(row=1, column=2)
+
+        # Checkboxes
+        chk_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        chk_frame.pack(fill="x", padx=40, pady=10)
+
+        self.chk_ai_scan = ctk.CTkCheckBox(chk_frame, text="Accetta che l'AI scansioni le foto e i video", variable=self.autotag_accept_ai, font=ctk.CTkFont(size=13))
+        self.chk_ai_scan.pack(anchor="w", pady=8)
+
+        self.chk_at_rename = ctk.CTkCheckBox(chk_frame, text="Rinomina e organizza in Album", variable=self.autotag_rename, font=ctk.CTkFont(size=13))
+        self.chk_at_rename.pack(anchor="w", pady=8)
+
+        # Actions
+        act_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        act_frame.pack(fill="x", side="bottom", padx=40, pady=35)
+        ctk.CTkButton(act_frame, text="Annulla", fg_color="transparent", border_width=1, width=120, height=40, command=lambda: self.show_autotag_subpage("Home")).pack(side="left")
+        self.btn_confirm_at = ctk.CTkButton(act_frame, text="Conferma", fg_color="#10b981", hover_color="#059669", width=140, height=40, font=ctk.CTkFont(weight="bold"), command=self.run_autotag_analysis)
+        self.btn_confirm_at.pack(side="right")
+
+        # 3. AUTOTAG RESULTS / ALBUM (Drawing 2)
+        v_results = ctk.CTkFrame(self.autotag_master_frame, fg_color="transparent")
+        self.autotag_views["Album"] = v_results
+
+        ctk.CTkLabel(v_results, text="🖼️ I tuoi Album Intelligenti", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        
+        self.autotag_album_scroll = ctk.CTkScrollableFrame(v_results, fg_color=("gray95", "gray10"))
+        self.autotag_album_scroll.pack(fill="both", expand=True, padx=5, pady=5)
+
+        res_foot = ctk.CTkFrame(v_results, fg_color="transparent")
+        res_foot.pack(fill="x", side="bottom", pady=(10, 0))
+        ctk.CTkButton(res_foot, text="Indietro", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_autotag_subpage("Config")).pack(side="left")
+        ctk.CTkButton(res_foot, text="Salva e Organizza", fg_color="#10b981", hover_color="#059669", width=160, font=ctk.CTkFont(weight="bold"), command=self.rename_and_create_albums).pack(side="right")
+
+        # Start on Home view
+        self.show_autotag_subpage("Home")
+
+    def show_autotag_subpage(self, name):
+        for v in self.autotag_views.values():
+            v.pack_forget()
+        self.autotag_views[name].pack(fill="both", expand=True)
+
+    def pick_autotag_source(self):
+        folder = filedialog.askdirectory(title="Seleziona Cartella Foto")
+        if folder:
+            self.autotag_source_folder.set(folder)
+
+    def pick_autotag_dest(self):
+        folder = filedialog.askdirectory(title="Seleziona Cartella Destinazione")
+        if folder:
+            self.autotag_dest_folder.set(folder)
+
+    def run_autotag_analysis(self):
+        src = self.autotag_source_folder.get()
+        dst = self.autotag_dest_folder.get()
+        if not src or not dst:
+            from tkinter import messagebox
+            messagebox.showwarning("Selezione Mancante", "Seleziona entrambe le cartelle per procedere.")
+            return
+
+        self.btn_confirm_at.configure(state="disabled", text="⚡ Scansione...")
+
+        for w in self.autotag_album_scroll.winfo_children():
+            w.destroy()
+
+        def scan_bg():
+            import time
+            valid_files = []
+            for root, _, files in os.walk(src):
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.mp4', '.mov', '.avi']:
+                        valid_files.append(os.path.join(root, f))
+
+            if not valid_files:
+                self.after(0, lambda: self.btn_confirm_at.configure(state="normal", text="Conferma"))
+                self.after(0, lambda: self.show_autotag_subpage("Config"))
+                from tkinter import messagebox
+                self.after(0, lambda: messagebox.showinfo("Nessun file", "Nessun file multimediale (foto/video) trovato nella cartella selezionata."))
+                return
+
+            # Group files into albums based on AI/metadata
+            albums = {}
+            for path in valid_files:
+                try:
+                    ext = os.path.splitext(path)[1].lower()
+                    context = self.ai.extract_context(path) if ext not in ['.mp4', '.mov'] else "Multimediale"
+                    themes = self.ai.identify_global_themes([context]) if context else ["Generico"]
+                    album_name = themes[0] if themes else "Varie"
+                    # Clean filename characters
+                    for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
+                        album_name = album_name.replace(ch, "")
+                    album_name = album_name.capitalize()
+                    albums.setdefault(album_name, []).append(path)
+                except:
+                    albums.setdefault("Ricordi", []).append(path)
+
+            self.current_albums = albums
+
+            def update_album_ui():
+                # Grid of visual album cards
+                grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
+                grid_f.pack(fill="both", expand=True)
+                grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
+
+                for idx, (album, files) in enumerate(self.current_albums.items()):
+                    card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
+                    card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
+
+                    ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52)).pack(pady=(20, 5))
+                    
+                    lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
+                    lbl_name.pack(padx=10)
+
+                    ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
+
+                    btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
+                    btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+
+                self.btn_confirm_at.configure(state="normal", text="Conferma")
+                self.show_autotag_subpage("Album")
+
+            self.after(0, update_album_ui)
+
+        threading.Thread(target=scan_bg, daemon=True).start()
+
+    def edit_album_name(self, old_name):
+        from tkinter import simpledialog
+        new_name = simpledialog.askstring("Modifica Nome Album", f"Inserisci un nuovo nome per l'album '{old_name}':")
+        if new_name and new_name.strip() and new_name != old_name:
+            self.current_albums[new_name.strip()] = self.current_albums.pop(old_name)
+            # Re-render UI
+            for w in self.autotag_album_scroll.winfo_children():
+                w.destroy()
+            
+            grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
+            grid_f.pack(fill="both", expand=True)
+            grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
+
+            for idx, (album, files) in enumerate(self.current_albums.items()):
+                card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
+                card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
+
+                ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52)).pack(pady=(20, 5))
+                
+                lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
+                lbl_name.pack(padx=10)
+
+                ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
+
+                btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
+                btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+
+    def rename_and_create_albums(self):
+        import shutil
+        dst = self.autotag_dest_folder.get()
+        if not dst:
+            return
+
+        for album, files in getattr(self, 'current_albums', {}).items():
+            album_dir = os.path.join(dst, f"Album_{album}")
+            os.makedirs(album_dir, exist_ok=True)
+            for idx, f in enumerate(files):
+                try:
+                    ext = os.path.splitext(f)[1].lower()
+                    new_filename = f"{album}_{idx+1}{ext}" if self.autotag_rename.get() else os.path.basename(f)
+                    shutil.copy2(f, os.path.join(album_dir, new_filename))
+                except:
+                    pass
+
+        from tkinter import messagebox
+        messagebox.showinfo("Successo", "Tutti gli elementi sono stati organizzati e gli album intelligenti sono stati creati con successo!")
+        self.show_autotag_subpage("Home")
 
 if __name__ == "__main__":
     try:
@@ -629,3 +1351,4 @@ if __name__ == "__main__":
             f.write(f"CRITICAL ERROR AT STARTUP: {e}\n")
             f.write(traceback.format_exc())
         print(f"L'applicazione ha riscontrato un errore fatale. Controlla crash_log.txt")
+

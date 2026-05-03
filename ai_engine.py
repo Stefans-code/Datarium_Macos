@@ -4,6 +4,11 @@ import hashlib
 import base64
 from io import BytesIO
 from PIL import Image, ExifTags
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    pass
 from huggingface_hub import hf_hub_download
 
 # Ottimizzazione SSL per macOS (Critico per il download dei modelli)
@@ -78,16 +83,22 @@ class AIEngine:
         except:
             return True
 
-    def download_model_if_needed(self, vision_mode=True, progress_callback=None):
+    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality="full"):
         """Ora ritorna (True/False, error_msg) per una gestione UI migliore."""
         try:
             models_dir = self.get_models_dir()
             
             tasks = []
-            tasks.append((self.text_repo, self.text_file))
-            if vision_mode:
-                tasks.append((self.vision_repo, self.vision_file))
-                tasks.append((self.vision_repo, self.vision_projector))
+            if quality == "slim":
+                tasks.append((self.text_repo, "phi-2.Q2_K.gguf"))
+                if vision_mode:
+                    tasks.append((self.vision_repo, "llava-v1.5-7b-Q2_K.gguf"))
+                    tasks.append((self.vision_repo, self.vision_projector))
+            else:
+                tasks.append((self.text_repo, self.text_file))
+                if vision_mode:
+                    tasks.append((self.vision_repo, self.vision_file))
+                    tasks.append((self.vision_repo, self.vision_projector))
 
             for repo, filename in tasks:
                 # Fallback slim names
@@ -208,7 +219,7 @@ class AIEngine:
         except Exception as e: print(f"Doc extraction error: {e}")
 
         # 2. IMMAGINI (Visione Profonda)
-        if ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp"] and self.is_vision:
+        if ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"] and self.is_vision:
             try:
                 img = Image.open(file_path)
                 img.thumbnail((448, 448)) # Risoluzione ideale per LLaVA 1.5
@@ -317,9 +328,17 @@ New Path:"""
         except Exception as e:
             return f"{category}/{original_name}"
             
-    def compute_file_hash(self, file_path):
-        hasher = hashlib.md5()
+    def compute_file_hash(self, file_path, algo="MD5"):
         try:
+            if algo == "MD5":
+                hasher = hashlib.md5()
+            elif algo == "SHA-1":
+                hasher = hashlib.sha1()
+            elif algo == "xxHash64":
+                import xxhash
+                hasher = xxhash.xxh64()
+            else:
+                hasher = hashlib.sha256()
             with open(file_path, 'rb') as afile:
                 buf = afile.read(65536)
                 while len(buf) > 0:
