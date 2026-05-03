@@ -28,8 +28,9 @@ jobs:
         
     - name: Build with PyInstaller
       run: |
-        # Creiamo la cartella obfuscated 
-        python -m pyarmor.cli gen -O obfuscated main.py ai_engine.py license_manager.py
+        # Invece di PyArmor (che ha limiti di dimensione file per la versione trial), usiamo i file originali
+        mkdir -p obfuscated
+        cp main.py ai_engine.py license_manager.py obfuscated/
         cp icon.ico obfuscated/icon.ico
         
         # Bundling
@@ -51,6 +52,7 @@ jobs:
           --hidden-import jwt \
           --hidden-import cryptography \
           --add-data "icon.ico:." \
+          --add-data "assets:assets" \
           --add-data "obfuscated/ai_engine.py:." \
           --add-data "obfuscated/license_manager.py:." \
           --name "Datarium" \
