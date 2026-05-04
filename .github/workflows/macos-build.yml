@@ -78,14 +78,3 @@ jobs:
       with:
         name: Datarium-macOS-DMG
         path: dist/Datarium_Mac_Universal.dmg
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
-      with:
-        files: dist/Datarium_Mac_Universal.dmg
-        name: Datarium Mac Latest
-        tag_name: latest
-        body: "Automated build of Datarium for macOS."
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
