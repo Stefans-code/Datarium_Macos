@@ -1,6 +1,7 @@
 import os
 import sys
 
+# Trigger GitHub Action build for nexflamma.net
 # Ridirezione standard output/error per evitare crash in modalità --noconsole
 # se qualche libreria (es. tqdm/huggingface) prova a scrivere sul terminale inesistente.
 if getattr(sys, 'frozen', False):
@@ -418,20 +419,33 @@ class DatariumApp(ctk.CTk):
         from tkinter import messagebox
         import urllib.request
         import json
+        import webbrowser
         self.btn_check_upd.configure(state="disabled", text="Verifica in corso...")
         
-        # Simulate check or check a real URL if it exists
-        try:
-            # We can check the Supabase RPC or a placeholder REST URL to simulate update checks.
-            # Here we simulate a 1-second checking time for a premium user experience.
-            def check_upd_bg():
-                import time
-                time.sleep(1.2)
+        def check_upd_bg():
+            current_version = "1.2.0"
+            try:
+                url = "https://nexflamma.net/version.json"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    data = json.loads(response.read().decode())
+                    remote_version = data.get("version", "1.2.0")
+                    download_url = data.get("download_url", "")
+                    changelog = data.get("changelog", "Miglioramenti generali.")
+
+                    self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
+                    
+                    if remote_version > current_version:
+                        msg = f"Una nuova versione di Datarium è disponibile: v{remote_version}!\n\nChangelog:\n{changelog}\n\nVuoi scaricarla ora?"
+                        if messagebox.askyesno("Nuovo Aggiornamento Disponibile", msg):
+                            webbrowser.open(download_url)
+                    else:
+                        self.after(0, lambda: messagebox.showinfo("Aggiornamenti", f"Il software è aggiornato alla versione più recente (v{current_version})!"))
+            except Exception as e:
                 self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
-                self.after(0, lambda: messagebox.showinfo("Aggiornamenti", "Il software è aggiornato alla versione più recente (v1.2.0)!"))
-            threading.Thread(target=check_upd_bg, daemon=True).start()
-        except:
-            self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti")
+                self.after(0, lambda: messagebox.showerror("Errore", f"Impossibile verificare gli aggiornamenti: {e}"))
+
+        threading.Thread(target=check_upd_bg, daemon=True).start()
 
     def show_page(self, name):
         # Se siamo in Setup, nascondiamo la sidebar per farlo sembrare un installer
