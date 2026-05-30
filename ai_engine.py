@@ -253,17 +253,17 @@ class AIEngine:
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 data_url = f"data:image/jpeg;base64,{img_str}"
                 
-                # Prompt intelligente che fonde Visione e Metadati
+                # Prompt intelligente che fonde Visione e Metadati con identificazione persone
                 hint = f"Note: This file was created on {metadata.get('DateTimeOriginal', 'unknown date')}." if metadata else ""
                 
                 response = self.llm.create_chat_completion(
                     messages=[
                         {"role": "user", "content": [
-                            {"type": "text", "text": "Describe this image with focus on main objects and context for archiving purposes."},
+                            {"type": "text", "text": "Describe this image for archiving. Identify if there are any people (specify gender, approximate age, clothing, or facial expressions if visible), their key actions, main objects, settings/background, and context."},
                             {"type": "image_url", "image_url": {"url": data_url}}
                         ]}
                     ],
-                    max_tokens=50,
+                    max_tokens=80,
                     temperature=0.1
                 )
                 return f"IMAGE_DESC: {response['choices'][0]['message']['content'].strip()}{meta_str}"
@@ -316,19 +316,25 @@ Taxonomy:"""
         context_str = f"\nContext: {context}" if context else ""
         taxo_str = f"\nAllowed Taxonomy: {taxonomy}" if taxonomy else ""
         
-        prompt = f"""Instruct: You are an expert archivist. Rename the file into: CATEGORY/SUBCATEGORY/FILENAME.
-Rules:
-- Filename must be descriptive but MAX 5 WORDS.
-- Detailed and professional.
-- No extensions. Underscores only.
-- Format: Category/Subcategory/Smart_Name_Of_Five_Words
-- Use Allowed Taxonomy.
+        prompt = f"""Instruct: Sei un archivista esperto. Rinomina il file nel formato esatto: CATEGORIA/SOTTOCATEGORIA/NOME_DESCRITTIVO
+Regole fondamentali:
+1. Il NOME_DESCRITTIVO finale deve essere in ITALIANO, molto chiaro, sensato e descrittivo.
+2. Usa al massimo 4 o 5 parole per il NOME_DESCRITTIVO, separate esclusivamente da trattini bassi (_) (esempio: Uomo_Camicia_Blu_Soridente).
+3. Identifica le persone se presenti nel contesto (es. uomo, donna, bambini) e includile nel nome in modo naturale.
+4. Non usare caratteri speciali, lettere accentate o estensioni.
+5. Usa la tassonomia consentita se fornita.
+6. Ritorna SOLO E SOLTANTO la stringa nel formato 'Categoria/Subcategory/Nome_Del_File'. Nessun altro testo.
 
-Examples:
+Esempi:
 Original: image_801.jpg
-Context: Family photo at the Eiffel Tower, summer 2023.
+Context: Foto di famiglia sotto la Torre Eiffel, estate 2023, due genitori e un bambino.
 Taxonomy: Viaggi(Francia)
 New Path: Viaggi/Francia/Famiglia_Sotto_Torre_Eiffel_2023
+
+Original: photo_12.png
+Context: Un uomo anziano con gli occhiali che legge un libro in biblioteca.
+Taxonomy: Persone(Ritratti)
+New Path: Persone/Ritratti/Uomo_Anziano_Legge_Libro
 
 Original: {original_name} (Type: {category}){context_str}{taxo_str}
 New Path:"""
