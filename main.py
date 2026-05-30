@@ -323,8 +323,20 @@ class DatariumApp(ctk.CTk):
             if "Backup_Datarium_" in root: continue
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
-                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico', '.heic', '.heif', '.svg', '.psd', '.nef', '.cr2', '.cr3', '.arw', '.dng', '.orf', '.rw2', '.pef', '.raf', '.srw', '.srf', '.sr2', '.kdc', '.dcr', '.raw', '.erf', '.mef', '.mos', '.mrw', '.3fr', '.fff']: counts["Immagini"] += 1
-                elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.f4v', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp', '.3g2', '.ts', '.mts', '.m2ts', '.vob', '.ogv', '.divx', '.asf', '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm']: counts["Video"] += 1
+                if ext in [
+                    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico', '.heic', '.heif', '.svg', '.avif', '.jxl',
+                    '.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2', '.dng', '.raf', '.rw2', '.raw', '.orf', '.ori', 
+                    '.rwl', '.pef', '.ptx', '.cap', '.iiq', '.eip', '.3fr', '.fff', '.dcr', '.kdc', '.dcs', '.drf', '.k25', '.mrw', 
+                    '.srw', '.bay', '.x3f', '.erf', '.mef', '.mos', '.pxn', '.gpr', '.rwz', '.obm', '.qtk', '.rdc', '.mdc',
+                    '.psd', '.psb', '.ai', '.indd', '.cdr', '.xcf', '.afphoto', '.afdesign', '.afpub', '.sketch', '.fig', '.kra', 
+                    '.clip', '.lip', '.pspimage', '.psp', '.qxp', '.dwg', '.dxf', '.eps', '.ps',
+                    '.obj', '.fbx', '.stl', '.blend', '.c4d', '.max', '.ma', '.mb', '.3ds', '.gltf', '.glb'
+                ]: counts["Immagini"] += 1
+                elif ext in [
+                    '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.f4v', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp', '.3g2', 
+                    '.ts', '.mts', '.m2ts', '.vob', '.ogv', '.divx', '.asf',
+                    '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm', '.mcw'
+                ]: counts["Video"] += 1
                 elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']: counts["Documenti"] += 1
                 else: counts["Altro"] += 1
                 
@@ -521,10 +533,22 @@ class DatariumApp(ctk.CTk):
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
                 skip = False
-                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico', '.heic', '.heif', '.svg', '.psd', '.nef', '.cr2', '.cr3', '.arw', '.dng', '.orf', '.rw2', '.pef', '.raf', '.srw', '.srf', '.sr2', '.kdc', '.dcr', '.raw', '.erf', '.mef', '.mos', '.mrw', '.3fr', '.fff']:
+                if ext in [
+                    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico', '.heic', '.heif', '.svg', '.avif', '.jxl',
+                    '.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2', '.dng', '.raf', '.rw2', '.raw', '.orf', '.ori', 
+                    '.rwl', '.pef', '.ptx', '.cap', '.iiq', '.eip', '.3fr', '.fff', '.dcr', '.kdc', '.dcs', '.drf', '.k25', '.mrw', 
+                    '.srw', '.bay', '.x3f', '.erf', '.mef', '.mos', '.pxn', '.gpr', '.rwz', '.obm', '.qtk', '.rdc', '.mdc',
+                    '.psd', '.psb', '.ai', '.indd', '.cdr', '.xcf', '.afphoto', '.afdesign', '.afpub', '.sketch', '.fig', '.kra', 
+                    '.clip', '.lip', '.pspimage', '.psp', '.qxp', '.dwg', '.dxf', '.eps', '.ps',
+                    '.obj', '.fbx', '.stl', '.blend', '.c4d', '.max', '.ma', '.mb', '.3ds', '.gltf', '.glb'
+                ]:
                     if not self.doc_filters.get("Immagini", ctk.BooleanVar(value=True)).get(): skip = True
                     else: vision_items.append({"old": f, "path": os.path.join(root, f), "type": "Image"})
-                elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.f4v', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp', '.3g2', '.ts', '.mts', '.m2ts', '.vob', '.ogv', '.divx', '.asf', '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm']:
+                elif ext in [
+                    '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.f4v', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp', '.3g2', 
+                    '.ts', '.mts', '.m2ts', '.vob', '.ogv', '.divx', '.asf',
+                    '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm', '.mcw'
+                ]:
                     if not self.doc_filters.get("Video", ctk.BooleanVar(value=True)).get(): skip = True
                     else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Video"})
                 elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']:
