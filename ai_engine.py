@@ -235,8 +235,8 @@ class AIEngine:
         except Exception as e: print(f"Doc extraction error: {e}")
 
         # 2. IMMAGINI (Visione Profonda)
-        # Supporta anche formati fotografici RAW avanzati (.nef, .cr2, .cr3, .arw, .dng, .orf, .rw2, .pef, .raf)
-        if ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif", ".nef", ".cr2", ".cr3", ".arw", ".dng", ".orf", ".rw2", ".pef", ".raf"] and self.is_vision:
+        # Supporta tutti i formati fotografici standard e RAW avanzati
+        if ext in [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".ico", ".heic", ".heif", ".svg", ".psd", ".nef", ".cr2", ".cr3", ".arw", ".dng", ".orf", ".rw2", ".pef", ".raf", ".srw", ".srf", ".sr2", ".kdc", ".dcr", ".raw", ".erf", ".mef", ".mos", ".mrw", ".3fr", ".fff"] and self.is_vision:
             try:
                 img = Image.open(file_path)
                 img.thumbnail((448, 448)) # Risoluzione ideale per LLaVA 1.5
@@ -266,7 +266,8 @@ class AIEngine:
                 print(f"Vision error: {e}")
 
         # 3. VIDEO (Cinema / Video)
-        if ext in [".mp4", ".mov", ".avi", ".mkv", ".m4v", ".flv", ".webm", ".wmv", ".mpeg", ".mpg", ".3gp"]:
+        # Supporta tutti i formati video standard, web e cinema RAW professionali
+        if ext in [".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".f4v", ".wmv", ".m4v", ".mpg", ".mpeg", ".m2v", ".3gp", ".3g2", ".ts", ".mts", ".m2ts", ".vob", ".ogv", ".divx", ".asf", ".braw", ".r3d", ".ari", ".arx", ".mxf", ".cine", ".crm"]:
             if metadata:
                 return f"VIDEO_METADATA: {metadata}"
             return f"VIDEO_FILE: {os.path.basename(file_path)}"
