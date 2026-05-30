@@ -5,8 +5,9 @@ import base64
 from io import BytesIO
 from PIL import Image, ExifTags
 try:
-    from pillow_heif import register_heif_opener
-    register_heif_opener()
+    import importlib
+    pillow_heif = importlib.import_module("pillow_heif")
+    pillow_heif.register_heif_opener()
 except ImportError:
     pass
 from huggingface_hub import hf_hub_download
@@ -136,8 +137,11 @@ class AIEngine:
             
             # Caricamento effettivo: usiamo get_models_dir() che risolve il percorso migliore
             try:
-                from llama_cpp import Llama
-                from llama_cpp.llama_chat_format import Llava15ChatHandler
+                import importlib
+                llama_cpp = importlib.import_module("llama_cpp")
+                Llama = llama_cpp.Llama
+                llama_chat_format = importlib.import_module("llama_cpp.llama_chat_format")
+                Llava15ChatHandler = llama_chat_format.Llava15ChatHandler
                 
                 n_threads = os.cpu_count() or 4
                 final_models_dir = self.get_models_dir()
@@ -187,7 +191,18 @@ class AIEngine:
                     decoded = ExifTags.TAGS.get(tag, tag)
                     if decoded in ['DateTimeOriginal', 'Make', 'Model', 'Software']:
                         meta[decoded] = str(value)
-        except: pass
+        except:
+            pass
+            
+        # Fallback: aggiungi data di creazione/modifica del file se non trovata in EXIF
+        if 'DateTimeOriginal' not in meta:
+            try:
+                import datetime
+                mtime = os.path.getmtime(file_path)
+                dt = datetime.datetime.fromtimestamp(mtime)
+                meta['FileModificationDate'] = dt.strftime("%Y:%m:%d %H:%M:%S")
+            except:
+                pass
         return meta
 
     def extract_context(self, file_path):
@@ -199,7 +214,8 @@ class AIEngine:
         # 1. DOCUMENTI
         try:
             if ext == ".pdf":
-                import fitz
+                import importlib
+                fitz = importlib.import_module("fitz")
                 doc = fitz.open(file_path)
                 text = ""
                 # Leggiamo più pagine per essere "più intelligenti"
@@ -219,7 +235,8 @@ class AIEngine:
         except Exception as e: print(f"Doc extraction error: {e}")
 
         # 2. IMMAGINI (Visione Profonda)
-        if ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif"] and self.is_vision:
+        # Supporta anche formati fotografici RAW avanzati (.nef, .cr2, .cr3, .arw, .dng, .orf, .rw2, .pef, .raf)
+        if ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif", ".nef", ".cr2", ".cr3", ".arw", ".dng", ".orf", ".rw2", ".pef", ".raf"] and self.is_vision:
             try:
                 img = Image.open(file_path)
                 img.thumbnail((448, 448)) # Risoluzione ideale per LLaVA 1.5
@@ -242,7 +259,17 @@ class AIEngine:
                     temperature=0.1
                 )
                 return f"IMAGE_DESC: {response['choices'][0]['message']['content'].strip()}{meta_str}"
-            except Exception as e: print(f"Vision error: {e}")
+            except Exception as e:
+                # Fallback se Pillow fallisce ad aprire il file RAW (es. .NEF, .CR2 senza codec specifici)
+                if metadata:
+                    return f"RAW_IMAGE_METADATA: {metadata}"
+                print(f"Vision error: {e}")
+
+        # 3. VIDEO (Cinema / Video)
+        if ext in [".mp4", ".mov", ".avi", ".mkv", ".m4v", ".flv", ".webm", ".wmv", ".mpeg", ".mpg", ".3gp"]:
+            if metadata:
+                return f"VIDEO_METADATA: {metadata}"
+            return f"VIDEO_FILE: {os.path.basename(file_path)}"
 
         return ""
 
@@ -335,7 +362,8 @@ New Path:"""
             elif algo == "SHA-1":
                 hasher = hashlib.sha1()
             elif algo == "xxHash64":
-                import xxhash
+                import importlib
+                xxhash = importlib.import_module("xxhash")
                 hasher = xxhash.xxh64()
             else:
                 hasher = hashlib.sha256()
@@ -343,5 +371,5 @@ New Path:"""
                 buf = afile.read(65536)
                 while len(buf) > 0:
                     hasher.update(buf); buf = afile.read(65536)
-            return hasher.hexdigest()
+            return getattr(hasher, "hexdigest")()
         except: return None

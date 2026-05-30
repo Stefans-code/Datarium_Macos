@@ -323,8 +323,8 @@ class DatariumApp(ctk.CTk):
             if "Backup_Datarium_" in root: continue
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
-                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif']: counts["Immagini"] += 1
-                elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']: counts["Video"] += 1
+                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif', '.nef', '.cr2', '.cr3', '.arw', '.dng', '.orf', '.rw2', '.pef', '.raf']: counts["Immagini"] += 1
+                elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.flv', '.webm', '.wmv', '.mpeg', '.mpg', '.3gp']: counts["Video"] += 1
                 elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']: counts["Documenti"] += 1
                 else: counts["Altro"] += 1
                 
@@ -521,12 +521,13 @@ class DatariumApp(ctk.CTk):
             for f in files:
                 ext = os.path.splitext(f)[1].lower()
                 skip = False
-                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif']:
+                if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.nef', '.cr2', '.cr3', '.arw', '.dng', '.orf', '.rw2', '.pef', '.raf']:
                     if not self.doc_filters.get("Immagini", ctk.BooleanVar(value=True)).get(): skip = True
                     else: vision_items.append({"old": f, "path": os.path.join(root, f), "type": "Image"})
-                elif ext in ['.mp4', '.mov', '.avi', '.mkv']:
+                elif ext in ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.flv', '.webm', '.wmv', '.mpeg', '.mpg', '.3gp']:
                     if not self.doc_filters.get("Video", ctk.BooleanVar(value=True)).get(): skip = True
-                elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx']:
+                    else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Video"})
+                elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']:
                     if not self.doc_filters.get("Documenti", ctk.BooleanVar(value=True)).get(): skip = True
                     else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Doc"})
                 else: 
@@ -942,7 +943,8 @@ class DatariumApp(ctk.CTk):
             elif algo == "SHA-1":
                 h = hashlib.sha1()
             elif algo == "xxHash64":
-                import xxhash
+                import importlib
+                xxhash = importlib.import_module("xxhash")
                 h = xxhash.xxh64()
             else:
                 h = hashlib.sha256()
@@ -950,7 +952,7 @@ class DatariumApp(ctk.CTk):
             with open(file_path, "rb") as f:
                 while chunk := f.read(8192):
                     h.update(chunk)
-            return h.hexdigest()
+            return getattr(h, "hexdigest")()
         except Exception as e:
             return f"Error: {e}"
 
