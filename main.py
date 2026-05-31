@@ -15,7 +15,14 @@ if False:
     import llama_cpp
     import llama_cpp.llama_chat_format
 
-# Trigger GitHub Action build for nexflamma.net
+# Windows DPI Awareness for crisp UI
+if os.name == 'nt':
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+
 # Ridirezione standard output/error per evitare crash in modalità --noconsole
 # se qualche libreria (es. tqdm/huggingface) prova a scrivere sul terminale inesistente.
 if getattr(sys, 'frozen', False):
@@ -30,6 +37,7 @@ if getattr(sys, 'frozen', False):
         sys.stderr = open(os.devnull, 'w')
 
 import customtkinter as ctk
+import re
 import threading
 import shutil
 from tkinter import filedialog
@@ -38,6 +46,71 @@ from license_manager import LicenseManager
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+class ImageIdentificationDialog(ctk.CTkToplevel):
+    def __init__(self, parent, image_path, filename):
+        super().__init__(parent)
+        self.title("Identifica Persone")
+        self.geometry("550x550")
+        self.resizable(False, False)
+        
+        # Rendi la finestra modale e in primo piano
+        self.transient(parent)
+        self.grab_set()
+        
+        self.user_input = None
+        
+        # Carica e ridimensiona l'immagine con PIL
+        try:
+            from PIL import Image
+            img = Image.open(image_path)
+            # Calcola dimensioni mantenendo le proporzioni
+            img.thumbnail((450, 300))
+            self.photo = ctk.CTkImage(light_image=img, size=img.size)
+            
+            # Label per l'immagine
+            self.img_lbl = ctk.CTkLabel(self, text="", image=self.photo)
+            self.img_lbl.pack(pady=15)
+        except Exception as e:
+            # Fallback se non si riesce a caricare
+            self.img_lbl = ctk.CTkLabel(self, text=f"[Anteprima non disponibile]\n{e}", text_color="red")
+            self.img_lbl.pack(pady=50)
+            
+        # Domanda
+        self.lbl_question = ctk.CTkLabel(self, text=f"Chi c'è nella foto '{filename}'?", font=ctk.CTkFont(size=14, weight="bold"))
+        self.lbl_question.pack(pady=5)
+        
+        self.lbl_sub = ctk.CTkLabel(self, text="Inserisci i nomi (es. Marco, Maria) o lascia vuoto:", font=ctk.CTkFont(size=11), text_color="gray")
+        self.lbl_sub.pack(pady=2)
+        
+        # Campo di testo
+        self.entry = ctk.CTkEntry(self, width=400, placeholder_text="Nomi delle persone...")
+        self.entry.pack(pady=10)
+        self.entry.focus()
+        
+        # Premi Invio per confermare
+        self.entry.bind("<Return>", lambda e: self.on_ok())
+        
+        # Pulsanti
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=15)
+        
+        self.btn_cancel = ctk.CTkButton(btn_frame, text="Salta", width=100, fg_color="transparent", border_width=1, command=self.on_cancel)
+        self.btn_cancel.pack(side="left", padx=10)
+        
+        self.btn_ok = ctk.CTkButton(btn_frame, text="Conferma", width=120, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.on_ok)
+        self.btn_ok.pack(side="left", padx=10)
+        
+        # Blocca l'esecuzione finché non si chiude la finestra
+        self.wait_window(self)
+        
+    def on_ok(self):
+        self.user_input = self.entry.get().strip()
+        self.destroy()
+        
+    def on_cancel(self):
+        self.user_input = ""
+        self.destroy()
 
 class DatariumApp(ctk.CTk):
     def __init__(self):
@@ -86,6 +159,7 @@ class DatariumApp(ctk.CTk):
         self.autotag_dest_folder = ctk.StringVar(value="")
         self.autotag_accept_ai = ctk.BooleanVar(value=True)
         self.autotag_rename = ctk.BooleanVar(value=True)
+        self.organizer_identify_people = ctk.BooleanVar(value=True)
 
         # Offload Feature State
         import datetime
@@ -117,7 +191,6 @@ class DatariumApp(ctk.CTk):
     def setup_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(5, weight=1)
 
         self.logo_lbl = ctk.CTkLabel(self.sidebar, text="DATARIUM", font=ctk.CTkFont(size=24, weight="bold"))
         self.logo_lbl.grid(row=0, column=0, padx=20, pady=(30, 40))
@@ -134,7 +207,7 @@ class DatariumApp(ctk.CTk):
         self.btn_autotag = ctk.CTkButton(self.sidebar, text="🏷️ Auto Tag", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"))
         self.btn_autotag.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
 
-        self.btn_offload = ctk.CTkButton(self.sidebar, text="⚡ Offload & PDF", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"))
+        self.btn_offload = ctk.CTkButton(self.sidebar, text="⚡ Offload", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"))
         self.btn_offload.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
 
         # Bottom Buttons
@@ -249,12 +322,14 @@ class DatariumApp(ctk.CTk):
         cards_container.columnconfigure(0, weight=1)
         cards_container.columnconfigure(1, weight=1)
         cards_container.columnconfigure(2, weight=1)
+        cards_container.columnconfigure(3, weight=1)
         
         from PIL import Image
         base_dir = os.path.dirname(os.path.abspath(__file__))
         folder_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "folder.png")), size=(64, 64))
         key_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "key.png")), size=(64, 64))
         tag_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "tag.png")), size=(64, 64))
+        flash_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "flash.png")), size=(64, 64))
 
         # Card 1: Organizer
         c1 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
@@ -285,6 +360,16 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(c3, text="Auto Tag & Album", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
         ctk.CTkLabel(c3, text="Raggruppa foto e video in album intelligenti generati dall'AI.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
         ctk.CTkButton(c3, text="Vai ad Album", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("AutoTag")).pack(side="bottom", pady=30, padx=20, fill="x")
+
+        # Card 4: Offload & PDF
+        c4 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
+        c4.grid(row=0, column=3, padx=10, pady=10, sticky="nsew")
+        c4.pack_propagate(False)
+
+        ctk.CTkLabel(c4, text="", image=flash_icon).pack(pady=(35, 10))
+        ctk.CTkLabel(c4, text="Offload", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
+        ctk.CTkLabel(c4, text="Copia sicura SSD multidisco con verifica checksum ed esportazione report.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkButton(c4, text="Vai ad Offload", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("OffloadHome")).pack(side="bottom", pady=30, padx=20, fill="x")
 
 
     def init_options_page(self):
@@ -329,10 +414,13 @@ class DatariumApp(ctk.CTk):
         opts_f.pack()
         
         self.check_ai = ctk.CTkCheckBox(opts_f, text="Attiva Scelta AI")
-        self.check_ai.pack(side="left", padx=20); self.check_ai.select()
+        self.check_ai.pack(side="left", padx=10); self.check_ai.select()
         
-        self.check_dup = ctk.CTkCheckBox(opts_f, text="Rilevamento dei tipi di file (Hash Check)")
-        self.check_dup.pack(side="left", padx=20); self.check_dup.select()
+        self.check_dup = ctk.CTkCheckBox(opts_f, text="Hash Check (Duplicati)")
+        self.check_dup.pack(side="left", padx=10); self.check_dup.select()
+        
+        self.check_identify_people_cb = ctk.CTkCheckBox(opts_f, text="Identifica Persone nelle Foto", variable=self.organizer_identify_people)
+        self.check_identify_people_cb.pack(side="left", padx=10)
 
         # --- FOOTER ---
         btn_f = ctk.CTkFrame(modal, fg_color="transparent")
@@ -403,7 +491,7 @@ class DatariumApp(ctk.CTk):
         self.status_lbl.pack(side="left")
 
         ctk.CTkButton(footer, text="Conferma", width=120, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.execute_organization).pack(side="right")
-        ctk.CTkButton(footer, text="Annulla", fg_color="transparent", border_width=1, width=100, command=lambda: self.show_page("Options")).pack(side="right", padx=10)
+        ctk.CTkButton(footer, text="Annulla", fg_color="transparent", border_width=1, width=100, command=self.cancel_organization).pack(side="right", padx=10)
 
     def init_settings_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -487,6 +575,17 @@ class DatariumApp(ctk.CTk):
         threading.Thread(target=check_upd_bg, daemon=True).start()
 
     def show_page(self, name):
+        # Impedisci navigazione se è in corso una scansione
+        if getattr(self, 'is_scanning', False):
+            return
+
+        # Ogni servizio deve essere sotto licenza, se non c'è licenza reindirizza a Settings
+        self.is_licensed, self.license_status = self.license.verify_license()
+        if not self.is_licensed and name not in ["Setup", "Settings"]:
+            name = "Settings"
+            if hasattr(self, 'lic_status_lbl'):
+                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
+
         # Se siamo in Setup, nascondiamo la sidebar per farlo sembrare un installer
         if name == "Setup":
             self.sidebar.grid_forget()
@@ -500,6 +599,13 @@ class DatariumApp(ctk.CTk):
 
     def change_appearance_mode(self, mode):
         ctk.set_appearance_mode(mode)
+
+    def set_sidebar_state(self, state="normal"):
+        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_settings]
+        for btn in buttons:
+            btn.configure(state=state)
+        if hasattr(self, 'appearance_mode_optionemenu'):
+            self.appearance_mode_optionemenu.configure(state=state)
 
     def open_source_folder(self):
         folder = filedialog.askdirectory()
@@ -528,8 +634,16 @@ class DatariumApp(ctk.CTk):
             return
             
         self.show_page("Preview")
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
         self.stop_ai = False
         threading.Thread(target=self.process_files_bg, daemon=True).start()
+
+    def cancel_organization(self):
+        self.stop_ai = True
+        self.is_scanning = False
+        self.set_sidebar_state("normal")
+        self.show_page("Options")
 
     # --- BG AI PROCESS ---
     def update_status(self, text):
@@ -546,113 +660,142 @@ class DatariumApp(ctk.CTk):
             self.after(0, lambda: self.status_lbl.configure(text=f"{base} ({pct}%)"))
 
     def process_files_bg(self):
-        for w in self.scroll_frame.winfo_children(): w.destroy()
-        src = self.source_folder.get()
-        if not src: return
+        try:
+            for w in self.scroll_frame.winfo_children(): w.destroy()
+            src = self.source_folder.get()
+            if not src: return
 
-        self.set_progress(0)
-        # --- NUOVA LOGICA TURBO: ANALISI IBRIDA ---
-        text_items = []
-        vision_items = []
-        
-        for root, _, files in os.walk(src):
-            if "Backup_Datarium_" in root: continue
-            for f in files:
-                ext = os.path.splitext(f)[1].lower()
-                skip = False
-                if ext in [
-                    '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico', '.heic', '.heif', '.svg', '.avif', '.jxl',
-                    '.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2', '.dng', '.raf', '.rw2', '.raw', '.orf', '.ori', 
-                    '.rwl', '.pef', '.ptx', '.cap', '.iiq', '.eip', '.3fr', '.fff', '.dcr', '.kdc', '.dcs', '.drf', '.k25', '.mrw', 
-                    '.srw', '.bay', '.x3f', '.erf', '.mef', '.mos', '.pxn', '.gpr', '.rwz', '.obm', '.qtk', '.rdc', '.mdc',
-                    '.psd', '.psb', '.ai', '.indd', '.cdr', '.xcf', '.afphoto', '.afdesign', '.afpub', '.sketch', '.fig', '.kra', 
-                    '.clip', '.lip', '.pspimage', '.psp', '.qxp', '.dwg', '.dxf', '.eps', '.ps',
-                    '.obj', '.fbx', '.stl', '.blend', '.c4d', '.max', '.ma', '.mb', '.3ds', '.gltf', '.glb'
-                ]:
-                    if not self.doc_filters.get("Immagini", ctk.BooleanVar(value=True)).get(): skip = True
-                    else: vision_items.append({"old": f, "path": os.path.join(root, f), "type": "Image"})
-                elif ext in [
-                    '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.f4v', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp', '.3g2', 
-                    '.ts', '.mts', '.m2ts', '.vob', '.ogv', '.divx', '.asf',
-                    '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm', '.mcw'
-                ]:
-                    if not self.doc_filters.get("Video", ctk.BooleanVar(value=True)).get(): skip = True
-                    else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Video"})
-                elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']:
-                    if not self.doc_filters.get("Documenti", ctk.BooleanVar(value=True)).get(): skip = True
-                    else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Doc"})
-                else: 
-                    text_items.append({"old": f, "path": os.path.join(root, f), "type": "Other"})
-        
-        # Limit total to 100 for stability
-        all_items = (text_items + vision_items)[:100]
-        valid_items = []
-        
-        # Filtro duplicati
-        sh = {}
-        for idx, item in enumerate(all_items):
-            if self.stop_ai: return
-            if self.check_dup.get():
-                h = self.ai.compute_file_hash(item['path'])
-                if h in sh: item['skip'] = True
-                else: sh[h] = True
-            if not item.get('skip'): valid_items.append(item)
-
-        if not valid_items:
-            self.update_status("❌ Nessun file compatibile trovato nella cartella.")
-            self.set_progress(1.0)
-            return
-
-        # 1. ANALISI TESTI IN PARALLELO
-        self.update_status("⚡ Analisi rapida documenti...")
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-            future_to_item = {executor.submit(self.ai.extract_context, it['path']): it for it in valid_items if it['type'] != "Image"}
-            for future in concurrent.futures.as_completed(future_to_item):
-                if self.stop_ai: break
-                item = future_to_item[future]
-                item['context'] = future.result()
-                self.set_progress(0.1 + 0.2 * (len([x for x in valid_items if x.get('context')]) / max(1, len(valid_items))))
-
-        # 2. CARICAMENTO AI VISION (Se serve)
-        vision_needed = [it for it in valid_items if it['type'] == "Image"]
-        if vision_needed and not self.is_ai_loaded:
-            self.update_status("🧠 Caricamento Vision Model...")
-            self.is_ai_loaded = self.ai.download_model_if_needed(True, self.update_status)
-
-        # 3. ANALISI VISIONE SEQUENZIALE (Per non saturare la RAM)
-        for idx, item in enumerate(vision_needed):
-            if self.stop_ai: return
-            self.update_status(f"👁️ Visione {idx+1}/{len(vision_needed)}: {item['old']}")
-            item['context'] = self.ai.extract_context(item['path'])
-            self.set_progress(0.3 + 0.4 * ((idx+1)/max(1, len(vision_needed))))
-
-        # 4. TAXONOMY & SMART RENAME (Solo se AI attiva)
-        if self.check_ai.get():
-            self.update_status("🧠 Brainstorming Tassonomia Globale...")
-            all_contexts = [it.get('context', '') for it in valid_items]
-            taxonomy = self.ai.identify_global_themes(all_contexts)
-
-            groups = {}
-            for idx, item in enumerate(valid_items):
-                if self.stop_ai: return
-                self.update_status(f"🏷️ Organizzazione {idx+1}/{len(valid_items)}...")
-                res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
-                item['new'] = res
-                
-                cat = res.split('/')[0]
-                if cat not in groups: groups[cat] = []
-                groups[cat].append(item)
-                self.set_progress(0.7 + 0.3 * ((idx+1)/max(1, len(valid_items))))
+            self.set_progress(0)
+            # --- NUOVA LOGICA TURBO: ANALISI IBRIDA ---
+            text_items = []
+            vision_items = []
             
-            self.last_groups = groups
-        else:
-            # Fallback senza AI
-            self.last_groups = {"Archivio": valid_items}
-            for it in valid_items: it['new'] = f"Organizzato_{it['old']}"
+            for root, _, files in os.walk(src):
+                if "Backup_Datarium_" in root: continue
+                for f in files:
+                    ext = os.path.splitext(f)[1].lower()
+                    skip = False
+                    if ext in [
+                        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico', '.heic', '.heif', '.svg', '.avif', '.jxl',
+                        '.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2', '.dng', '.raf', '.rw2', '.raw', '.orf', '.ori', 
+                        '.rwl', '.pef', '.ptx', '.cap', '.iiq', '.eip', '.3fr', '.fff', '.dcr', '.kdc', '.dcs', '.drf', '.k25', '.mrw', 
+                        '.srw', '.bay', '.x3f', '.erf', '.mef', '.mos', '.pxn', '.gpr', '.rwz', '.obm', '.qtk', '.rdc', '.mdc',
+                        '.psd', '.psb', '.ai', '.indd', '.cdr', '.xcf', '.afphoto', '.afdesign', '.afpub', '.sketch', '.fig', '.kra', 
+                        '.clip', '.lip', '.pspimage', '.psp', '.qxp', '.dwg', '.dxf', '.eps', '.ps',
+                        '.obj', '.fbx', '.stl', '.blend', '.c4d', '.max', '.ma', '.mb', '.3ds', '.gltf', '.glb'
+                    ]:
+                        if not self.doc_filters.get("Immagini", ctk.BooleanVar(value=True)).get(): skip = True
+                        else: vision_items.append({"old": f, "path": os.path.join(root, f), "type": "Image"})
+                    elif ext in [
+                        '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.f4v', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp', '.3g2', 
+                        '.ts', '.mts', '.m2ts', '.vob', '.ogv', '.divx', '.asf',
+                        '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm', '.mcw'
+                    ]:
+                        if not self.doc_filters.get("Video", ctk.BooleanVar(value=True)).get(): skip = True
+                        else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Video"})
+                    elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']:
+                        if not self.doc_filters.get("Documenti", ctk.BooleanVar(value=True)).get(): skip = True
+                        else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Doc"})
+                    else: 
+                        text_items.append({"old": f, "path": os.path.join(root, f), "type": "Other"})
+            
+            # Limit total to 100 for stability
+            all_items = (text_items + vision_items)[:100]
+            valid_items = []
+            
+            # Filtro duplicati
+            sh = {}
+            for idx, item in enumerate(all_items):
+                if self.stop_ai: return
+                if self.check_dup.get():
+                    h = self.ai.compute_file_hash(item['path'])
+                    if h in sh: item['skip'] = True
+                    else: sh[h] = True
+                if not item.get('skip'): valid_items.append(item)
 
-        self.update_status("✨ Analisi completata!")
-        self.after(0, lambda: self.render_groups(self.last_groups))
+            if not valid_items:
+                self.update_status("❌ Nessun file compatibile trovato nella cartella.")
+                self.set_progress(1.0)
+                return
+
+            # 1. ANALISI TESTI IN PARALLELO
+            self.update_status("⚡ Analisi rapida documenti...")
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+                future_to_item = {executor.submit(self.ai.extract_context, it['path']): it for it in valid_items if it['type'] != "Image"}
+                for future in concurrent.futures.as_completed(future_to_item):
+                    if self.stop_ai: break
+                    item = future_to_item[future]
+                    item['context'] = future.result()
+                    self.set_progress(0.1 + 0.2 * (len([x for x in valid_items if x.get('context')]) / max(1, len(valid_items))))
+
+            # 2. CARICAMENTO AI (Testo o Visione)
+            if self.check_ai.get():
+                vision_needed = [it for it in valid_items if it['type'] == "Image"]
+                if not self.is_ai_loaded or (vision_needed and not self.ai.is_vision):
+                    self.update_status("🧠 Caricamento Modello AI...")
+                    success, err = self.ai.download_model_if_needed(vision_mode=bool(vision_needed), progress_callback=self.update_status)
+                    if success:
+                        self.is_ai_loaded = True
+
+            # 3. ANALISI VISIONE SEQUENZIALE (Per non saturare la RAM)
+            vision_needed = [it for it in valid_items if it['type'] == "Image"]
+            for idx, item in enumerate(vision_needed):
+                if self.stop_ai: return
+                self.update_status(f"👁️ Visione {idx+1}/{len(vision_needed)}: {item['old']}")
+                item['context'] = self.ai.extract_context(item['path'])
+                
+                # Se la checkbox "Identifica persone nelle foto" è attiva ed il contesto rileva persone, chiedi all'utente
+                if self.organizer_identify_people.get():
+                    context_lower = item.get('context', '').lower()
+                    # Lista di parole intere per identificare la presenza reale di persone (escludendo oggetti e model/face/human)
+                    people_pattern = r'\b(person|people|man|men|woman|women|child|children|boy|boys|girl|girls|guy|guys|lady|ladies|gentleman|gentlemen|baby|babies|toddler|toddlers|teenager|teenagers|adult|adults|crowd|crowds|persona|persone|uomo|uomini|donna|donne|bambino|bambina|bambini|bambine|ragazzo|ragazza|ragazzi|ragazze|tizio|tizia|signore|signora|signori|neonato|neonata|neonati|neonate|folla|folle)s?\b'
+                    has_people = bool(re.search(people_pattern, context_lower))
+                    
+                    if has_people:
+                        user_input = None
+                        event = threading.Event()
+                        def ask():
+                            nonlocal user_input
+                            dialog = ImageIdentificationDialog(self, item['path'], item['old'])
+                            user_input = dialog.user_input
+                            event.set()
+                        self.after(0, ask)
+                        event.wait()
+                        if user_input and user_input.strip():
+                            item['context'] = (item.get('context', '') + f" Persone identificate dall'utente: {user_input.strip()}").strip()
+                
+                self.set_progress(0.3 + 0.4 * ((idx+1)/max(1, len(vision_needed))))
+
+            # 4. TAXONOMY & SMART RENAME (Solo se AI attiva)
+            if self.check_ai.get():
+                self.update_status("🧠 Brainstorming Tassonomia Globale...")
+                all_contexts = [it.get('context', '') for it in valid_items]
+                taxonomy = self.ai.identify_global_themes(all_contexts)
+
+                groups = {}
+                for idx, item in enumerate(valid_items):
+                    if self.stop_ai: return
+                    self.update_status(f"🏷️ Organizzazione {idx+1}/{len(valid_items)}...")
+                    res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
+                    item['new'] = res
+                    
+                    cat = res.split('/')[0]
+                    if cat not in groups: groups[cat] = []
+                    groups[cat].append(item)
+                    self.set_progress(0.7 + 0.3 * ((idx+1)/max(1, len(valid_items))))
+                
+                self.last_groups = groups
+            else:
+                # Fallback senza AI
+                self.last_groups = {"Archivio": valid_items}
+                for it in valid_items: it['new'] = f"Organizzato_{it['old']}"
+
+            self.update_status("✨ Analisi completata!")
+            self.after(0, lambda: self.render_groups(self.last_groups))
+        finally:
+            self.is_scanning = False
+            self.after(0, lambda: self.set_sidebar_state("normal"))
 
     def render_groups(self, groups):
         for w in self.scroll_frame.winfo_children(): w.destroy()
@@ -809,6 +952,8 @@ class DatariumApp(ctk.CTk):
             return
             
         self.show_page("Preview")
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
         self.stop_ai = False
         threading.Thread(target=self.process_files_bg, daemon=True).start()
 
@@ -916,7 +1061,11 @@ class DatariumApp(ctk.CTk):
         bot_f = ctk.CTkFrame(page_results, fg_color="transparent")
         bot_f.pack(fill="x", side="bottom")
         ctk.CTkButton(bot_f, text="Indietro", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_page("HashOptions")).pack(side="left")
-        ctk.CTkButton(bot_f, text="Torna alla Home", width=140, fg_color="#10b981", hover_color="#059669", command=lambda: self.show_page("HashHome")).pack(side="right")
+        
+        self.btn_export_hash = ctk.CTkButton(bot_f, text="📄 Esporta Report PDF", fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.export_hash_report)
+        self.btn_export_hash.pack(side="right", padx=10)
+        
+        ctk.CTkButton(bot_f, text="Torna alla Home", width=140, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self.show_page("HashHome")).pack(side="right")
 
     def toggle_compare_contents_visibility(self):
         if self.highlight_dups.get():
@@ -1087,56 +1236,63 @@ class DatariumApp(ctk.CTk):
             return
 
         self.show_page("HashResults")
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
         self.loading_lbl = ctk.CTkLabel(self.hash_results_scroll, text="Calcolo hash in corso. Attendere...", font=ctk.CTkFont(size=14, weight="bold"))
         self.loading_lbl.pack(pady=20)
         
         threading.Thread(target=self._run_hash_verification_bg, args=(files_to_hash, sd_list, algo), daemon=True).start()
 
     def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
-        results = []
-        source_paths = set()
+        try:
+            results = []
+            source_paths = set()
 
-        for sf in files_to_hash:
-            if os.path.exists(sf):
-                source_paths.add(os.path.abspath(sf))
-                hash_val = self.compute_hash(sf, algo)
-                sz = os.path.getsize(sf)
-                ext = os.path.splitext(sf)[1].upper().replace('.', '')
-                results.append({
-                    "name": os.path.basename(sf),
-                    "path": sf,
-                    "type": ext if ext else "FILE",
-                    "hash": hash_val,
-                    "size": self.format_file_size(sz),
-                    "is_source": True
-                })
-                if sf not in self.recent_hash_files:
-                    self.recent_hash_files.insert(0, sf)
-                    self.recent_hash_files = self.recent_hash_files[:10]
-                    self.after(0, self.update_recent_hash_ui)
+            for sf in files_to_hash:
+                if os.path.exists(sf):
+                    source_paths.add(os.path.abspath(sf))
+                    hash_val = self.compute_hash(sf, algo)
+                    sz = os.path.getsize(sf)
+                    ext = os.path.splitext(sf)[1].upper().replace('.', '')
+                    results.append({
+                        "name": os.path.basename(sf),
+                        "path": sf,
+                        "type": ext if ext else "FILE",
+                        "hash": hash_val,
+                        "size": self.format_file_size(sz),
+                        "is_source": True
+                    })
+                    if sf not in self.recent_hash_files:
+                        self.recent_hash_files.insert(0, sf)
+                        self.recent_hash_files = self.recent_hash_files[:10]
+                        self.after(0, self.update_recent_hash_ui)
 
-        for sd in sd_list:
-            if os.path.isdir(sd):
-                for root, _, files in os.walk(sd):
-                    for f in files:
-                        p = os.path.join(root, f)
-                        if os.path.abspath(p) in source_paths:
-                            continue
-                        h = self.compute_hash(p, algo)
-                        sz_f = os.path.getsize(p)
-                        ext_f = os.path.splitext(p)[1].upper().replace('.', '')
-                        results.append({
-                            "name": f,
-                            "path": p,
-                            "type": ext_f if ext_f else "FILE",
-                            "hash": h,
-                            "size": self.format_file_size(sz_f),
-                            "is_source": False
-                        })
-        
-        self.after(0, self._render_hash_results, results)
+            for sd in sd_list:
+                if os.path.isdir(sd):
+                    for root, _, files in os.walk(sd):
+                        for f in files:
+                            p = os.path.join(root, f)
+                            if os.path.abspath(p) in source_paths:
+                                continue
+                            h = self.compute_hash(p, algo)
+                            sz_f = os.path.getsize(p)
+                            ext_f = os.path.splitext(p)[1].upper().replace('.', '')
+                            results.append({
+                                "name": f,
+                                "path": p,
+                                "type": ext_f if ext_f else "FILE",
+                                "hash": h,
+                                "size": self.format_file_size(sz_f),
+                                "is_source": False
+                            })
+            
+            self.after(0, self._render_hash_results, results)
+        finally:
+            self.is_scanning = False
+            self.after(0, lambda: self.set_sidebar_state("normal"))
 
     def _render_hash_results(self, results):
+        self.last_hash_results = results
         if hasattr(self, 'loading_lbl') and self.loading_lbl.winfo_exists():
             self.loading_lbl.destroy()
             
@@ -1179,6 +1335,31 @@ class DatariumApp(ctk.CTk):
         self.clipboard_append(text)
         from tkinter import messagebox
         messagebox.showinfo("Copiato", "Valore Hash copiato negli appunti!")
+
+    def export_hash_report(self):
+        if not hasattr(self, 'last_hash_results') or not self.last_hash_results:
+            from tkinter import messagebox
+            messagebox.showwarning("Nessun Dato", "Nessun risultato disponibile per l'esportazione.")
+            return
+        
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_id = f"HASH_{timestamp}"
+        
+        # Cartella di output: usa quella del primo file o la home
+        output_dir = os.path.dirname(self.last_hash_results[0]['path']) if self.last_hash_results else os.path.expanduser("~")
+        report_dir = os.path.join(output_dir, "Hash_Reports")
+        
+        from report_generator import ReportGenerator
+        try:
+            report_path = ReportGenerator.save_hash_report(report_dir, report_id, self.last_hash_results, self.selected_hash_algo.get())
+            import webbrowser
+            webbrowser.open(f"file:///{report_path.replace(chr(92), '/')}")
+            from tkinter import messagebox
+            messagebox.showinfo("Report Generato", f"Report esportato con successo ed aperto nel browser:\n{report_path}")
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Errore Esportazione", f"Impossibile salvare il report: {e}")
 
     def format_file_size(self, size_bytes):
         if size_bytes < 1024:
@@ -1295,71 +1476,109 @@ class DatariumApp(ctk.CTk):
             return
 
         self.btn_confirm_at.configure(state="disabled", text="⚡ Scansione...")
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
 
         for w in self.autotag_album_scroll.winfo_children():
             w.destroy()
 
         def scan_bg():
-            import time
-            valid_files = []
-            for root, _, files in os.walk(src):
-                for f in files:
-                    ext = os.path.splitext(f)[1].lower()
-                    if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.mp4', '.mov', '.avi']:
-                        valid_files.append(os.path.join(root, f))
+            try:
+                import time
+                
+                # Pre-caricamento del modello AI se necessario
+                if self.autotag_accept_ai.get() and not self.is_ai_loaded:
+                    self.after(0, lambda: self.btn_confirm_at.configure(text="🧠 Caricamento AI..."))
+                    success, err = self.ai.download_model_if_needed(vision_mode=True, progress_callback=None)
+                    if success:
+                        self.is_ai_loaded = True
+                
+                self.after(0, lambda: self.btn_confirm_at.configure(text="⚡ Scansione..."))
+                valid_files = []
+                for root, _, files in os.walk(src):
+                    for f in files:
+                        ext = os.path.splitext(f)[1].lower()
+                        if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.mp4', '.mov', '.avi']:
+                            valid_files.append(os.path.join(root, f))
 
-            if not valid_files:
-                self.after(0, lambda: self.btn_confirm_at.configure(state="normal", text="Conferma"))
-                self.after(0, lambda: self.show_autotag_subpage("Config"))
-                from tkinter import messagebox
-                self.after(0, lambda: messagebox.showinfo("Nessun file", "Nessun file multimediale (foto/video) trovato nella cartella selezionata."))
-                return
+                if not valid_files:
+                    self.after(0, lambda: self.btn_confirm_at.configure(state="normal", text="Conferma"))
+                    self.after(0, lambda: self.show_autotag_subpage("Config"))
+                    from tkinter import messagebox
+                    self.after(0, lambda: messagebox.showinfo("Nessun file", "Nessun file multimediale (foto/video) trovato nella cartella selezionata."))
+                    return
 
-            # Group files into albums based on AI/metadata
-            albums = {}
-            for path in valid_files:
-                try:
-                    ext = os.path.splitext(path)[1].lower()
-                    context = self.ai.extract_context(path) if ext not in ['.mp4', '.mov'] else "Multimediale"
-                    theme_str = self.ai.identify_global_themes([context]) if context else "Generico"
-                    import re
-                    theme_str = re.sub(r'\(.*?\)', '', theme_str)
-                    themes = [t.strip() for t in theme_str.split(',') if t.strip()]
-                    album_name = themes[0] if themes else "Varie"
-                    # Clean filename characters
-                    for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
-                        album_name = album_name.replace(ch, "")
-                    album_name = album_name.capitalize()
-                    albums.setdefault(album_name, []).append(path)
-                except:
-                    albums.setdefault("Ricordi", []).append(path)
+                # Group files into albums based on AI/metadata
+                albums = {}
+                for path in valid_files:
+                    try:
+                        ext = os.path.splitext(path)[1].lower()
+                        context = self.ai.extract_context(path) if ext not in ['.mp4', '.mov'] else "Multimediale"
+                        album_name = self.ai.get_album_name(context) if context else "Varie"
+                        # Clean filename characters
+                        for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
+                            album_name = album_name.replace(ch, "")
+                        album_name = album_name.capitalize()
+                        albums.setdefault(album_name, []).append(path)
+                    except:
+                        albums.setdefault("Ricordi", []).append(path)
 
-            self.current_albums = albums
+                self.current_albums = albums
 
-            def update_album_ui():
-                # Grid of visual album cards
-                grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
-                grid_f.pack(fill="both", expand=True)
-                grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
+                def update_album_ui():
+                    # Raggruppa gli album con 1 solo file in "Altri Elementi" per evitare "una cartella per immagine"
+                    visual_albums = {}
+                    for album, files in self.current_albums.items():
+                        if len(files) == 1:
+                            visual_albums.setdefault("Altri Elementi", []).extend(files)
+                        else:
+                            visual_albums.setdefault(album, []).extend(files)
+                    self.current_albums = visual_albums
 
-                for idx, (album, files) in enumerate(self.current_albums.items()):
-                    card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
-                    card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
+                    # Grid of visual album cards
+                    grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
+                    grid_f.pack(fill="both", expand=True)
+                    grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
 
-                    ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52)).pack(pady=(20, 5))
-                    
-                    lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
-                    lbl_name.pack(padx=10)
+                    for idx, (album, files) in enumerate(self.current_albums.items()):
+                        card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
+                        card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
 
-                    ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
+                        # Carica anteprima copertina dell'album
+                        preview_img = None
+                        for f_path in files:
+                            ext = os.path.splitext(f_path)[1].lower()
+                            if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif']:
+                                try:
+                                    from PIL import Image
+                                    pil_img = Image.open(f_path)
+                                    pil_img.thumbnail((160, 100))
+                                    preview_img = ctk.CTkImage(light_image=pil_img, size=pil_img.size)
+                                    break
+                                except:
+                                    pass
 
-                    btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
-                    btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+                        if preview_img:
+                            lbl_icon = ctk.CTkLabel(card, text="", image=preview_img)
+                        else:
+                            lbl_icon = ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52))
+                        lbl_icon.pack(pady=(20, 5))
+                        
+                        lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
+                        lbl_name.pack(padx=10)
 
-                self.btn_confirm_at.configure(state="normal", text="Conferma")
-                self.show_autotag_subpage("Album")
+                        ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
 
-            self.after(0, update_album_ui)
+                        btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
+                        btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+
+                    self.btn_confirm_at.configure(state="normal", text="Conferma")
+                    self.show_autotag_subpage("Album")
+
+                self.after(0, update_album_ui)
+            finally:
+                self.is_scanning = False
+                self.after(0, lambda: self.set_sidebar_state("normal"))
 
         threading.Thread(target=scan_bg, daemon=True).start()
 
@@ -1380,7 +1599,25 @@ class DatariumApp(ctk.CTk):
                 card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
                 card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
 
-                ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52)).pack(pady=(20, 5))
+                # Carica anteprima copertina dell'album
+                preview_img = None
+                for f_path in files:
+                    ext = os.path.splitext(f_path)[1].lower()
+                    if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif']:
+                        try:
+                            from PIL import Image
+                            pil_img = Image.open(f_path)
+                            pil_img.thumbnail((160, 100))
+                            preview_img = ctk.CTkImage(light_image=pil_img, size=pil_img.size)
+                            break
+                        except:
+                            pass
+
+                if preview_img:
+                    lbl_icon = ctk.CTkLabel(card, text="", image=preview_img)
+                else:
+                    lbl_icon = ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52))
+                lbl_icon.pack(pady=(20, 5))
                 
                 lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
                 lbl_name.pack(padx=10)
@@ -1396,8 +1633,17 @@ class DatariumApp(ctk.CTk):
         if not dst:
             return
 
+        # Raggruppa gli album con 1 solo file in "Altri_Elementi" per evitare "una cartella per immagine"
+        final_albums = {}
         for album, files in getattr(self, 'current_albums', {}).items():
-            album_dir = os.path.join(dst, f"Album_{album}")
+            clean_album_name = album.replace(" ", "_")
+            if len(files) == 1:
+                final_albums.setdefault("Altri_Elementi", []).extend(files)
+            else:
+                final_albums.setdefault(clean_album_name, []).extend(files)
+
+        for album, files in final_albums.items():
+            album_dir = os.path.join(dst, album)
             os.makedirs(album_dir, exist_ok=True)
             for idx, f in enumerate(files):
                 try:
@@ -1441,24 +1687,21 @@ class DatariumApp(ctk.CTk):
         self.ent_off_src.grid(row=0, column=1, padx=(15, 10), sticky="ew")
         ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_offload_source).grid(row=0, column=2)
 
-        # Row 2: Destinazione Primaria
-        ctk.CTkLabel(g, text="Destinazione Primaria:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=1, column=0, sticky="w", pady=12)
-        self.ent_off_dst1 = ctk.CTkEntry(g, textvariable=self.offload_dest_folder_1, font=ctk.CTkFont(size=12), height=35)
-        self.ent_off_dst1.grid(row=1, column=1, padx=(15, 10), sticky="ew")
-        ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_offload_dest1).grid(row=1, column=2)
-
-        # Row 3: Destinazione Backup
-        ctk.CTkLabel(g, text="Destinazione Backup (Opzionale):", font=ctk.CTkFont(weight="bold", size=13)).grid(row=2, column=0, sticky="w", pady=12)
-        self.ent_off_dst2 = ctk.CTkEntry(g, textvariable=self.offload_dest_folder_2, font=ctk.CTkFont(size=12), height=35)
-        self.ent_off_dst2.grid(row=2, column=1, padx=(15, 10), sticky="ew")
-        ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_offload_dest2).grid(row=2, column=2)
+        # Row 2: dynamic list of destinations
+        ctk.CTkLabel(g, text="Cartelle di Destinazione:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=1, column=0, sticky="nw", pady=12)
+        
+        self.dest_list_frame = ctk.CTkFrame(g, fg_color="transparent")
+        self.dest_list_frame.grid(row=1, column=1, columnspan=2, padx=(15, 0), sticky="ew", pady=12)
+        
+        self.offload_destinations = []
+        self.render_offload_destinations_ui()
 
         # Settings
         ctk.CTkLabel(g, text="Algoritmo Verifica:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=3, column=0, sticky="w", pady=12)
         self.opt_off_algo = ctk.CTkOptionMenu(g, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5"], height=35)
         self.opt_off_algo.grid(row=3, column=1, columnspan=2, padx=(15, 0), sticky="w")
 
-        ctk.CTkLabel(g, text="ID Report (ShotPut):", font=ctk.CTkFont(weight="bold", size=13)).grid(row=4, column=0, sticky="w", pady=12)
+        ctk.CTkLabel(g, text="ID Report:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=4, column=0, sticky="w", pady=12)
         self.ent_off_id = ctk.CTkEntry(g, textvariable=self.offload_report_id, font=ctk.CTkFont(size=12), height=35)
         self.ent_off_id.grid(row=4, column=1, columnspan=2, padx=(15, 0), sticky="w", ipadx=100)
 
@@ -1486,7 +1729,7 @@ class DatariumApp(ctk.CTk):
         
         ctk.CTkButton(res_foot, text="Nuovo Offload", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_offload_subpage("OffloadHome")).pack(side="left")
         
-        self.btn_open_report = ctk.CTkButton(res_foot, text="📄 Apri PDF/HTML Report", fg_color="#10b981", hover_color="#059669", width=220, font=ctk.CTkFont(weight="bold"), state="disabled", command=self.open_generated_report)
+        self.btn_open_report = ctk.CTkButton(res_foot, text="📄 Apri Report PDF", fg_color="#10b981", hover_color="#059669", width=220, font=ctk.CTkFont(weight="bold"), state="disabled", command=self.open_generated_report)
         self.btn_open_report.pack(side="right")
 
         # Start on Home
@@ -1497,20 +1740,43 @@ class DatariumApp(ctk.CTk):
             v.pack_forget()
         self.offload_views[name].pack(fill="both", expand=True)
 
+    def render_offload_destinations_ui(self):
+        for w in self.dest_list_frame.winfo_children():
+            w.destroy()
+            
+        if not self.offload_destinations:
+            lbl_empty = ctk.CTkLabel(self.dest_list_frame, text="Nessuna destinazione aggiunta. Clicca Aggiungi per inserire una cartella.", text_color="gray", font=ctk.CTkFont(size=12, slant="italic"))
+            lbl_empty.pack(anchor="w", pady=5)
+        else:
+            for idx, path in enumerate(self.offload_destinations):
+                row = ctk.CTkFrame(self.dest_list_frame, fg_color=("gray90", "gray15"), corner_radius=6)
+                row.pack(fill="x", pady=2)
+                
+                lbl = ctk.CTkLabel(row, text=path, font=ctk.CTkFont(size=11), anchor="w", justify="left")
+                lbl.pack(side="left", padx=10, fill="x", expand=True, pady=5)
+                
+                btn_del = ctk.CTkButton(row, text="❌", width=30, height=25, fg_color="transparent", text_color="#ef4444", hover_color=("gray80", "gray25"), font=ctk.CTkFont(size=10, weight="bold"), command=lambda i=idx: self.remove_offload_destination(i))
+                btn_del.pack(side="right", padx=5)
+                
+        btn_add = ctk.CTkButton(self.dest_list_frame, text="➕ Aggiungi Destinazione", height=30, width=180, font=ctk.CTkFont(size=11, weight="bold"), command=self.add_offload_destination)
+        btn_add.pack(anchor="w", pady=(10, 5))
+
+    def add_offload_destination(self):
+        folder = filedialog.askdirectory(title="Seleziona Cartella di Destinazione")
+        if folder:
+            if folder not in self.offload_destinations:
+                self.offload_destinations.append(folder)
+                self.render_offload_destinations_ui()
+                
+    def remove_offload_destination(self, index):
+        if 0 <= index < len(self.offload_destinations):
+            self.offload_destinations.pop(index)
+            self.render_offload_destinations_ui()
+
     def pick_offload_source(self):
         folder = filedialog.askdirectory(title="Seleziona Cartella Sorgente (SSD/Card)")
         if folder:
             self.offload_source_folder.set(folder)
-
-    def pick_offload_dest1(self):
-        folder = filedialog.askdirectory(title="Seleziona Destinazione Primaria")
-        if folder:
-            self.offload_dest_folder_1.set(folder)
-
-    def pick_offload_dest2(self):
-        folder = filedialog.askdirectory(title="Seleziona Destinazione Backup")
-        if folder:
-            self.offload_dest_folder_2.set(folder)
 
     def open_generated_report(self):
         if hasattr(self, 'generated_report_path') and os.path.exists(self.generated_report_path):
@@ -1519,18 +1785,19 @@ class DatariumApp(ctk.CTk):
 
     def run_offload_process(self):
         src = self.offload_source_folder.get()
-        dst1 = self.offload_dest_folder_1.get()
-        dst2 = self.offload_dest_folder_2.get()
+        dests = [d for d in self.offload_destinations if d.strip()]
         algo = self.offload_algo.get()
         report_id = self.offload_report_id.get()
 
-        if not src or not dst1:
+        if not src or not dests:
             from tkinter import messagebox
-            messagebox.showwarning("Selezione Mancante", "Seleziona almeno la cartella sorgente (SSD) e la destinazione primaria.")
+            messagebox.showwarning("Selezione Mancante", "Seleziona la cartella sorgente (SSD) ed almeno una cartella di destinazione.")
             return
 
         self.show_offload_subpage("OffloadResults")
         self.btn_open_report.configure(state="disabled")
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
 
         for w in self.offload_results_scroll.winfo_children():
             w.destroy()
@@ -1539,125 +1806,136 @@ class DatariumApp(ctk.CTk):
         self.offload_progress_bar.set(0)
 
         def offload_bg():
-            import time
-            import os
-            import shutil
-            import datetime
-            from report_generator import ReportGenerator
+            try:
+                import time
+                import os
+                import shutil
+                import datetime
+                from report_generator import ReportGenerator
 
-            files_to_copy = []
-            for root, _, files in os.walk(src):
-                for f in files:
-                    p = os.path.join(root, f)
-                    rel = os.path.relpath(p, src)
-                    files_to_copy.append({"name": f, "path": p, "rel": rel})
+                files_to_copy = []
+                for root, _, files in os.walk(src):
+                    for f in files:
+                        p = os.path.join(root, f)
+                        rel = os.path.relpath(p, src)
+                        files_to_copy.append({"name": f, "path": p, "rel": rel})
 
-            if not files_to_copy:
-                self.after(0, lambda: self.offload_status_lbl.configure(text="❌ Nessun file trovato nella sorgente.", text_color="#ef4444"))
-                return
+                if not files_to_copy:
+                    self.after(0, lambda: self.offload_status_lbl.configure(text="❌ Nessun file trovato nella sorgente.", text_color="#ef4444"))
+                    return
 
-            total_files = len(files_to_copy)
-            processed_files = 0
-            results = []
-            dests = [dst1]
-            if dst2:
-                dests.append(dst2)
+                total_files = len(files_to_copy)
+                processed_files = 0
+                results = []
 
-            for it in files_to_copy:
-                try:
-                    sz = os.path.getsize(it["path"])
-                    sz_str = self.format_file_size(sz)
+                for it in files_to_copy:
+                    try:
+                        sz = os.path.getsize(it["path"])
+                        sz_str = self.format_file_size(sz)
 
-                    # Compute source hashes
-                    self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Calcolo checksum: {name}..."))
-                    src_hash = self.compute_hash(it["path"], algo)
-                    src_hash_alt = self.compute_hash(it["path"], "SHA-256" if algo == "xxHash64" else "MD5")
+                        # Compute source hashes
+                        self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Calcolo checksum: {name}..."))
+                        src_hash = self.compute_hash(it["path"], algo)
+                        src_hash_alt = self.compute_hash(it["path"], "SHA-256" if algo == "xxHash64" else "MD5")
 
-                    mtime = os.path.getmtime(it["path"])
-                    ctime = os.path.getctime(it["path"])
-                    created_str = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
-                    modified_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                        mtime = os.path.getmtime(it["path"])
+                        ctime = os.path.getctime(it["path"])
+                        created_str = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
+                        modified_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-                    # Copy to all active destinations and verify
-                    copy_success = True
-                    for d in dests:
-                        target_path = os.path.join(d, it["rel"])
-                        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                        # Copy to all active destinations and verify
+                        copy_success = True
+                        for d in dests:
+                            target_path = os.path.join(d, it["rel"])
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
-                        self.after(0, lambda name=it["name"], dest=os.path.basename(d): self.offload_status_lbl.configure(text=f"Copia {name} in {dest}..."))
-                        shutil.copy2(it["path"], target_path)
+                            self.after(0, lambda name=it["name"], dest=os.path.basename(d): self.offload_status_lbl.configure(text=f"Copia {name} in {dest}..."))
+                            shutil.copy2(it["path"], target_path)
 
-                        # Verification
-                        self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
-                        dest_hash = self.compute_hash(target_path, algo)
-                        if dest_hash != src_hash:
-                            copy_success = False
+                            # Verification
+                            self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
+                            dest_hash = self.compute_hash(target_path, algo)
+                            if dest_hash != src_hash:
+                                copy_success = False
 
-                    status = "Verified" if copy_success else "Failed"
+                        status = "Verified" if copy_success else "Failed"
 
-                    # Media metadata extraction mock / standard details
-                    ext = os.path.splitext(it["name"])[1].lower()
-                    media_format = "Video" if ext in ['.mp4', '.mov', '.avi', '.mkv', '.braw', '.r3d', '.mxf'] else ("Image" if ext in ['.jpg', '.jpeg', '.png', '.webp', '.nef', '.cr2', '.arw', '.dng'] else "Data")
+                        # Media metadata extraction mock / standard details
+                        ext = os.path.splitext(it["name"])[1].lower()
+                        media_format = "Video" if ext in ['.mp4', '.mov', '.avi', '.mkv', '.braw', '.r3d', '.mxf'] else ("Image" if ext in ['.jpg', '.jpeg', '.png', '.webp', '.nef', '.cr2', '.arw', '.dng'] else "Data")
 
-                    results.append({
-                        "name": it["name"],
-                        "path": it["path"],
-                        "size_bytes": sz,
-                        "size_str": sz_str,
-                        "created": created_str,
-                        "modified": modified_str,
-                        "hash": src_hash,
-                        "hash_alt": src_hash_alt,
-                        "status": status,
-                        "media_format": media_format,
-                        "codec": "H.264 / AAC" if media_format == "Video" else ("JPEG" if media_format == "Image" else "N/A"),
-                        "duration": "0:00:15" if media_format == "Video" else "N/A",
-                        "resolution": "HD - 1920 x 1080" if media_format == "Video" else "N/A",
-                        "camera": "Sony FX3" if media_format == "Video" else "N/A",
-                        "shot": "Scene 1" if media_format == "Video" else "N/A",
-                        "frames": "375" if media_format == "Video" else "N/A",
-                        "bitrate": "12.5 MB/s" if media_format == "Video" else "N/A",
-                        "audio": "Audio Format: Linear PCM\nChannels: 2\nSample Rate: 48.0 kHz\nAudio Bit Depth: 24-bit\nAudio Bit Rate: 1.5 MB/s" if media_format == "Video" else "N/A"
-                    })
+                        results.append({
+                            "name": it["name"],
+                            "path": it["path"],
+                            "size_bytes": sz,
+                            "size_str": sz_str,
+                            "created": created_str,
+                            "modified": modified_str,
+                            "hash": src_hash,
+                            "hash_alt": src_hash_alt,
+                            "status": status,
+                            "media_format": media_format,
+                            "codec": "H.264 / AAC" if media_format == "Video" else ("JPEG" if media_format == "Image" else "N/A"),
+                            "duration": "0:00:15" if media_format == "Video" else "N/A",
+                            "resolution": "HD - 1920 x 1080" if media_format == "Video" else "N/A",
+                            "camera": "Sony FX3" if media_format == "Video" else "N/A",
+                            "shot": "Scene 1" if media_format == "Video" else "N/A",
+                            "frames": "375" if media_format == "Video" else "N/A",
+                            "bitrate": "12.5 MB/s" if media_format == "Video" else "N/A",
+                            "audio": "Audio Format: Linear PCM\nChannels: 2\nSample Rate: 48.0 kHz\nAudio Bit Depth: 24-bit\nAudio Bit Rate: 1.5 MB/s" if media_format == "Video" else "N/A"
+                        })
 
-                except Exception as e:
-                    results.append({
-                        "name": it["name"],
-                        "path": it["path"],
-                        "size_bytes": 0,
-                        "size_str": "0 B",
-                        "hash": "ERROR",
-                        "status": "Failed"
-                    })
+                    except Exception as e:
+                        results.append({
+                            "name": it["name"],
+                            "path": it["path"],
+                            "size_bytes": 0,
+                            "size_str": "0 B",
+                            "hash": "ERROR",
+                            "status": "Failed"
+                        })
 
-                processed_files += 1
-                progress_val = processed_files / total_files
-                self.after(0, lambda val=progress_val: self.offload_progress_bar.set(val))
+                    processed_files += 1
+                    progress_val = processed_files / total_files
+                    self.after(0, lambda val=progress_val: self.offload_progress_bar.set(val))
 
-            # Generate and save report
-            self.after(0, lambda: self.offload_status_lbl.configure(text="Generazione Report ShotPut Pro..."))
-            report_dir = os.path.join(dst1, "MHL_Reports")
-            report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, dests)
-            self.generated_report_path = report_path
+                # Generate and save report
+                self.after(0, lambda: self.offload_status_lbl.configure(text="Generazione Report..."))
+                first_dst = dests[0]
+                report_dir = os.path.join(first_dst, "MHL_Reports")
+                report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, dests)
+                self.generated_report_path = report_path
+                
+                # Copiamo il report in tutte le altre destinazioni per sicurezza
+                for other_dst in dests[1:]:
+                    try:
+                        other_report_dir = os.path.join(other_dst, "MHL_Reports")
+                        os.makedirs(other_report_dir, exist_ok=True)
+                        shutil.copy2(report_path, os.path.join(other_report_dir, os.path.basename(report_path)))
+                    except:
+                        pass
 
-            def render_results_ui():
-                self.offload_status_lbl.configure(text="✓ Offload completato con successo!", text_color="#10b981")
-                self.btn_open_report.configure(state="normal")
+                def render_results_ui():
+                    self.offload_status_lbl.configure(text="✓ Offload completato con successo!", text_color="#10b981")
+                    self.btn_open_report.configure(state="normal")
 
-                for res in results:
-                    row = ctk.CTkFrame(self.offload_results_scroll, fg_color="transparent")
-                    row.pack(fill="x", pady=2)
+                    for res in results:
+                        row = ctk.CTkFrame(self.offload_results_scroll, fg_color="transparent")
+                        row.pack(fill="x", pady=2)
 
-                    lbl_icon = ctk.CTkLabel(row, text="✓" if res["status"] == "Verified" else "❌", text_color="#10b981" if res["status"] == "Verified" else "#ef4444", font=ctk.CTkFont(size=14, weight="bold"))
-                    lbl_icon.pack(side="left", padx=10)
+                        lbl_icon = ctk.CTkLabel(row, text="✓" if res["status"] == "Verified" else "❌", text_color="#10b981" if res["status"] == "Verified" else "#ef4444", font=ctk.CTkFont(size=14, weight="bold"))
+                        lbl_icon.pack(side="left", padx=10)
 
-                    lbl_name = ctk.CTkLabel(row, text=res["name"], font=ctk.CTkFont(size=12, weight="bold"), anchor="w")
-                    lbl_name.pack(side="left", fill="x", expand=True, padx=5)
+                        lbl_name = ctk.CTkLabel(row, text=res["name"], font=ctk.CTkFont(size=12, weight="bold"), anchor="w")
+                        lbl_name.pack(side="left", fill="x", expand=True, padx=5)
 
-                    lbl_sz = ctk.CTkLabel(row, text=res["size_str"], font=ctk.CTkFont(size=11), text_color="gray")
-                    lbl_sz.pack(side="right", padx=15)
+                        lbl_sz = ctk.CTkLabel(row, text=res["size_str"], font=ctk.CTkFont(size=11), text_color="gray")
+                        lbl_sz.pack(side="right", padx=15)
 
-            self.after(0, render_results_ui)
+                self.after(0, render_results_ui)
+            finally:
+                self.is_scanning = False
+                self.after(0, lambda: self.set_sidebar_state("normal"))
 
         threading.Thread(target=offload_bg, daemon=True).start()
 

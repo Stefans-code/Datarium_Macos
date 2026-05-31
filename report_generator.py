@@ -507,13 +507,175 @@ class ReportGenerator:
         return html_content
 
     @classmethod
+    @classmethod
     def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs):
-        """Salva il report HTML in disco e restituisce il percorso."""
+        """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF."""
         os.makedirs(output_dir, exist_ok=True)
-        content = cls.generate_html_report(report_id, source_dir, files_list, algo, dest_dirs)
+        report_path = os.path.join(output_dir, f"{report_id}_MHL_Report.pdf")
         
-        report_path = os.path.join(output_dir, f"{report_id}_MHL_Report.html")
-        with open(report_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        import fitz
+        doc = fitz.open()
+        
+        # Stile e Font
+        font_name = "helvetica"
+        
+        # Pagina singola o multipla
+        page = doc.new_page(width=595, height=842) # A4
+        
+        # Disegna Intestazione
+        page.draw_rect(fitz.Rect(0, 0, 595, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
+        page.insert_textbox(fitz.Rect(20, 15, 400, 70), "DATARIUM - MHL VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
+        page.insert_textbox(fitz.Rect(20, 45, 400, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
+        
+        # Badge di stato
+        overall_status = "VERIFIED"
+        if any(f.get("status") == "Failed" for f in files_list):
+            overall_status = "FAILED"
             
+        status_color = (0.06, 0.72, 0.5) if overall_status == "VERIFIED" else (0.93, 0.26, 0.26)
+        page.draw_rect(fitz.Rect(450, 20, 570, 60), color=None, fill=status_color, width=0, radius=0.25)
+        page.insert_textbox(fitz.Rect(450, 28, 570, 55), overall_status, fontsize=12, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
+        
+        # Specifiche Hardware e Dettagli
+        specs = cls.get_hardware_specs()
+        page.insert_textbox(fitz.Rect(20, 100, 280, 200), 
+                             f"Specifiche PC:\n• OS: {specs['os']}\n• CPU/RAM: {specs['processors']} CPUs, {specs['ram']}", 
+                             fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
+        
+        # Calcolo statistiche
+        total_size_bytes = sum(f.get("size_bytes", 0) for f in files_list)
+        if total_size_bytes < 1024 * 1024:
+            total_size_str = f"{total_size_bytes / 1024:.2f} KB"
+        elif total_size_bytes < 1024 * 1024 * 1024:
+            total_size_str = f"{total_size_bytes / (1024 * 1024):.2f} MB"
+        else:
+            total_size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} GB"
+            
+        dests_str = "\n".join(f"• {d}" for d in dest_dirs)
+        page.insert_textbox(fitz.Rect(300, 100, 570, 200), 
+                             f"Riepilogo Offload:\n• File Totali: {len(files_list)}\n• Dimensione Totale: {total_size_str}\n• Algoritmo: {algo}\n• Destinazioni:\n{dests_str}", 
+                             fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
+        
+        # Tabella dei File
+        # Intestazione Tabella
+        y = 210
+        page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
+        page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        page.insert_text((220, y+14), "Dimensione", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        page.insert_text((300, y+14), "Checksum", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        page.insert_text((510, y+14), "Stato", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        
+        y += 25
+        for f in files_list:
+            # Nuova pagina se andiamo fuori dai limiti dell'A4
+            if y > 800:
+                page = doc.new_page(width=595, height=842)
+                y = 40
+                # Re-intestazione ridotta su nuova pagina
+                page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
+                page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                page.insert_text((220, y+14), "Dimensione", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                page.insert_text((300, y+14), "Checksum", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                page.insert_text((510, y+14), "Stato", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                y += 25
+            
+            # Riga del file
+            page.draw_line((20, y+18), (575, y+18), color=(0.9, 0.9, 0.9), width=0.5)
+            
+            # Troncamento del nome file se troppo lungo
+            name_disp = f["name"]
+            if len(name_disp) > 30:
+                name_disp = name_disp[:27] + "..."
+                
+            page.insert_text((25, y+12), name_disp, fontsize=8, fontname=font_name, color=(0.1, 0.1, 0.1))
+            page.insert_text((220, y+12), f.get("size_str", "N/A"), fontsize=8, fontname=font_name, color=(0.3, 0.3, 0.3))
+            
+            # Troncamento o formattazione dell'hash
+            h_disp = f.get("hash", "N/A")
+            if len(h_disp) > 36:
+                h_disp = h_disp[:33] + "..."
+            page.insert_text((300, y+12), h_disp, fontsize=8, fontname="courier", color=(0.06, 0.5, 0.3))
+            
+            status_text = f.get("status", "Verified")
+            status_txt_color = (0.06, 0.72, 0.5) if status_text == "Verified" else (0.93, 0.26, 0.26)
+            page.insert_text((510, y+12), status_text, fontsize=8, fontname=f"{font_name}-bold", color=status_txt_color)
+            
+            y += 22
+            
+        doc.save(report_path)
+        doc.close()
+        return report_path
+
+    @classmethod
+    def save_hash_report(cls, output_dir, report_id, files_list, algo):
+        """Genera e salva un vero e proprio file PDF di verifica Hash usando PyMuPDF."""
+        os.makedirs(output_dir, exist_ok=True)
+        report_path = os.path.join(output_dir, f"{report_id}_Hash_Report.pdf")
+        
+        import fitz
+        doc = fitz.open()
+        
+        font_name = "helvetica"
+        page = doc.new_page(width=595, height=842) # A4
+        
+        # Disegna Intestazione
+        page.draw_rect(fitz.Rect(0, 0, 595, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
+        page.insert_textbox(fitz.Rect(20, 15, 400, 70), "DATARIUM - HASH VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
+        page.insert_textbox(fitz.Rect(20, 45, 400, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
+        
+        # Badge di stato (sempre verified per hash check completato)
+        page.draw_rect(fitz.Rect(450, 20, 570, 60), color=None, fill=(0.06, 0.72, 0.5), width=0, radius=0.25)
+        page.insert_textbox(fitz.Rect(450, 28, 570, 55), "COMPLETED", fontsize=11, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
+        
+        # Specifiche Hardware e Riepilogo
+        specs = cls.get_hardware_specs()
+        page.insert_textbox(fitz.Rect(20, 100, 280, 180), 
+                             f"Specifiche PC:\n• OS: {specs['os']}\n• CPU/RAM: {specs['processors']} CPUs, {specs['ram']}", 
+                             fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
+        
+        page.insert_textbox(fitz.Rect(300, 100, 570, 180), 
+                             f"Riepilogo Scansione:\n• File Analizzati: {len(files_list)}\n• Algoritmo Checksum: {algo}", 
+                             fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
+        
+        # Tabella dei File
+        y = 190
+        page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
+        page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        page.insert_text((220, y+14), "Tipo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        page.insert_text((280, y+14), f"Valore Checksum ({algo})", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        page.insert_text((510, y+14), "Ruolo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+        
+        y += 25
+        for f in files_list:
+            if y > 800:
+                page = doc.new_page(width=595, height=842)
+                y = 40
+                page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
+                page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                page.insert_text((220, y+14), "Tipo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                page.insert_text((280, y+14), f"Valore Checksum ({algo})", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                page.insert_text((510, y+14), "Ruolo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+                y += 25
+            
+            page.draw_line((20, y+18), (575, y+18), color=(0.9, 0.9, 0.9), width=0.5)
+            
+            name_disp = f["name"]
+            if len(name_disp) > 30:
+                name_disp = name_disp[:27] + "..."
+            page.insert_text((25, y+12), name_disp, fontsize=8, fontname=font_name, color=(0.1, 0.1, 0.1))
+            page.insert_text((220, y+12), f.get("type", "FILE"), fontsize=8, fontname=font_name, color=(0.3, 0.3, 0.3))
+            
+            h_disp = f.get("hash", "N/A")
+            if len(h_disp) > 36:
+                h_disp = h_disp[:33] + "..."
+            page.insert_text((280, y+12), h_disp, fontsize=8, fontname="courier", color=(0.06, 0.5, 0.3))
+            
+            role_text = "Sorgente" if f.get("is_source") else "Confronto"
+            role_color = (0.06, 0.72, 0.5) if f.get("is_source") else (0.38, 0.65, 0.98)
+            page.insert_text((510, y+12), role_text, fontsize=8, fontname=f"{font_name}-bold", color=role_color)
+            
+            y += 22
+            
+        doc.save(report_path)
+        doc.close()
         return report_path

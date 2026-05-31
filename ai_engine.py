@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import hashlib
 import base64
@@ -22,6 +23,7 @@ try:
 except:
     pass
 
+
 class AIEngine:
     def __init__(self):
         self.llm = None
@@ -29,8 +31,8 @@ class AIEngine:
         self.hardware_info = "CPU"
         
         # Default Text Model
-        self.text_repo = "TheBloke/phi-2-GGUF"
-        self.text_file = "phi-2.Q4_K_M.gguf"
+        self.text_repo = "Qwen/Qwen2.5-3B-Instruct-GGUF"
+        self.text_file = "qwen2.5-3b-instruct-q4_k_m.gguf"
         
         # Vision Model (LLaVa v1.5 7B - Second State Version)
         self.vision_repo = "second-state/Llava-v1.5-7B-GGUF"
@@ -51,7 +53,7 @@ class AIEngine:
             base = os.path.expanduser("~/Library/Application Support/Datarium")
             models_dir = os.path.join(base, "models")
         elif getattr(sys, 'frozen', False):
-            # Percorso Windows accanto all'exe
+            # Percorso accanto all'exe
             models_dir = os.path.join(os.path.dirname(sys.executable), "models")
         else:
             models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -70,7 +72,7 @@ class AIEngine:
             
             # Controllo incrociato: devono esserci il testo, la visione E il proiettore
             t_ok = os.path.exists(os.path.join(d, self.text_file)) or \
-                   os.path.exists(os.path.join(d, "phi-2.Q2_K.gguf"))
+                   os.path.exists(os.path.join(d, "qwen2.5-3b-instruct-q2_k.gguf"))
             
             v_ok = os.path.exists(os.path.join(d, self.vision_file)) or \
                    os.path.exists(os.path.join(d, "llava-v1.5-7b-Q2_K.gguf"))
@@ -91,7 +93,7 @@ class AIEngine:
             
             tasks = []
             if quality == "slim":
-                tasks.append((self.text_repo, "phi-2.Q2_K.gguf"))
+                tasks.append((self.text_repo, "qwen2.5-3b-instruct-q2_k.gguf"))
                 if vision_mode:
                     tasks.append((self.vision_repo, "llava-v1.5-7b-Q2_K.gguf"))
                     tasks.append((self.vision_repo, self.vision_projector))
@@ -105,7 +107,7 @@ class AIEngine:
                 # Fallback slim names
                 is_slim = False
                 alt_filename = filename
-                if "phi-2" in filename: alt_filename = "phi-2.Q2_K.gguf"
+                if "qwen" in filename.lower(): alt_filename = "qwen2.5-3b-instruct-q2_k.gguf"
                 elif "llava" in filename and "v1.5-7b" in filename and "mmproj" not in filename: alt_filename = "llava-v1.5-7b-Q2_K.gguf"
 
                 # Verifichiamo se il file esiste già nell'unica cartella modelli supportata
@@ -148,7 +150,7 @@ class AIEngine:
                 
                 # Identifica i percorsi reali (main o slim)
                 t_path = os.path.join(final_models_dir, self.text_file)
-                if not os.path.exists(t_path): t_path = os.path.join(final_models_dir, "phi-2.Q2_K.gguf")
+                if not os.path.exists(t_path): t_path = os.path.join(final_models_dir, "qwen2.5-3b-instruct-q2_k.gguf")
                 
                 v_path = os.path.join(final_models_dir, self.vision_file)
                 if not os.path.exists(v_path): v_path = os.path.join(final_models_dir, "llava-v1.5-7b-Q2_K.gguf")
@@ -207,6 +209,7 @@ class AIEngine:
 
     def extract_context(self, file_path):
         """Extracts a deep text summary or detailed image description with metadata fusion."""
+        self.last_has_people = False
         ext = os.path.splitext(file_path)[1].lower()
         metadata = self.extract_metadata(file_path)
         meta_str = f" [Metadata: {metadata}]" if metadata else ""
@@ -247,26 +250,36 @@ class AIEngine:
         ] and self.is_vision:
             try:
                 img = Image.open(file_path)
-                img.thumbnail((448, 448)) # Risoluzione ideale per LLaVA 1.5
+                img.thumbnail((1008, 1008)) # Alta risoluzione per preservare testo e dettagli
                 buffered = BytesIO()
-                img.save(buffered, format="JPEG")
+                img.save(buffered, format="JPEG", quality=85)
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 data_url = f"data:image/jpeg;base64,{img_str}"
                 
                 # Prompt intelligente che fonde Visione e Metadati con identificazione persone
                 hint = f"Note: This file was created on {metadata.get('DateTimeOriginal', 'unknown date')}." if metadata else ""
                 
+                prompt_text = (
+                    "Describe this image with high precision. List:\n"
+                    "1) The main subject, objects, and people (specify their clothing, age, actions, or details),\n"
+                    "2) Any visible text, writing, or logos (read word-for-word),\n"
+                    "3) Setting and background.\n"
+                    "Be highly descriptive and precise."
+                )
+                
                 response = self.llm.create_chat_completion(
                     messages=[
                         {"role": "user", "content": [
-                            {"type": "text", "text": "Describe this image for archiving. Identify if there are any people (specify gender, approximate age, clothing, or facial expressions if visible), their key actions, main objects, settings/background, and context."},
+                            {"type": "text", "text": prompt_text},
                             {"type": "image_url", "image_url": {"url": data_url}}
                         ]}
                     ],
-                    max_tokens=80,
+                    max_tokens=150,
                     temperature=0.1
                 )
-                return f"IMAGE_DESC: {response['choices'][0]['message']['content'].strip()}{meta_str}"
+                
+                response_text = response['choices'][0]['message']['content'].strip()
+                return f"IMAGE_DESC: {response_text}{meta_str}"
             except Exception as e:
                 # Fallback se Pillow fallisce ad aprire il file RAW (es. .NEF, .CR2 senza codec specifici)
                 if metadata:
@@ -290,90 +303,177 @@ class AIEngine:
         """Brainstorming: Analyse all contexts to find macro-themes and sub-themes."""
         if not self.llm or not all_contexts: return "Generale, Varie"
         
-        summaries = "\n".join([c[:150] for c in all_contexts if c][:40])
+        cleaned_contexts = []
+        for c in all_contexts:
+            if not c: continue
+            for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
+                if c.startswith(prefix):
+                    c = c[len(prefix):]
+                    break
+            cleaned_contexts.append(c)
+            
+        summaries = "\n".join([c[:150] for c in cleaned_contexts if c][:40])
         if not summaries: return "Varie"
         
-        prompt = f"""Instruct: Analyze these descriptions and create a 2-level taxonomy (Category > Subcategory).
-Identify 5 main Categories and for each, 1-2 Subcategories.
-Format: Category1(Sub1, Sub2), Category2(Sub1)...
-Only the words.
-
-Files:
-{summaries}
-
-Taxonomy:"""
+        messages = [
+            {"role": "system", "content": (
+                "Analyze these file descriptions and create a 2-level hierarchical taxonomy in Italian (Category > Subcategory).\n"
+                "Identify 5 main Categories and for each, 1-2 Subcategories.\n"
+                "Format: Category1(Sub1, Sub2), Category2(Sub1)... Only return the taxonomy words."
+            )},
+            {"role": "user", "content": f"Files to analyze:\n{summaries}"}
+        ]
         
         try:
-            output = self.llm(prompt, max_tokens=100, temperature=0.5, stop=["\n"])
-            return output["choices"][0]["text"].strip()
+            response = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=100,
+                temperature=0.5
+            )
+            return response['choices'][0]['message']['content'].strip()
         except:
             return "Documentazione(Lavoro, Personale), Immagini(Viaggi, Natura), Archivio(Varie)"
 
     def get_smart_name(self, original_name, category, context="", taxonomy=""):
         """Generates a smart name using deep context and hierarchical taxonomy."""
         if not self.llm: return f"{category}/{original_name}"
-            
-        context_str = f"\nContext: {context}" if context else ""
-        taxo_str = f"\nAllowed Taxonomy: {taxonomy}" if taxonomy else ""
         
-        prompt = f"""Instruct: Sei un archivista esperto. Rinomina il file nel formato esatto: CATEGORIA/SOTTOCATEGORIA/NOME_DESCRITTIVO
-Regole fondamentali:
-1. Il NOME_DESCRITTIVO finale deve essere in ITALIANO, molto chiaro, sensato e descrittivo.
-2. Usa al massimo 4 o 5 parole per il NOME_DESCRITTIVO, separate esclusivamente da trattini bassi (_) (esempio: Uomo_Camicia_Blu_Soridente).
-3. Identifica le persone se presenti nel contesto (es. uomo, donna, bambini) e includile nel nome in modo naturale.
-4. Non usare caratteri speciali, lettere accentate o estensioni.
-5. Usa la tassonomia consentita se fornita.
-6. Ritorna SOLO E SOLTANTO la stringa nel formato 'Categoria/Subcategory/Nome_Del_File'. Nessun altro testo.
+        # 1. Bypass se l'utente ha identificato manualmente delle persone
+        if "Persone identificate dall'utente: " in context:
+            user_identified = context.split("Persone identificate dall'utente: ")[-1].strip()
+            # Pulisce e normalizza il nome fornito dall'utente
+            user_identified = re.sub(r'[^a-zA-Z0-9_ ]', '', user_identified).strip()
+            user_identified = re.sub(r'\s+', '_', user_identified)
+            if len(user_identified) > 2:
+                # Restituisce direttamente il percorso strutturato basato sul nome utente, garantendo 100% fedeltà
+                orig_ext = os.path.splitext(original_name)[1]
+                return f"{category}/Persone/Identificate/{user_identified}{orig_ext}"
 
-Esempi:
-Original: image_801.jpg
-Context: Foto di famiglia sotto la Torre Eiffel, estate 2023, due genitori e un bambino.
-Taxonomy: Viaggi(Francia)
-New Path: Viaggi/Francia/Famiglia_Sotto_Torre_Eiffel_2023
-
-Original: photo_12.png
-Context: Un uomo anziano con gli occhiali che legge un libro in biblioteca.
-Taxonomy: Persone(Ritratti)
-New Path: Persone/Ritratti/Uomo_Anziano_Legge_Libro
-
-Original: {original_name} (Type: {category}){context_str}{taxo_str}
-New Path:"""
+        # Pulizia prefissi tecnici dal contesto per non confondere il modello
+        for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
+            if context.startswith(prefix):
+                context = context[len(prefix):]
+                break
+            
+        context_str = f"Descrizione: {context}" if context else ""
+        taxo_str = f"Tassonomia consigliata: {taxonomy}" if taxonomy else ""
+        
+        # Rimosso qualsiasi elenco numerato per evitare il bug di "1_..._2_..._3_" dei modelli
+        messages = [
+            {"role": "system", "content": (
+                "Sei un archivista esperto. Rinomina il file nel formato esatto: Categoria/Sottocategoria/Nome_Descrittivo\n"
+                "Regole fondamentali:\n"
+                "Il nome descrittivo deve essere in italiano ed estremamente specifico.\n"
+                "Usa da 3 a 5 parole significative separate esclusivamente da trattini bassi (_) (esempio: Bambino_Camicia_Rossa_Soridente).\n"
+                "Non usare elenchi numerati, preamboli o estensioni.\n"
+                "Rispondi SOLO ed ESCLUSIVAMENTE con la stringa Categoria/Sottocategoria/Nome."
+            )},
+            {"role": "user", "content": (
+                f"Original Name: {original_name}\n"
+                f"File Type: {category}\n"
+                f"{context_str}\n"
+                f"{taxo_str}\n\n"
+                "Nuovo percorso completo (Categoria/Sottocategoria/Nome_Descrittivo):"
+            )}
+        ]
         
         try:
-            output = self.llm(
-                prompt,
+            response = self.llm.create_chat_completion(
+                messages=messages,
                 max_tokens=32,
-                stop=["\n", "Original:", "Instruct:"],
-                temperature=0.2,
-                repeat_penalty=1.4
+                temperature=0.1
             )
-            clean_path = output["choices"][0]["text"].strip()
+            clean_path = response['choices'][0]['message']['content'].strip()
             
             # Final cleanup
             clean_path = clean_path.strip("'\" ").split('(')[0].split('\'')[0].split('"')[0].strip()
-            clean_path = clean_path.replace(" ", "_")
             
-            # Remove any trailing extensions from AI
+            # Normalizzazione degli slash (sostituzione di backslash e rimozione spazi intorno agli slash)
+            clean_path = clean_path.replace('\\', '/')
+            clean_path = re.sub(r'\s*/\s*', '/', clean_path)
+            
+            parts = [p.strip() for p in clean_path.split('/') if p.strip()]
+            
+            # Meccanismo di fallback difensivo a 3 livelli (garantisce sempre la struttura corretta)
+            if len(parts) == 1:
+                subcat = "Varie"
+                if taxonomy and ',' in taxonomy:
+                    subcat = taxonomy.split(',')[0].strip()
+                name_part = parts[0]
+                parts = ["Generale", subcat, name_part]
+            elif len(parts) == 2:
+                parts = [parts[0], "Generale", parts[1]]
+            elif len(parts) > 3:
+                name_part = "_".join(parts[2:])
+                parts = [parts[0], parts[1], name_part]
+            elif len(parts) == 0:
+                parts = ["Generale", "Varie", os.path.splitext(original_name)[0]]
+            
+            # Sostituzione degli spazi con trattino basso esclusivamente all'interno dei singoli componenti
+            parts = [re.sub(r'\s+', '_', p) for p in parts]
+            clean_path = '/'.join(parts)
+            
+            # Rimuove eventuali estensioni residue dall'output dell'AI
             while '.' in clean_path:
                 idx = clean_path.rfind('.')
                 if idx > len(clean_path)-6: clean_path = clean_path[:idx]
                 else: break
             
-            # Sanitize but keep the '/' for themes
-            import re
+            # Sanifica i caratteri consentiti preservando lo slash
             clean_path = re.sub(r'[^a-zA-Z0-9_/]', '', clean_path)
             
             if len(clean_path) < 3:
-                clean_path = f"Generale/{os.path.splitext(original_name)[0]}"
+                clean_path = f"Generale/Varie/{os.path.splitext(original_name)[0]}"
                 
             orig_ext = os.path.splitext(original_name)[1]
-            # Assicuriamoci che il percorso finale sia Categoria/Tema/Nome.ext
             return f"{category}/{clean_path}{orig_ext}"
         except Exception as e:
             return f"{category}/{original_name}"
-        except Exception as e:
-            return f"{category}/{original_name}"
+
+    def get_album_name(self, context):
+        """Generates a short, precise album/theme name (1-2 words in Italian) based on description."""
+        if not self.llm or not context: return "Varie"
+        
+        # Pulizia prefissi dal contesto
+        for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
+            if context.startswith(prefix):
+                context = context[len(prefix):]
+                break
+                
+        messages = [
+            {"role": "system", "content": (
+                "Sei un assistente esperto. Ritorna solo un nome di album o tema estremamente sintetico (massimo 1 o 2 parole in ITALIANO) in base alla descrizione.\n"
+                "Non usare elenchi numerati o spiegazioni. Rispondi solo con il nome del tema."
+            )},
+            {"role": "user", "content": f"Descrizione: {context}\nTema/Album:"}
+        ]
+        
+        try:
+            response = self.llm.create_chat_completion(
+                messages=messages,
+                max_tokens=8,
+                temperature=0.1
+            )
+            clean = response['choices'][0]['message']['content'].strip()
             
+            # Rimuove prefisso "Tema:" o "Album:" qualora fosse ritornato dall'AI prima della sanificazione
+            if clean.lower().startswith("tema:"):
+                clean = clean[5:].strip()
+            elif clean.lower().startswith("album:"):
+                clean = clean[6:].strip()
+                
+            import re
+            clean = re.sub(r'[^a-zA-Z0-9_ ]', '', clean).strip()
+            
+            # Forza il limite rigoroso di 1 o 2 parole al massimo in italiano
+            words = clean.split()
+            if len(words) > 2:
+                clean = " ".join(words[:2])
+                
+            return clean.capitalize() if clean else "Varie"
+        except:
+            return "Varie"
+
     def compute_file_hash(self, file_path, algo="MD5"):
         try:
             if algo == "MD5":

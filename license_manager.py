@@ -74,8 +74,62 @@ class LicenseManager:
             fallback_id = f"{uuid.getnode()}-{platform.node()}-SECURE-FALLBACK"
             return hashlib.sha256(fallback_id.encode()).hexdigest()[:16].upper()
 
+    def check_online_validation(self, hwid):
+        """Verifica se l'HWID ha una licenza valida su Supabase.
+        Restituisce True se ha una licenza attiva online.
+        Restituisce False se la licenza è revocata o eliminata dal database.
+        Restituisce None se non c'è connessione o se la funzione non esiste (offline fallback).
+        """
+        import urllib.request
+        import json
+        
+        # 1. Tentativo tramite RPC (Remote Procedure Call) che bypassa l'RLS
+        url_rpc = "https://xoowkjepvbokxmhsqmnm.supabase.co/rest/v1/rpc/check_license_validity"
+        headers = {
+            "apikey": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhvb3dramVwdmJva3htaHNxbW5tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3NTI2NjUsImV4cCI6MjA5MjMyODY2NX0.2S_baIWot9ZkW7bsi16hy84O9Edf_XlBcQBmhXs3H1Y",
+            "Authorization": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhvb3dramVwdmJva3htaHNxbW5tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3NTI2NjUsImV4cCI6MjA5MjMyODY2NX0.2S_baIWot9ZkW7bsi16hy84O9Edf_XlBcQBmhXs3H1Y",
+            "Content-Type": "application/json"
+        }
+        try:
+            req = urllib.request.Request(url_rpc, data=json.dumps({"p_hwid": hwid}).encode(), headers=headers)
+            with urllib.request.urlopen(req, timeout=3) as response:
+                result = json.loads(response.read().decode())
+                if result is True:
+                    return True
+                elif result is False:
+                    return False
+        except:
+            pass
+
+        # 2. Fallback tramite REST API classica (caso in cui l'RPC non sia stato creato)
+        url_rest = f"https://xoowkjepvbokxmhsqmnm.supabase.co/rest/v1/licenses?hwid=eq.{hwid}"
+        headers_rest = {
+            "apikey": headers["apikey"],
+            "Authorization": headers["Authorization"]
+        }
+        try:
+            req = urllib.request.Request(url_rest, headers=headers_rest)
+            with urllib.request.urlopen(req, timeout=3) as response:
+                data = json.loads(response.read().decode())
+                if isinstance(data, list):
+                    if any(item.get("status") == "active" for item in data):
+                        return True
+                    if any(item.get("status") == "revoked" for item in data):
+                        return False
+        except:
+            pass
+        return None
+
     def verify_license(self, token=None):
         """Verifica se la licenza è valida per questo hardware."""
+        current_hwid = self.get_hwid()
+        online_valid = self.check_online_validation(current_hwid)
+        if online_valid is False:
+            if os.path.exists(self.license_path):
+                try: os.remove(self.license_path)
+                except: pass
+            return False, "Licenza revocata o terminata (Database validation failed)"
+
         if not token:
             if os.path.exists(self.license_path):
                 try:
@@ -90,7 +144,6 @@ class LicenseManager:
             payload = jwt.decode(token, self.LICENSE_SECRET, algorithms=[self.ALGORITHM])
             
             # Controllo HWID
-            current_hwid = self.get_hwid()
             if payload.get("hwid") != current_hwid:
                 return False, f"Hardware ID mismatch (Local: {current_hwid})"
             
