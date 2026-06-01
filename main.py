@@ -14,6 +14,8 @@ if False:
     import docx
     import llama_cpp
     import llama_cpp.llama_chat_format
+    import cv2
+    import face_memory
 
 # Windows DPI Awareness for crisp UI
 if os.name == 'nt':
@@ -43,6 +45,8 @@ import shutil
 from tkinter import filedialog
 from ai_engine import AIEngine
 from license_manager import LicenseManager
+import cv2
+from face_memory import FaceMemoryManager
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
@@ -112,6 +116,65 @@ class ImageIdentificationDialog(ctk.CTkToplevel):
         self.user_input = ""
         self.destroy()
 
+class FaceIdentificationDialog(ctk.CTkToplevel):
+    def __init__(self, parent, face_pil_img, filename, face_idx, total_faces):
+        super().__init__(parent)
+        self.title(f"Identifica Volto {face_idx}/{total_faces}")
+        self.geometry("450x420")
+        self.resizable(False, False)
+        
+        # Rendi la finestra modale e in primo piano
+        self.transient(parent)
+        self.grab_set()
+        
+        self.user_input = None
+        
+        # Mostra il ritaglio della faccia
+        try:
+            face_pil_img = face_pil_img.copy()
+            face_pil_img.thumbnail((200, 200))
+            self.photo = ctk.CTkImage(light_image=face_pil_img, size=face_pil_img.size)
+            self.img_lbl = ctk.CTkLabel(self, text="", image=self.photo)
+            self.img_lbl.pack(pady=15)
+        except Exception as e:
+            self.img_lbl = ctk.CTkLabel(self, text=f"[Anteprima non disponibile]\n{e}", text_color="red")
+            self.img_lbl.pack(pady=40)
+            
+        # Domanda
+        self.lbl_question = ctk.CTkLabel(self, text="Chi è questa persona?", font=ctk.CTkFont(size=16, weight="bold"))
+        self.lbl_question.pack(pady=5)
+        
+        self.lbl_sub = ctk.CTkLabel(self, text=f"Volto rilevato nell'immagine '{filename}'", font=ctk.CTkFont(size=11), text_color="gray")
+        self.lbl_sub.pack(pady=2)
+        
+        # Campo di testo
+        self.entry = ctk.CTkEntry(self, width=320, placeholder_text="Inserisci il nome (es. Stefan) o lascia vuoto...")
+        self.entry.pack(pady=12)
+        self.entry.focus()
+        
+        # Premi Invio per confermare
+        self.entry.bind("<Return>", lambda e: self.on_ok())
+        
+        # Pulsanti
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=10)
+        
+        self.btn_cancel = ctk.CTkButton(btn_frame, text="Salta Faccia", width=110, fg_color="transparent", border_width=1, command=self.on_cancel)
+        self.btn_cancel.pack(side="left", padx=10)
+        
+        self.btn_ok = ctk.CTkButton(btn_frame, text="Salva in Memoria", width=140, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.on_ok)
+        self.btn_ok.pack(side="left", padx=10)
+        
+        self.wait_window(self)
+        
+    def on_ok(self):
+        self.user_input = self.entry.get().strip()
+        self.destroy()
+        
+    def on_cancel(self):
+        self.user_input = ""
+        self.destroy()
+
 class DatariumApp(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -135,6 +198,7 @@ class DatariumApp(ctk.CTk):
         # Core Engines
         self.ai = AIEngine()
         self.license = LicenseManager()
+        self.face_mem = FaceMemoryManager(base_models_dir=self.ai.get_models_dir())
         
         # State
         self.source_folder = ctk.StringVar(value="")
@@ -745,25 +809,50 @@ class DatariumApp(ctk.CTk):
                 self.update_status(f"👁️ Visione {idx+1}/{len(vision_needed)}: {item['old']}")
                 item['context'] = self.ai.extract_context(item['path'])
                 
-                # Se la checkbox "Identifica persone nelle foto" è attiva ed il contesto rileva persone, chiedi all'utente
+                # Se la checkbox "Identifica persone nelle foto" è attiva, esegui il riconoscimento facciale con memoria
                 if self.organizer_identify_people.get():
-                    context_lower = item.get('context', '').lower()
-                    # Lista di parole intere per identificare la presenza reale di persone (escludendo oggetti e model/face/human)
-                    people_pattern = r'\b(person|people|man|men|woman|women|child|children|boy|boys|girl|girls|guy|guys|lady|ladies|gentleman|gentlemen|baby|babies|toddler|toddlers|teenager|teenagers|adult|adults|crowd|crowds|persona|persone|uomo|uomini|donna|donne|bambino|bambina|bambini|bambine|ragazzo|ragazza|ragazzi|ragazze|tizio|tizia|signore|signora|signori|neonato|neonata|neonati|neonate|folla|folle)s?\b'
-                    has_people = bool(re.search(people_pattern, context_lower))
-                    
-                    if has_people:
-                        user_input = None
-                        event = threading.Event()
-                        def ask():
-                            nonlocal user_input
-                            dialog = ImageIdentificationDialog(self, item['path'], item['old'])
-                            user_input = dialog.user_input
-                            event.set()
-                        self.after(0, ask)
-                        event.wait()
-                        if user_input and user_input.strip():
-                            item['context'] = (item.get('context', '') + f" Persone identificate dall'utente: {user_input.strip()}").strip()
+                    self.update_status(f"👤 Analisi volti: {item['old']}")
+                    try:
+                        faces, cv_img = self.face_mem.detect_faces(item['path'])
+                        if faces:
+                            identified_names = []
+                            for f_idx, rect in enumerate(faces):
+                                gray_crop, bgr_crop = self.face_mem.crop_face(cv_img, rect)
+                                predicted_name, conf = self.face_mem.predict_face(gray_crop)
+                                
+                                if predicted_name:
+                                    identified_names.append(predicted_name)
+                                    print(f"[FaceMemory] Volto {f_idx+1}/{len(faces)} riconosciuto: {predicted_name} (conf: {conf:.1f})")
+                                else:
+                                    # Non riconosciuto, chiedi all'utente ritagliando il volto
+                                    from PIL import Image
+                                    bgr_rgb = cv2.cvtColor(bgr_crop, cv2.COLOR_BGR2RGB)
+                                    pil_crop = Image.fromarray(bgr_rgb)
+                                    
+                                    user_input = None
+                                    event = threading.Event()
+                                    def ask_face(crop=pil_crop, idx=f_idx+1, total=len(faces)):
+                                        nonlocal user_input
+                                        dialog = FaceIdentificationDialog(self, crop, item['old'], idx, total)
+                                        user_input = dialog.user_input
+                                        event.set()
+                                        
+                                    self.after(0, ask_face)
+                                    event.wait()
+                                    
+                                    if user_input and user_input.strip():
+                                        new_name = user_input.strip()
+                                        identified_names.append(new_name)
+                                        self.face_mem.add_face(new_name, gray_crop)
+                                        print(f"[FaceMemory] Nuovo volto registrato in memoria: '{new_name}'")
+                                        
+                            if identified_names:
+                                # Rimuovi eventuali duplicati mantenendo l'ordine
+                                unique_names = list(dict.fromkeys(identified_names))
+                                names_str = ", ".join(unique_names)
+                                item['context'] = (item.get('context', '') + f" Persone identificate dall'utente: {names_str}").strip()
+                    except Exception as fe:
+                        print(f"Errore analisi volti: {fe}")
                 
                 self.set_progress(0.3 + 0.4 * ((idx+1)/max(1, len(vision_needed))))
 

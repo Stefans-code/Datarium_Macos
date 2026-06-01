@@ -9,3 +9,4 @@ PyJWT
 cryptography
 xxhash
 pillow-heif
+opencv-contrib-python
