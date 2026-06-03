@@ -7,7 +7,14 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - runner: macos-13
+            arch: Intel
+          - runner: macos-14
+            arch: AppleSilicon
+    runs-on: ${{ matrix.runner }}
     
     steps:
     - uses: actions/checkout@v4
@@ -72,11 +79,11 @@ jobs:
           --icon "Datarium.app" 175 120 \
           --hide-extension "Datarium.app" \
           --app-drop-link 425 120 \
-          "dist/Datarium_Mac_Universal.dmg" \
+          "dist/Datarium_Mac_${{ matrix.arch }}.dmg" \
           "dist/Datarium.app"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Datarium-macOS-DMG
-        path: dist/Datarium_Mac_Universal.dmg
+        name: Datarium-macOS-${{ matrix.arch }}-DMG
+        path: dist/Datarium_Mac_${{ matrix.arch }}.dmg
