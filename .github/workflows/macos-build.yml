@@ -30,12 +30,12 @@ jobs:
     - name: Install dependencies
       run: |
         ${{ matrix.prefix }} python -m pip install --upgrade pip
-        # Install pre-compiled llama-cpp-python to avoid compilation delays
+        # Install pre-compiled llama-cpp-python to avoid compilation delays and compiler errors
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
         else
-          # Compile CPU-only on emulated runner, disabling examples and tools to prevent Rosetta compiler failures
-          CMAKE_ARGS="-DLLAMA_METAL=off -DLLAMA_BUILD_EXAMPLES=off -DLLAMA_BUILD_SERVER=off -DLLAMA_BUILD_TESTS=off -DLLAMA_BUILD_TOOLS=off" ${{ matrix.prefix }} python -m pip install llama-cpp-python
+          # Use pre-compiled v0.3.2 wheel for Intel macOS to prevent compilation from source
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.2 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
         fi
         ${{ matrix.prefix }} pip install -r requirements.txt
         ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4
