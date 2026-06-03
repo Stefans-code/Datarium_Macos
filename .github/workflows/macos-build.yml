@@ -35,7 +35,7 @@ jobs:
           ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
         else
           # Compile CPU-only on emulated runner, disabling examples and tools to prevent Rosetta compiler failures
-          CMAKE_ARGS="-DLLAMA_METAL=off -DLLAMA_BUILD_EXAMPLES=off -DLLAMA_BUILD_SERVER=off -DLLAMA_BUILD_TESTS=off" ${{ matrix.prefix }} python -m pip install llama-cpp-python
+          CMAKE_ARGS="-DLLAMA_METAL=off -DLLAMA_BUILD_EXAMPLES=off -DLLAMA_BUILD_SERVER=off -DLLAMA_BUILD_TESTS=off -DLLAMA_BUILD_TOOLS=off" ${{ matrix.prefix }} python -m pip install llama-cpp-python
         fi
         ${{ matrix.prefix }} pip install -r requirements.txt
         ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4
