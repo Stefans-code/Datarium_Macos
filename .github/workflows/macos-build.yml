@@ -33,6 +33,8 @@ jobs:
         # Install pre-compiled llama-cpp-python to avoid compilation delays
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
+        else
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
         fi
         ${{ matrix.prefix }} pip install -r requirements.txt
         ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4
