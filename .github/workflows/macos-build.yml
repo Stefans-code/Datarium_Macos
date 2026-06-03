@@ -67,23 +67,58 @@ jobs:
           --name "Datarium" \
           obfuscated/main.py
 
-    - name: Create DMG
+    - name: Compress App Bundle
+      run: |
+        cd dist
+        tar -czf ../Datarium_${{ matrix.arch }}.tar.gz Datarium.app
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Datarium-app-${{ matrix.arch }}
+        path: Datarium_${{ matrix.arch }}.tar.gz
+
+  package:
+    needs: build
+    runs-on: macos-latest
+    steps:
+    - name: Download Intel Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: Datarium-app-Intel
+
+    - name: Download AppleSilicon Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: Datarium-app-AppleSilicon
+
+    - name: Extract and Rename App Bundles
+      run: |
+        mkdir -p dmg_folder
+        tar -xzf Datarium_Intel.tar.gz -C dmg_folder
+        mv "dmg_folder/Datarium.app" "dmg_folder/Datarium (Intel).app"
+        
+        tar -xzf Datarium_AppleSilicon.tar.gz -C dmg_folder
+        mv "dmg_folder/Datarium.app" "dmg_folder/Datarium (Apple Silicon).app"
+
+    - name: Create Single Universal DMG
       run: |
         brew install create-dmg
-        mkdir -p dist/dmg
         create-dmg \
           --volname "Datarium Installer" \
           --window-pos 200 120 \
-          --window-size 600 400 \
+          --window-size 650 450 \
           --icon-size 100 \
-          --icon "Datarium.app" 175 120 \
-          --hide-extension "Datarium.app" \
-          --app-drop-link 425 120 \
-          "dist/Datarium_Mac_${{ matrix.arch }}.dmg" \
-          "dist/Datarium.app"
+          --icon "Datarium (Apple Silicon).app" 150 150 \
+          --icon "Datarium (Intel).app" 350 150 \
+          --hide-extension "Datarium (Apple Silicon).app" \
+          --hide-extension "Datarium (Intel).app" \
+          --app-drop-link 550 150 \
+          "Datarium_macOS.dmg" \
+          "dmg_folder"
 
-    - name: Upload Artifact
+    - name: Upload Universal DMG Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: Datarium-macOS-${{ matrix.arch }}-DMG
-        path: dist/Datarium_Mac_${{ matrix.arch }}.dmg
+        name: Datarium-macOS-Universal-DMG
+        path: Datarium_macOS.dmg
