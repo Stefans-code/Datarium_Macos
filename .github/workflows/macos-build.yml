@@ -10,10 +10,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-14
             arch: Intel
+            prefix: "arch -x86_64"
           - runner: macos-14
             arch: AppleSilicon
+            prefix: ""
     runs-on: ${{ matrix.runner }}
     
     steps:
@@ -27,13 +29,13 @@ jobs:
         
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
+        ${{ matrix.prefix }} python -m pip install --upgrade pip
         # Install pre-compiled llama-cpp-python to avoid compilation delays
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
-          python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
         fi
-        pip install -r requirements.txt
-        pip install pyinstaller pyarmor==9.2.4
+        ${{ matrix.prefix }} pip install -r requirements.txt
+        ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4
         
     - name: Build with PyInstaller
       run: |
@@ -43,7 +45,7 @@ jobs:
         cp icon.ico obfuscated/icon.ico
         
         # Bundling
-        pyinstaller --noconsole --onedir --noconfirm \
+        ${{ matrix.prefix }} pyinstaller --noconsole --onedir --noconfirm \
           --icon=icon.ico \
           --paths obfuscated \
           --collect-all customtkinter \
