@@ -13,17 +13,6 @@ except ImportError:
     pass
 from huggingface_hub import hf_hub_download
 
-# Ottimizzazione SSL per macOS (Critico per il download dei modelli)
-try:
-    import certifi
-    import platform
-    if platform.system() == "Darwin":
-        os.environ['SSL_CERT_FILE'] = certifi.where()
-        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
-except:
-    pass
-
-
 class AIEngine:
     def __init__(self):
         self.llm = None
@@ -41,27 +30,48 @@ class AIEngine:
         
     def get_models_dir(self, force_writable=False):
         """
-        Ritorna la cartella dei modelli.
-        - Su Windows (frozen): accanto all'exe
-        - Su macOS: ~/Library/Application Support/Datarium/models
+        Ritorna la cartella dei modelli, provando prima accanto all'eseguibile (in sola lettura)
+        e poi ripiegando su una cartella utente scrivibile (macOS/Windows) se necessario.
         """
         import platform
         system = platform.system()
-
-        if system == "Darwin":
-            # Percorso standard macOS per dati applicazione
-            base = os.path.expanduser("~/Library/Application Support/Datarium")
-            models_dir = os.path.join(base, "models")
-        elif getattr(sys, 'frozen', False):
-            # Percorso accanto all'exe
-            models_dir = os.path.join(os.path.dirname(sys.executable), "models")
-        else:
+        
+        # 1. Se siamo in ambiente di sviluppo (non frozen), usiamo la cartella locale 'models'
+        if not getattr(sys, 'frozen', False):
             models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-
-        if force_writable:
-            os.makedirs(models_dir, exist_ok=True)
+            if force_writable:
+                os.makedirs(models_dir, exist_ok=True)
+            return models_dir
             
-        return models_dir
+        # 2. Se siamo in ambiente frozen (eseguibile pacchettizzato)
+        # Controlliamo prima se i modelli sono presenti accanto all'eseguibile (es. Windows con Inno Setup)
+        exe_dir_models = os.path.join(os.path.dirname(sys.executable), "models")
+        
+        # Se i modelli esistono già accanto all'eseguibile, usiamo quello (modalità lettura)
+        if os.path.exists(exe_dir_models):
+            # Se la cartella esiste, verifichiamo se non è richiesto forzatamente di scriverci
+            if not force_writable:
+                return exe_dir_models
+                
+        # 3. Altrimenti (es. macOS, o Windows se vogliamo scaricare un modello mancante),
+        # usiamo una cartella utente scrivibile per non incorrere in PermissionError.
+        try:
+            if system == "Windows":
+                base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+                path = os.path.join(base, "Datarium", "models")
+            elif system == "Darwin": # macOS
+                path = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium", "models")
+            else:
+                path = os.path.join(os.path.expanduser("~"), ".datarium", "models")
+                
+            if force_writable:
+                os.makedirs(path, exist_ok=True)
+            return path
+        except Exception as e:
+            print(f"[AIEngine] Errore risoluzione directory modelli scrivibile: {e}")
+            if force_writable:
+                os.makedirs(exe_dir_models, exist_ok=True)
+            return exe_dir_models
 
     def check_models_missing(self):
         """Controlla se i modelli esistono nell'unico percorso supportato."""
