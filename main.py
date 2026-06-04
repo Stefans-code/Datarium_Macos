@@ -43,7 +43,20 @@ import cv2
 from face_memory import FaceMemoryManager
 
 ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+
+# Risolvi il percorso assoluto per evitare problemi in modalità frozen (PyInstaller)
+if getattr(sys, 'frozen', False):
+    if hasattr(sys, '_MEIPASS'):
+        theme_path = os.path.join(sys._MEIPASS, "assets", "material_theme.json")
+    else:
+        theme_path = os.path.join(os.path.dirname(sys.executable), "assets", "material_theme.json")
+else:
+    theme_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "material_theme.json")
+
+if os.path.exists(theme_path):
+    ctk.set_default_color_theme(theme_path)
+else:
+    ctk.set_default_color_theme("blue")
 
 class ImageIdentificationDialog(ctk.CTkToplevel):
     def __init__(self, parent, image_path, filename):
