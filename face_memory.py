@@ -6,6 +6,8 @@ import random
 import cv2
 import numpy as np
 from PIL import Image
+import platform
+import shutil
 
 class FaceMemoryManager:
     def __init__(self, base_models_dir=None):
@@ -18,7 +20,7 @@ class FaceMemoryManager:
             else:
                 self.models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
         
-        self.faces_dir = os.path.join(self.models_dir, "faces")
+        self.faces_dir = self._get_faces_directory()
         self.crops_dir = os.path.join(self.faces_dir, "crops")
         
         # Crea le cartelle necessarie
@@ -27,8 +29,72 @@ class FaceMemoryManager:
         self.metadata_path = os.path.join(self.faces_dir, "faces_metadata.json")
         self.model_path = os.path.join(self.faces_dir, "lbph_model.xml")
         
+        # Esegui la migrazione automatica se i file esistono nella vecchia posizione
+        self._migrate_existing_data()
+        
         self.metadata = self.load_metadata()
         self.recognizer = self.load_recognizer()
+        
+    def _get_faces_directory(self):
+        """Individua una cartella scrivibile persistente per i dati di face memory."""
+        system = platform.system()
+        try:
+            if system == "Windows":
+                # %LOCALAPPDATA%/Datarium/faces
+                base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+                path = os.path.join(base, "Datarium", "faces")
+            elif system == "Darwin": # macOS
+                # ~/Library/Application Support/Datarium/faces
+                path = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium", "faces")
+            else:
+                path = os.path.join(os.path.expanduser("~"), ".datarium", "faces")
+            
+            os.makedirs(path, exist_ok=True)
+            return path
+        except Exception as e:
+            # Fallback a sotto-cartella del modello originale
+            print(f"[FaceMemory] Errore risoluzione cartella scrivibile: {e}, uso fallback locale.")
+            path = os.path.join(self.models_dir, "faces")
+            os.makedirs(path, exist_ok=True)
+            return path
+
+    def _migrate_existing_data(self):
+        """Migra i dati della faccia dalla vecchia cartella models/faces se presente."""
+        old_faces_dir = os.path.join(self.models_dir, "faces")
+        if not os.path.exists(old_faces_dir) or os.path.abspath(old_faces_dir) == os.path.abspath(self.faces_dir):
+            return
+            
+        old_meta = os.path.join(old_faces_dir, "faces_metadata.json")
+        old_model = os.path.join(old_faces_dir, "lbph_model.xml")
+        old_crops = os.path.join(old_faces_dir, "crops")
+        
+        # Migrazione metadati
+        if os.path.exists(old_meta) and not os.path.exists(self.metadata_path):
+            try:
+                shutil.copy2(old_meta, self.metadata_path)
+                print(f"[FaceMemory] Metadati migrati con successo in: {self.metadata_path}")
+            except Exception as me:
+                print(f"[FaceMemory] Errore migrazione metadati: {me}")
+                
+        # Migrazione modello
+        if os.path.exists(old_model) and not os.path.exists(self.model_path):
+            try:
+                shutil.copy2(old_model, self.model_path)
+                print(f"[FaceMemory] Modello XML migrato con successo in: {self.model_path}")
+            except Exception as mo:
+                print(f"[FaceMemory] Errore migrazione modello XML: {mo}")
+                
+        # Migrazione crops
+        if os.path.exists(old_crops):
+            try:
+                for f in os.listdir(old_crops):
+                    old_f_path = os.path.join(old_crops, f)
+                    new_f_path = os.path.join(self.crops_dir, f)
+                    if os.path.isfile(old_f_path) and not os.path.exists(new_f_path):
+                        shutil.copy2(old_f_path, new_f_path)
+                print("[FaceMemory] Ritagli facciali migrati con successo.")
+            except Exception as co:
+                print(f"[FaceMemory] Errore migrazione ritagli facciali: {co}")
         
     def load_metadata(self):
         if os.path.exists(self.metadata_path):
@@ -81,6 +147,18 @@ class FaceMemoryManager:
                 cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
                 
             face_cascade = cv2.CascadeClassifier(cascade_path)
+            
+            # Se è vuoto, proviamo fallbacks robusti per ambienti frozen/condizionali
+            if face_cascade.empty():
+                print(f"[FaceMemory] Classificatore a cascata vuoto su '{cascade_path}'. Prova percorsi alternativi...")
+                for fallback_dir in [sys.prefix, os.path.dirname(cv2.__file__)]:
+                    alt_cascade = os.path.join(fallback_dir, "data", "haarcascade_frontalface_default.xml")
+                    if os.path.exists(alt_cascade):
+                        face_cascade = cv2.CascadeClassifier(alt_cascade)
+                        if not face_cascade.empty():
+                            print(f"[FaceMemory] Rilevatore caricato con successo da fallback: {alt_cascade}")
+                            break
+                            
             # Parametri ottimali per minimizzare falsi positivi e rilevare anche facce piccole
             faces = face_cascade.detectMultiScale(
                 gray, 

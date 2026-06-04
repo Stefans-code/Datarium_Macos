@@ -507,7 +507,6 @@ class ReportGenerator:
         return html_content
 
     @classmethod
-    @classmethod
     def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs):
         """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF."""
         os.makedirs(output_dir, exist_ok=True)

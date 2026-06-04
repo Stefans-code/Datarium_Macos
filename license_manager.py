@@ -58,11 +58,17 @@ class LicenseManager:
                 raw_id = f"{machine_guid}-{mb_serial}-DATARIUM-SECURE"
             
             elif system == "Darwin": # macOS
-                # Seriale Hardware Apple
-                cmd = "ioreg -l | grep IOPlatformSerialNumber"
-                output = subprocess.check_output(cmd, shell=True).decode()
-                # Parsing robuse della stringa ioreg
-                serial = output.split('"')[-2] if '"' in output else "MACOS-FALLBACK"
+                # Seriale Hardware Apple (con query mirata e veloce)
+                try:
+                    cmd = "ioreg -rd1 -c IOPlatformExpertDevice"
+                    output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+                    serial = "MACOS-FALLBACK"
+                    for line in output.splitlines():
+                        if "IOPlatformSerialNumber" in line:
+                            serial = line.split("=")[-1].replace('"', '').strip()
+                            break
+                except Exception:
+                    serial = "MACOS-FALLBACK"
                 raw_id = f"{serial}-APPLE-DATARIUM-SECURE"
             
             else:

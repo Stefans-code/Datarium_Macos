@@ -28,20 +28,14 @@ if os.name == 'nt':
 # Ridirezione standard output/error per evitare crash in modalità --noconsole
 # se qualche libreria (es. tqdm/huggingface) prova a scrivere sul terminale inesistente.
 if getattr(sys, 'frozen', False):
-    import platform
-    if platform.system() == "Darwin":
-        # Scriviamo il debug log nel percorso temporaneo anziché sul desktop per non sporcare la scrivania dell'utente
-        log_path = os.path.join(tempfile.gettempdir(), "datarium_debug.log")
-        sys.stdout = open(log_path, 'a')
-        sys.stderr = open(log_path, 'a')
-    else:
-        sys.stdout = open(os.devnull, 'w')
-        sys.stderr = open(os.devnull, 'w')
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
 
 import customtkinter as ctk
 import re
 import threading
 import shutil
+import pathlib
 from tkinter import filedialog
 from ai_engine import AIEngine
 from license_manager import LicenseManager
@@ -1443,7 +1437,7 @@ class DatariumApp(ctk.CTk):
         try:
             report_path = ReportGenerator.save_hash_report(report_dir, report_id, self.last_hash_results, self.selected_hash_algo.get())
             import webbrowser
-            webbrowser.open(f"file:///{report_path.replace(chr(92), '/')}")
+            webbrowser.open(pathlib.Path(report_path).absolute().as_uri())
             from tkinter import messagebox
             messagebox.showinfo("Report Generato", f"Report esportato con successo ed aperto nel browser:\n{report_path}")
         except Exception as e:
@@ -1738,7 +1732,11 @@ class DatariumApp(ctk.CTk):
                 try:
                     ext = os.path.splitext(f)[1].lower()
                     new_filename = f"{album}_{idx+1}{ext}" if self.autotag_rename.get() else os.path.basename(f)
-                    shutil.copy2(f, os.path.join(album_dir, new_filename))
+                    dest_path = os.path.join(album_dir, new_filename)
+                    try:
+                        shutil.copy2(f, dest_path)
+                    except OSError:
+                        shutil.copy(f, dest_path)
                 except:
                     pass
 
@@ -1870,7 +1868,7 @@ class DatariumApp(ctk.CTk):
     def open_generated_report(self):
         if hasattr(self, 'generated_report_path') and os.path.exists(self.generated_report_path):
             import webbrowser
-            webbrowser.open(f"file:///{self.generated_report_path.replace(chr(92), '/')}")
+            webbrowser.open(pathlib.Path(self.generated_report_path).absolute().as_uri())
 
     def run_offload_process(self):
         src = self.offload_source_folder.get()
@@ -1939,12 +1937,24 @@ class DatariumApp(ctk.CTk):
                             os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
                             self.after(0, lambda name=it["name"], dest=os.path.basename(d): self.offload_status_lbl.configure(text=f"Copia {name} in {dest}..."))
-                            shutil.copy2(it["path"], target_path)
+                            try:
+                                shutil.copy2(it["path"], target_path)
+                            except OSError:
+                                try:
+                                    shutil.copy(it["path"], target_path)
+                                except Exception as ce:
+                                    copy_success = False
+                                    print(f"Errore copia fallita per {it['name']}: {ce}")
+                                    continue
 
                             # Verification
                             self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
                             dest_hash = self.compute_hash(target_path, algo)
-                            if dest_hash != src_hash:
+                            
+                            # Se l'hash ha ritornato errore o non coincide, la copia fallisce la verifica
+                            if (not src_hash or src_hash.startswith("Error") or 
+                                not dest_hash or dest_hash.startswith("Error") or 
+                                dest_hash != src_hash):
                                 copy_success = False
 
                         status = "Verified" if copy_success else "Failed"
