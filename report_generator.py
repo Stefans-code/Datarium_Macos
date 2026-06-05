@@ -686,7 +686,12 @@ class ReportGenerator:
             
             y = max_y_for_entry + 15
             
-        doc.save(report_path)
+        try:
+            doc.save(report_path)
+        except Exception:
+            import time
+            report_path = os.path.join(output_dir, f"{report_id}_{int(time.time())}_MHL_Report.pdf")
+            doc.save(report_path)
         doc.close()
         return report_path
 

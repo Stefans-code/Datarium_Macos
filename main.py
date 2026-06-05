@@ -2118,6 +2118,9 @@ class DatariumApp(ctk.CTk):
         self.show_offload_subpage("OffloadHome")
 
     def show_offload_subpage(self, name):
+        if name == "OffloadHome":
+            import datetime
+            self.offload_report_id.set(f"A{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
         for v in self.offload_views.values():
             v.pack_forget()
         self.offload_views[name].pack(fill="both", expand=True)
