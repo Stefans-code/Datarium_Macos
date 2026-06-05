@@ -29,16 +29,18 @@ jobs:
         
     - name: Install dependencies
       run: |
-        ${{ matrix.prefix }} python -m pip install --upgrade pip
+        ${{ matrix.prefix }} python -m pip install --upgrade pip --no-cache-dir
         # Install pre-compiled llama-cpp-python to avoid compilation delays and compiler errors
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
-          ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal --no-cache-dir
         else
           # Use pre-compiled v0.3.2 wheel for Intel macOS to prevent compilation from source
-          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.2 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.2 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --no-cache-dir
         fi
-        ${{ matrix.prefix }} pip install -r requirements.txt
-        ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4
+        # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
+        sed -i '' '/llama-cpp-python/d' requirements.txt
+        ${{ matrix.prefix }} pip install -r requirements.txt --no-cache-dir
+        ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4 --no-cache-dir
         
     - name: Build with PyInstaller
       run: |
