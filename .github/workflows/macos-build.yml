@@ -29,12 +29,11 @@ jobs:
     - name: Install dependencies
       run: |
         ${{ matrix.prefix }} python -m pip install --upgrade pip --no-cache-dir
-        # Install pre-compiled llama-cpp-python to avoid compilation delays and compiler errors
+        # Install llama-cpp-python by compiling from source to avoid corrupted wheels and match Windows version
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
-          ${{ matrix.prefix }} python -m pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal --no-cache-dir
+          CMAKE_ARGS="-DLLAMA_METAL=on" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.2.77 --no-cache-dir
         else
-          # Use pre-compiled v0.3.2 wheel for Intel macOS to prevent compilation from source
-          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.2 --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu --no-cache-dir
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.2.77 --no-cache-dir
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
