@@ -1510,8 +1510,7 @@ class DatariumApp(ctk.CTk):
             elif algo == "SHA-1":
                 h = hashlib.sha1()
             elif algo == "xxHash64":
-                import importlib
-                xxhash = importlib.import_module("xxhash")
+                import xxhash
                 h = xxhash.xxh64()
             else:
                 h = hashlib.sha256()
