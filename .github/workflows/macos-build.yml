@@ -44,7 +44,7 @@ jobs:
       run: |
         # Invece di PyArmor (che ha limiti di dimensione file per la versione trial), usiamo i file originali
         mkdir -p obfuscated
-        cp main.py ai_engine.py license_manager.py face_memory.py obfuscated/
+        cp main.py ai_engine.py license_manager.py face_memory.py report_generator.py obfuscated/
         cp icon.ico obfuscated/icon.ico
         
         # Bundling
@@ -61,6 +61,7 @@ jobs:
           --hidden-import ai_engine \
           --hidden-import license_manager \
           --hidden-import face_memory \
+          --hidden-import report_generator \
           --hidden-import PIL \
           --hidden-import fitz \
           --hidden-import docx \
@@ -71,6 +72,7 @@ jobs:
           --add-data "obfuscated/ai_engine.py:." \
           --add-data "obfuscated/license_manager.py:." \
           --add-data "obfuscated/face_memory.py:." \
+          --add-data "obfuscated/report_generator.py:." \
           --name "Datarium" \
           obfuscated/main.py
 

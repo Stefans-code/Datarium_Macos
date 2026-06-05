@@ -240,6 +240,12 @@ class DatariumApp(ctk.CTk):
         self.offload_algo = ctk.StringVar(value="xxHash64")
         self.offload_report_id = ctk.StringVar(value="A" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
 
+        # Settings state
+        self.load_settings()
+        self.scan_sidecars_var = ctk.BooleanVar(value=self.scan_sidecars_enabled)
+        self.proxy_gen_var = ctk.BooleanVar(value=self.proxy_gen_enabled)
+        self.use_custom_rules_var = ctk.BooleanVar(value=True)
+
         # UI Layout
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -252,6 +258,53 @@ class DatariumApp(ctk.CTk):
             self.show_page("Setup")
         else:
             self.show_page("Home")
+
+    def get_config_path(self):
+        import platform
+        system = platform.system()
+        if system == "Windows":
+            base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+            path = os.path.join(base, "Datarium")
+        elif system == "Darwin":
+            path = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium")
+        else:
+            path = os.path.join(os.path.expanduser("~"), ".datarium")
+        os.makedirs(path, exist_ok=True)
+        return os.path.join(path, "config.json")
+
+    def load_settings(self):
+        import json
+        config_path = self.get_config_path()
+        self.custom_rules = []
+        self.ffmpeg_path = ""
+        self.scan_sidecars_enabled = True
+        self.proxy_gen_enabled = False
+        
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.custom_rules = data.get("custom_rules", [])
+                    self.ffmpeg_path = data.get("ffmpeg_path", "")
+                    self.scan_sidecars_enabled = data.get("scan_sidecars_enabled", True)
+                    self.proxy_gen_enabled = data.get("proxy_gen_enabled", False)
+            except Exception as e:
+                print(f"Errore caricamento impostazioni: {e}")
+                
+    def save_settings(self):
+        import json
+        config_path = self.get_config_path()
+        data = {
+            "custom_rules": self.custom_rules,
+            "ffmpeg_path": self.ffmpeg_path,
+            "scan_sidecars_enabled": self.scan_sidecars_var.get(),
+            "proxy_gen_enabled": self.proxy_gen_var.get()
+        }
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Errore salvataggio impostazioni: {e}")
 
     def go_to_organizer(self):
         if self.source_folder.get():
@@ -272,11 +325,11 @@ class DatariumApp(ctk.CTk):
         self.btn_organizer = ctk.CTkButton(self.sidebar, text="📁 Organizer", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=self.go_to_organizer)
         self.btn_organizer.grid(row=2, column=0, padx=20, pady=5, sticky="ew")
 
-        self.btn_hash = ctk.CTkButton(self.sidebar, text="🔑 Hash Check", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("HashHome"))
-        self.btn_hash.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+        self.btn_autotag = ctk.CTkButton(self.sidebar, text="\U0001f3f7 Auto Tag", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"))
+        self.btn_autotag.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
 
-        self.btn_autotag = ctk.CTkButton(self.sidebar, text="🏷️ Auto Tag", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"))
-        self.btn_autotag.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
+        self.btn_hash = ctk.CTkButton(self.sidebar, text="🔑 Hash Check", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("HashHome"))
+        self.btn_hash.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
 
         self.btn_offload = ctk.CTkButton(self.sidebar, text="⚡ Offload", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"))
         self.btn_offload.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
@@ -284,11 +337,12 @@ class DatariumApp(ctk.CTk):
         # Bottom Buttons
         self.sidebar.grid_rowconfigure(6, weight=1)
         
-        self.btn_settings = ctk.CTkButton(self.sidebar, text="⚙️ Impostazioni", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"))
+        self.btn_settings = ctk.CTkButton(self.sidebar, text="\u2699 Impostazioni", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"))
         self.btn_settings.grid(row=7, column=0, padx=20, pady=10, sticky="ew")
 
-        self.appearance_mode_optionemenu = ctk.CTkOptionMenu(self.sidebar, values=["Dark", "Light"], command=self.change_appearance_mode)
-        self.appearance_mode_optionemenu.grid(row=8, column=0, padx=20, pady=(10, 30))
+        self.appearance_mode_segmented = ctk.CTkSegmentedButton(self.sidebar, values=["🌙 Dark", "☀️ Light"], command=self.change_appearance_mode)
+        self.appearance_mode_segmented.grid(row=8, column=0, padx=20, pady=(10, 30), sticky="ew")
+        self.appearance_mode_segmented.set("🌙 Dark")
 
     def setup_main_content(self):
         self.content_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -410,27 +464,27 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(c1, text="", image=folder_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c1, text="Organizer AI", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
         ctk.CTkLabel(c1, text="Scansiona, ordina e rinomina i tuoi file e documenti in base al contenuto.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
-        ctk.CTkButton(c1, text="Apri Organizer", fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=self.go_to_organizer).pack(side="bottom", pady=30, padx=20, fill="x")
-
-        # Card 2: Hash Check
-        c2 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
-        c2.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
-        c2.pack_propagate(False)
-
-        ctk.CTkLabel(c2, text="", image=key_icon).pack(pady=(35, 10))
-        ctk.CTkLabel(c2, text="Verifica Hash", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
-        ctk.CTkLabel(c2, text="Calcola l'hash dei file e confronta duplicati esatti byte-a-byte.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
-        ctk.CTkButton(c2, text="Vai ad Hash", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("HashHome")).pack(side="bottom", pady=30, padx=20, fill="x")
+        ctk.CTkButton(c1, text="Apri Organizer", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=self.go_to_organizer).pack(side="bottom", pady=30, padx=20, fill="x")
 
         # Card 3: Auto Tag
         c3 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
-        c3.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+        c3.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         c3.pack_propagate(False)
 
         ctk.CTkLabel(c3, text="", image=tag_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c3, text="Auto Tag & Album", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
         ctk.CTkLabel(c3, text="Raggruppa foto e video in album intelligenti generati dall'AI.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
-        ctk.CTkButton(c3, text="Vai ad Album", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("AutoTag")).pack(side="bottom", pady=30, padx=20, fill="x")
+        ctk.CTkButton(c3, text="Vai ad Album", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=lambda: self.show_page("AutoTag")).pack(side="bottom", pady=30, padx=20, fill="x")
+
+        # Card 2: Hash Check
+        c2 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
+        c2.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+        c2.pack_propagate(False)
+
+        ctk.CTkLabel(c2, text="", image=key_icon).pack(pady=(35, 10))
+        ctk.CTkLabel(c2, text="Verifica Hash", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
+        ctk.CTkLabel(c2, text="Calcola l'hash dei file e confronta duplicati esatti byte-a-byte.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkButton(c2, text="Vai ad Hash", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=lambda: self.show_page("HashHome")).pack(side="bottom", pady=30, padx=20, fill="x")
 
         # Card 4: Offload & PDF
         c4 = ctk.CTkFrame(cards_container, corner_radius=15, border_width=1, border_color=("gray85", "gray15"), height=340)
@@ -440,7 +494,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(c4, text="", image=flash_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c4, text="Offload", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
         ctk.CTkLabel(c4, text="Copia sicura SSD multidisco con verifica checksum ed esportazione report.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
-        ctk.CTkButton(c4, text="Vai ad Offload", fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), height=38, corner_radius=8, command=lambda: self.show_page("OffloadHome")).pack(side="bottom", pady=30, padx=20, fill="x")
+        ctk.CTkButton(c4, text="Vai ad Offload", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=lambda: self.show_page("OffloadHome")).pack(side="bottom", pady=30, padx=20, fill="x")
 
 
     def init_options_page(self):
@@ -480,18 +534,37 @@ class DatariumApp(ctk.CTk):
         self.no_files_lbl.pack()
 
         # --- ADVANCED OPTIONS ---
-        ctk.CTkLabel(modal, text="Opzioni", font=ctk.CTkFont(weight="bold")).pack(pady=(10, 5))
-        opts_f = ctk.CTkFrame(modal, fg_color="transparent")
-        opts_f.pack()
+        ctk.CTkLabel(modal, text="Opzioni", font=ctk.CTkFont(weight="bold")).pack(pady=(10, 2))
         
-        self.check_ai = ctk.CTkCheckBox(opts_f, text="Attiva Scelta AI")
-        self.check_ai.pack(side="left", padx=10); self.check_ai.select()
+        opts_container = ctk.CTkFrame(modal, fg_color="transparent")
+        opts_container.pack(pady=5)
         
-        self.check_dup = ctk.CTkCheckBox(opts_f, text="Hash Check (Duplicati)")
-        self.check_dup.pack(side="left", padx=10); self.check_dup.select()
+        opts_row1 = ctk.CTkFrame(opts_container, fg_color="transparent")
+        opts_row1.pack(pady=3)
         
-        self.check_identify_people_cb = ctk.CTkCheckBox(opts_f, text="Identifica Persone nelle Foto", variable=self.organizer_identify_people)
-        self.check_identify_people_cb.pack(side="left", padx=10)
+        self.check_ai = ctk.CTkCheckBox(opts_row1, text="Scelta AI")
+        self.check_ai.pack(side="left", padx=8); self.check_ai.select()
+        
+        self.check_dup = ctk.CTkCheckBox(opts_row1, text="Check Duplicati")
+        self.check_dup.pack(side="left", padx=8); self.check_dup.select()
+        
+        self.check_identify_people_cb = ctk.CTkCheckBox(opts_row1, text="Identifica Persone", variable=self.organizer_identify_people)
+        self.check_identify_people_cb.pack(side="left", padx=8)
+        
+        opts_row2 = ctk.CTkFrame(opts_container, fg_color="transparent")
+        opts_row2.pack(pady=3)
+        
+        self.check_sidecars_cb = ctk.CTkCheckBox(opts_row2, text="Leggi Trascrizioni Vocius", variable=self.scan_sidecars_var)
+        self.check_sidecars_cb.pack(side="left", padx=8)
+        
+        self.check_rules_cb = ctk.CTkCheckBox(opts_row2, text="Usa Regole Smistamento", variable=self.use_custom_rules_var)
+        self.check_rules_cb.pack(side="left", padx=8)
+        
+        self.check_proxies_cb = ctk.CTkCheckBox(opts_row2, text="Genera Video Proxy", variable=self.proxy_gen_var)
+        self.check_proxies_cb.pack(side="left", padx=8)
+
+
+
 
         # --- FOOTER ---
         btn_f = ctk.CTkFrame(modal, fg_color="transparent")
@@ -565,17 +638,70 @@ class DatariumApp(ctk.CTk):
         ctk.CTkButton(footer, text="Annulla", fg_color="transparent", border_width=1, width=100, command=self.cancel_organization).pack(side="right", padx=10)
 
     def init_settings_page(self):
-        page = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        page = ctk.CTkScrollableFrame(self.content_container, fg_color="transparent", label_text="", border_width=0)
         self.pages["Settings"] = page
 
         ctk.CTkLabel(page, text="Impostazioni", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", pady=(0, 20))
 
+        # Configurazione FFMPEG Box
+        ff_box = ctk.CTkFrame(page, corner_radius=10)
+        ff_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(ff_box, text="Configurazione FFMPEG (Proxy Video)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        
+        ff_row = ctk.CTkFrame(ff_box, fg_color="transparent")
+        ff_row.pack(fill="x", padx=20, pady=5)
+        
+        self.ffmpeg_path_entry = ctk.CTkEntry(ff_row, width=450, placeholder_text="Lascia vuoto per cercare nel PATH...")
+        if self.ffmpeg_path:
+            self.ffmpeg_path_entry.insert(0, self.ffmpeg_path)
+        self.ffmpeg_path_entry.pack(side="left", padx=(0, 10), fill="x", expand=True)
+        
+        btn_pick_ff = ctk.CTkButton(ff_row, text="📂 Sfoglia", width=100, command=self.pick_ffmpeg_path)
+        btn_pick_ff.pack(side="left", padx=5)
+        
+        btn_test_ff = ctk.CTkButton(ff_row, text="⚡ Verifica", width=100, fg_color="#10b981", hover_color="#059669", command=self.test_ffmpeg_path)
+        btn_test_ff.pack(side="left", padx=5)
+        
+        self.ffmpeg_status_lbl = ctk.CTkLabel(ff_box, text="Stato FFMPEG: In attesa di verifica", font=ctk.CTkFont(size=11), text_color="gray")
+        self.ffmpeg_status_lbl.pack(anchor="w", padx=20, pady=(5, 15))
+        # Esegui un controllo silenzioso iniziale
+        self.after(500, lambda: self.test_ffmpeg_path(silent=True))
+
+        # Custom Rules Box
+        rules_box = ctk.CTkFrame(page, corner_radius=10)
+        rules_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(rules_box, text="Regole di Smistamento Personalizzate", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        
+        form_row = ctk.CTkFrame(rules_box, fg_color="transparent")
+        form_row.pack(fill="x", padx=20, pady=5)
+        
+        ctk.CTkLabel(form_row, text="Tipo:").pack(side="left", padx=5)
+        self.rule_type_menu = ctk.CTkOptionMenu(form_row, values=["Estensione", "Nome contiene", "Dimensione > (MB)", "Dimensione < (MB)"], width=150)
+        self.rule_type_menu.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(form_row, text="Valore:").pack(side="left", padx=5)
+        self.rule_value_entry = ctk.CTkEntry(form_row, width=150, placeholder_text="es. jpg,vacanza,10")
+        self.rule_value_entry.pack(side="left", padx=5)
+        
+        ctk.CTkLabel(form_row, text="Cartella:").pack(side="left", padx=5)
+        self.rule_folder_entry = ctk.CTkEntry(form_row, width=150, placeholder_text="es. Foto/JPG")
+        self.rule_folder_entry.pack(side="left", padx=5)
+        
+        btn_add_rule = ctk.CTkButton(form_row, text="➕ Aggiungi", width=90, fg_color="#10b981", hover_color="#059669", command=self.add_custom_rule)
+        btn_add_rule.pack(side="left", padx=10)
+        
+        self.rules_list_frame = ctk.CTkScrollableFrame(rules_box, height=150, fg_color=("gray90", "gray15"), label_text="Regole Attive")
+        self.rules_list_frame.pack(fill="x", padx=20, pady=(5, 15))
+        self.render_rules_list()
+
+        # Hardware status
         hw_box = ctk.CTkFrame(page, corner_radius=10)
         hw_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(hw_box, text="Status Hardware", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         self.hw_info_lbl = ctk.CTkLabel(hw_box, text=f"Rilevato: {self.ai.hardware_info}", text_color="#38bdf8")
         self.hw_info_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
+        # License
         lic_box = ctk.CTkFrame(page, corner_radius=10)
         lic_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(lic_box, text="Licenza", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
@@ -591,12 +717,117 @@ class DatariumApp(ctk.CTk):
         self.lic_status_lbl = ctk.CTkLabel(lic_box, text=f"Stato: {self.license_status}", text_color="#10b981" if self.is_licensed else "#ef4444")
         self.lic_status_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
+        # Updates
         upd_box = ctk.CTkFrame(page, corner_radius=10)
         upd_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(upd_box, text="Aggiornamenti Software", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         ctk.CTkLabel(upd_box, text="Versione corrente: v1.2.0", text_color="gray").pack(anchor="w", padx=20)
         self.btn_check_upd = ctk.CTkButton(upd_box, text="Verifica Aggiornamenti", command=self.check_software_updates)
         self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 15))
+
+    def pick_ffmpeg_path(self):
+        file_path = filedialog.askopenfilename(title="Seleziona eseguibile ffmpeg", filetypes=[("Eseguibile ffmpeg", "ffmpeg.exe ffmpeg")])
+        if file_path:
+            self.ffmpeg_path_entry.delete(0, "end")
+            self.ffmpeg_path_entry.insert(0, file_path)
+            self.ffmpeg_path = file_path
+            self.save_settings()
+            self.test_ffmpeg_path()
+            
+    def test_ffmpeg_path(self, silent=False):
+        if not hasattr(self, 'ffmpeg_path_entry') or not self.ffmpeg_path_entry.winfo_exists():
+            return
+        path = self.ffmpeg_path_entry.get().strip()
+        self.ffmpeg_path = path
+        self.save_settings()
+        
+        ok, msg = self.ai.check_ffmpeg(path if path else None)
+        if ok:
+            self.ffmpeg_status_lbl.configure(text=f"✓ FFMPEG Rilevato con successo: {msg}", text_color="#10b981")
+            if not silent:
+                from tkinter import messagebox
+                messagebox.showinfo("FFMPEG", f"Verifica completata con successo!\nPercorso: {msg}")
+        else:
+            self.ffmpeg_status_lbl.configure(text=f"❌ Errore FFMPEG: {msg}", text_color="#ef4444")
+            if not silent:
+                from tkinter import messagebox
+                messagebox.showerror("Errore FFMPEG", f"Impossibile avviare FFMPEG:\n{msg}")
+
+    def render_rules_list(self):
+        for w in self.rules_list_frame.winfo_children():
+            w.destroy()
+            
+        if not self.custom_rules:
+            ctk.CTkLabel(self.rules_list_frame, text="Nessuna regola definita. I file useranno la catalogazione AI.", text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=10)
+            return
+            
+        for idx, rule in enumerate(self.custom_rules):
+            row = ctk.CTkFrame(self.rules_list_frame, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            
+            rule_text = f"SE {rule['type']} è '{rule['value']}' ➜ SPOSTA IN '{rule['folder']}'"
+            ctk.CTkLabel(row, text=rule_text, font=ctk.CTkFont(size=11), anchor="w").pack(side="left", padx=10, fill="x", expand=True)
+            
+            btn_del = ctk.CTkButton(row, text="❌", width=30, height=22, fg_color="transparent", text_color="#ef4444", font=ctk.CTkFont(size=10, weight="bold"), command=lambda i=idx: self.delete_custom_rule(i))
+            btn_del.pack(side="right", padx=10)
+            
+    def add_custom_rule(self):
+        r_type = self.rule_type_menu.get()
+        r_val = self.rule_value_entry.get().strip()
+        r_folder = self.rule_folder_entry.get().strip()
+        
+        if not r_val or not r_folder:
+            from tkinter import messagebox
+            messagebox.showwarning("Dati incompleti", "Inserisci sia il valore che la cartella per aggiungere la regola.")
+            return
+            
+        new_rule = {"type": r_type, "value": r_val, "folder": r_folder}
+        self.custom_rules.append(new_rule)
+        self.save_settings()
+        
+        self.rule_value_entry.delete(0, "end")
+        self.rule_folder_entry.delete(0, "end")
+        self.render_rules_list()
+        
+    def delete_custom_rule(self, index):
+        if 0 <= index < len(self.custom_rules):
+            self.custom_rules.pop(index)
+            self.save_settings()
+            self.render_rules_list()
+
+    def send_local_notification(self, title, message):
+        """Invia una notifica desktop locale in modo sicuro e senza dipendenze internet."""
+        try:
+            import importlib
+            plyer = importlib.import_module("plyer")
+            plyer.notification.notify(
+                title=title,
+                message=message,
+                app_name="Datarium",
+                timeout=5
+            )
+            return
+        except:
+            pass
+            
+        try:
+            if os.name == 'nt':
+                # Semplice script PowerShell non bloccante per Windows Toast
+                ps_script = f"""
+                [void][System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");
+                $notification = New-Object System.Windows.Forms.NotifyIcon;
+                $notification.Icon = [System.Drawing.SystemIcons]::Information;
+                $notification.BalloonTipIcon = "Info";
+                $notification.BalloonTipTitle = "{title}";
+                $notification.BalloonTipText = "{message}";
+                $notification.Visible = $True;
+                $notification.ShowBalloonTip(5000);
+                """
+                import subprocess
+                subprocess.Popen(["powershell", "-Command", ps_script], startupinfo=subprocess.STARTUPINFO())
+                return
+        except:
+            pass
 
     # --- LOGIC ---
     def load_license_file(self):
@@ -668,15 +899,19 @@ class DatariumApp(ctk.CTk):
         for p in self.pages.values(): p.pack_forget()
         self.pages[name].pack(fill="both", expand=True)
 
-    def change_appearance_mode(self, mode):
+    def change_appearance_mode(self, mode_str):
+        if "Dark" in mode_str:
+            mode = "Dark"
+        else:
+            mode = "Light"
         ctk.set_appearance_mode(mode)
 
     def set_sidebar_state(self, state="normal"):
         buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_settings]
         for btn in buttons:
             btn.configure(state=state)
-        if hasattr(self, 'appearance_mode_optionemenu'):
-            self.appearance_mode_optionemenu.configure(state=state)
+        if hasattr(self, 'appearance_mode_segmented'):
+            self.appearance_mode_segmented.configure(state=state)
 
     def open_source_folder(self):
         folder = filedialog.askdirectory()
@@ -737,7 +972,6 @@ class DatariumApp(ctk.CTk):
             if not src: return
 
             self.set_progress(0)
-            # --- NUOVA LOGICA TURBO: ANALISI IBRIDA ---
             text_items = []
             vision_items = []
             
@@ -793,7 +1027,7 @@ class DatariumApp(ctk.CTk):
             self.update_status("⚡ Analisi rapida documenti...")
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_item = {executor.submit(self.ai.extract_context, it['path']): it for it in valid_items if it['type'] != "Image"}
+                future_to_item = {executor.submit(self.ai.extract_context, it['path'], self.scan_sidecars_var.get()): it for it in valid_items if it['type'] != "Image"}
                 for future in concurrent.futures.as_completed(future_to_item):
                     if self.stop_ai: break
                     item = future_to_item[future]
@@ -814,7 +1048,7 @@ class DatariumApp(ctk.CTk):
             for idx, item in enumerate(vision_needed):
                 if self.stop_ai: return
                 self.update_status(f"👁️ Visione {idx+1}/{len(vision_needed)}: {item['old']}")
-                item['context'] = self.ai.extract_context(item['path'])
+                item['context'] = self.ai.extract_context(item['path'], self.scan_sidecars_var.get())
                 
                 # Se la checkbox "Identifica persone nelle foto" è attiva, esegui il riconoscimento facciale con memoria
                 if self.organizer_identify_people.get():
@@ -873,7 +1107,13 @@ class DatariumApp(ctk.CTk):
                 for idx, item in enumerate(valid_items):
                     if self.stop_ai: return
                     self.update_status(f"🏷️ Organizzazione {idx+1}/{len(valid_items)}...")
-                    res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
+                    
+                    res = None
+                    if self.use_custom_rules_var.get() and self.custom_rules:
+                        res = self.ai.apply_custom_rules(item['path'], self.custom_rules)
+                        
+                    if not res:
+                        res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
                     item['new'] = res
                     
                     cat = res.split('/')[0]
@@ -883,12 +1123,24 @@ class DatariumApp(ctk.CTk):
                 
                 self.last_groups = groups
             else:
-                # Fallback senza AI
-                self.last_groups = {"Archivio": valid_items}
-                for it in valid_items: it['new'] = f"Organizzato_{it['old']}"
+                # Fallback senza AI ma con regole custom applicabili!
+                groups = {}
+                for idx, item in enumerate(valid_items):
+                    res = None
+                    if self.use_custom_rules_var.get() and self.custom_rules:
+                        res = self.ai.apply_custom_rules(item['path'], self.custom_rules)
+                    if not res:
+                        res = f"Archivio/Organizzato_{item['old']}"
+                    item['new'] = res
+                    
+                    cat = res.split('/')[0]
+                    if cat not in groups: groups[cat] = []
+                    groups[cat].append(item)
+                self.last_groups = groups
 
             self.update_status("✨ Analisi completata!")
             self.after(0, lambda: self.render_groups(self.last_groups))
+            self.send_local_notification("Datarium - Analisi Completata", f"Analizzati con successo {len(valid_items)} file.")
         finally:
             self.is_scanning = False
             self.after(0, lambda: self.set_sidebar_state("normal"))
@@ -954,82 +1206,95 @@ class DatariumApp(ctk.CTk):
             frame.pack(fill="x", padx=20, after=frame.master.winfo_children()[frame.master.winfo_children().index(frame)-1])
 
     def execute_organization(self):
-        dest = self.control_folder.get()
-        src = self.source_folder.get()
-        zip_dest_dir = src
+        self.set_sidebar_state("disabled")
+        self.is_scanning = True
+        self.stop_ai = False
         
-        if not dest: return
-
-        # 1. ZIP BACKUP PREVENTIVO (Sempre nella sorgente, con protezione ricorsione)
-        self.update_status("📦 Creazione backup di sicurezza...")
-        import datetime
-        import zipfile
-        
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_name = f"Backup_Datarium_{timestamp}.zip"
-        zip_path_full = os.path.join(zip_dest_dir, zip_name) 
-        
-        try:
-            with zipfile.ZipFile(zip_path_full, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                # Calcoliamo il totale dei file per il progresso
-                all_files = []
-                for root, dirs, files in os.walk(src):
-                    for file in files:
-                        all_files.append(os.path.join(root, file))
+        def run_org_bg():
+            try:
+                dest = self.control_folder.get()
+                src = self.source_folder.get()
+                zip_dest_dir = src
                 
-                total = len(all_files)
-                for i, file_path in enumerate(all_files):
-                    if self.stop_ai: break
+                if not dest: return
+
+                # 1. ZIP BACKUP PREVENTIVO (Sempre nella sorgente, con protezione ricorsione)
+                self.update_status("📦 Creazione backup di sicurezza...")
+                import datetime
+                import zipfile
+                
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                zip_name = f"Backup_Datarium_{timestamp}.zip"
+                zip_path_full = os.path.join(zip_dest_dir, zip_name) 
+                
+                try:
+                    with zipfile.ZipFile(zip_path_full, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                        all_files = []
+                        for root, dirs, files in os.walk(src):
+                            for file in files:
+                                all_files.append(os.path.join(root, file))
+                        
+                        total = len(all_files)
+                        for i, file_path in enumerate(all_files):
+                            if self.stop_ai: break
+                            
+                            fname = os.path.basename(file_path)
+                            if fname.startswith("Backup_Datarium_") or fname == zip_name:
+                                continue
+                                
+                            rel_path = os.path.relpath(file_path, src)
+                            zipf.write(file_path, rel_path)
+                            
+                            if i % 10 == 0:
+                                self.set_progress(0.01 + 0.09 * (i/max(1, total)))
                     
-                    # PROTEZIONE RICORSIONE: Salta se è un backup o il file stesso che stiamo creando
-                    fname = os.path.basename(file_path)
-                    if fname.startswith("Backup_Datarium_") or fname == zip_name:
+                    self.set_progress(0.1)
+                except Exception as e:
+                    from tkinter import messagebox
+                    self.after(0, lambda: messagebox.showerror("Errore Backup", f"Impossibile creare lo ZIP: {e}"))
+                    return
+
+                self.update_status("🚀 Riorganizzazione in corso...")
+                to_proc = []
+                for cat in self.last_groups.values():
+                    for it in cat:
+                        if it.get('check') and it['check'].get(): to_proc.append(it)
+
+                for i, it in enumerate(to_proc):
+                    if self.stop_ai: break
+                    real_path = it['new']
+                    if '/' in real_path:
+                        real_path = real_path.split('/', 1)[1]
+                    
+                    target = os.path.join(dest, real_path)
+                    
+                    if os.path.abspath(it['path']) == os.path.abspath(target):
                         continue
                         
-                    rel_path = os.path.relpath(file_path, src)
-                    zipf.write(file_path, rel_path)
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
                     
-                    if i % 10 == 0: # Aggiorna la barra ogni 10 file per non rallentare troppo
-                        self.set_progress(0.01 + 0.09 * (i/max(1, total)))
-            
-            self.set_progress(0.1)
-        except Exception as e:
-            from tkinter import messagebox
-            messagebox.showerror("Errore Backup", f"Impossibile creare lo ZIP: {e}")
-            return
+                    try:
+                        if os.path.exists(target): os.remove(target)
+                        shutil.move(it['path'], target)
+                        
+                        # Generazione video proxy se abilitata
+                        if self.proxy_gen_var.get() and it['type'] == "Video":
+                            proxy_dir = os.path.join(os.path.dirname(target), "Proxies")
+                            self.ai.generate_proxy(target, proxy_dir, self.ffmpeg_path, progress_callback=self.update_status)
+                    except Exception as e:
+                        print(f"Errore spostamento/proxy {it['old']}: {e}")
+                        
+                    self.set_progress(0.1 + 0.9 * ((i+1)/max(1, len(to_proc))))
 
-        self.update_status("🚀 Riorganizzazione in corso...")
-        to_proc = []
-        for cat in self.last_groups.values():
-            for it in cat:
-                if it.get('check') and it['check'].get(): to_proc.append(it)
+                self.set_progress(1.0)
+                self.update_status(f"✨ Completato! Folder riorganizzato e ZIP creato.")
+                self.send_local_notification("Datarium - Riorganizzazione Completata", f"Elaborati con successo {len(to_proc)} file.")
+            finally:
+                self.is_scanning = False
+                self.after(0, lambda: self.set_sidebar_state("normal"))
 
-        for i, it in enumerate(to_proc):
-            # Strip della categoria concettuale
-            real_path = it['new']
-            if '/' in real_path:
-                real_path = real_path.split('/', 1)[1]
-            
-            target = os.path.join(dest, real_path)
-            
-            # Se sorgente e destinazione sono identiche, saltiamo o gestiamo sovrascrittura
-            if os.path.abspath(it['path']) == os.path.abspath(target):
-                continue
-                
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            
-            # Utilizziamo move per un'organizzazione "in-place" reale
-            try:
-                # Se il file esiste già nella nuova posizione (con lo stesso nome), lo sovrascriviamo
-                if os.path.exists(target): os.remove(target)
-                shutil.move(it['path'], target)
-            except Exception as e:
-                print(f"Errore spostamento {it['old']}: {e}")
-                
-            self.set_progress(0.1 + 0.9 * (i/max(1, len(to_proc))))
-
-        self.set_progress(1.0)
-        self.update_status(f"✨ Completato! Folder riorganizzato e ZIP creato.")
+        import threading
+        threading.Thread(target=run_org_bg, daemon=True).start()
 
     def open_dest_folder(self):
         folder = filedialog.askdirectory()
@@ -2057,7 +2322,7 @@ if __name__ == "__main__":
         app.mainloop()
     except Exception as e:
         import traceback
-        with open("crash_log.txt", "w") as f:
+        with open("crash_log.txt", "w", encoding="utf-8") as f:
             f.write(f"CRITICAL ERROR AT STARTUP: {e}\n")
             f.write(traceback.format_exc())
         print(f"L'applicazione ha riscontrato un errore fatale. Controlla crash_log.txt")

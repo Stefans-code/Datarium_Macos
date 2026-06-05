@@ -217,13 +217,35 @@ class AIEngine:
                 pass
         return meta
 
-    def extract_context(self, file_path):
+    def extract_context(self, file_path, scan_sidecars=True):
         """Extracts a deep text summary or detailed image description with metadata fusion."""
         self.last_has_people = False
         ext = os.path.splitext(file_path)[1].lower()
         metadata = self.extract_metadata(file_path)
         meta_str = f" [Metadata: {metadata}]" if metadata else ""
         
+        # Cerca trascrizioni sidecar (es. generate da Vocius)
+        sidecar_str = ""
+        if scan_sidecars:
+            try:
+                base_dir = os.path.dirname(file_path)
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                for s_ext in [".txt", ".srt", ".vtt", "_transcript.txt"]:
+                    s_path = os.path.join(base_dir, base_name + s_ext)
+                    if os.path.exists(s_path) and os.path.isfile(s_path):
+                        with open(s_path, "r", encoding="utf-8", errors="ignore") as sf:
+                            content = sf.read().strip()
+                            if content:
+                                if s_ext in [".srt", ".vtt"]:
+                                    content = re.sub(r'\d{2}:\d{2}:\d{2}[,.]\d{3}\s*-->\s*\d{2}:\d{2}:\d{2}[,.]\d{3}', '', content)
+                                    content = re.sub(r'^\d+\s*$', '', content, flags=re.MULTILINE)
+                                    content = re.sub(r'\n+', '\n', content).strip()
+                                sidecar_str = f" [Trascrizione Vocius: {content[:1000]}]"
+                                break
+            except Exception as se:
+                print(f"[AIEngine] Errore scansione file sidecar: {se}")
+
+        context_res = ""
         # 1. DOCUMENTI
         try:
             if ext == ".pdf":
@@ -231,25 +253,24 @@ class AIEngine:
                 fitz = importlib.import_module("fitz")
                 doc = fitz.open(file_path)
                 text = ""
-                # Leggiamo più pagine per essere "più intelligenti"
                 for i in range(min(5, len(doc))):
                     text += doc[i].get_text()
-                return f"DOC_CONTENT: {text[:1200]}"
+                context_res = f"DOC_CONTENT: {text[:1200]}"
             
             elif ext in [".docx", ".doc"]:
                 import docx
                 doc = docx.Document(file_path)
                 text = "\n".join([p.text for p in doc.paragraphs[:40]])
-                return f"DOC_CONTENT: {text[:1200]}"
+                context_res = f"DOC_CONTENT: {text[:1200]}"
                 
             elif ext == ".txt":
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    return f"DOC_CONTENT: {f.read(1200)}"
-        except Exception as e: print(f"Doc extraction error: {e}")
+                    context_res = f"DOC_CONTENT: {f.read(1200)}"
+        except Exception as e:
+            print(f"Doc extraction error: {e}")
 
         # 2. IMMAGINI (Visione Profonda)
-        # Supporta tutti i formati fotografici standard, RAW avanzati, output software professionali e 3D
-        if ext in [
+        if not context_res and ext in [
             ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".ico", ".heic", ".heif", ".svg", ".avif", ".jxl",
             ".nef", ".nrw", ".cr2", ".cr3", ".crw", ".arw", ".srf", ".sr2", ".dng", ".raf", ".rw2", ".raw", ".orf", ".ori", 
             ".rwl", ".pef", ".ptx", ".cap", ".iiq", ".eip", ".3fr", ".fff", ".dcr", ".kdc", ".dcs", ".drf", ".k25", ".mrw", 
@@ -260,14 +281,11 @@ class AIEngine:
         ] and self.is_vision:
             try:
                 img = Image.open(file_path)
-                img.thumbnail((1008, 1008)) # Alta risoluzione per preservare testo e dettagli
+                img.thumbnail((1008, 1008))
                 buffered = BytesIO()
                 img.save(buffered, format="JPEG", quality=85)
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 data_url = f"data:image/jpeg;base64,{img_str}"
-                
-                # Prompt intelligente che fonde Visione e Metadati con identificazione persone
-                hint = f"Note: This file was created on {metadata.get('DateTimeOriginal', 'unknown date')}." if metadata else ""
                 
                 prompt_text = (
                     "Describe this image with high precision. List:\n"
@@ -289,25 +307,30 @@ class AIEngine:
                 )
                 
                 response_text = response['choices'][0]['message']['content'].strip()
-                return f"IMAGE_DESC: {response_text}{meta_str}"
+                context_res = f"IMAGE_DESC: {response_text}{meta_str}"
             except Exception as e:
-                # Fallback se Pillow fallisce ad aprire il file RAW (es. .NEF, .CR2 senza codec specifici)
                 if metadata:
-                    return f"RAW_IMAGE_METADATA: {metadata}"
-                print(f"Vision error: {e}")
+                    context_res = f"RAW_IMAGE_METADATA: {metadata}"
+                else:
+                    print(f"Vision error: {e}")
 
         # 3. VIDEO (Cinema / Video)
-        # Supporta tutti i formati video standard, web e cinema RAW professionali
-        if ext in [
+        if not context_res and ext in [
             ".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".f4v", ".wmv", ".m4v", ".mpg", ".mpeg", ".m2v", ".3gp", ".3g2", 
             ".ts", ".mts", ".m2ts", ".vob", ".ogv", ".divx", ".asf",
             ".braw", ".r3d", ".ari", ".arx", ".mxf", ".cine", ".crm", ".mcw"
         ]:
             if metadata:
-                return f"VIDEO_METADATA: {metadata}"
-            return f"VIDEO_FILE: {os.path.basename(file_path)}"
+                context_res = f"VIDEO_METADATA: {metadata}"
+            else:
+                context_res = f"VIDEO_FILE: {os.path.basename(file_path)}"
 
-        return ""
+        if context_res and sidecar_str:
+            context_res += sidecar_str
+        elif not context_res and sidecar_str:
+            context_res = f"FILE_TRANSCRIBED: {os.path.basename(file_path)}{sidecar_str}"
+            
+        return context_res
 
     def identify_global_themes(self, all_contexts):
         """Brainstorming: Analyse all contexts to find macro-themes and sub-themes."""
@@ -502,3 +525,179 @@ class AIEngine:
                     hasher.update(buf); buf = afile.read(65536)
             return getattr(hasher, "hexdigest")()
         except: return None
+
+    def check_ffmpeg(self, custom_path=None):
+        """
+        Verifica la presenza di FFMPEG nel sistema.
+        Ritorna (True, percorso) o (False, messaggio_errore).
+        """
+        import subprocess
+        import shutil
+        
+        # 1. Se viene fornito un percorso personalizzato dall'utente
+        if custom_path:
+            custom_path = os.path.abspath(custom_path.strip())
+            if os.path.exists(custom_path):
+                # Se è una cartella che contiene ffmpeg.exe, proviamo a risolverlo
+                if os.path.isdir(custom_path):
+                    executable = os.path.join(custom_path, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
+                else:
+                    executable = custom_path
+                    
+                if os.path.exists(executable) and os.path.isfile(executable):
+                    try:
+                        res = subprocess.run([executable, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+                        if res.returncode == 0:
+                            return True, executable
+                    except Exception as e:
+                        return False, f"Errore esecuzione FFMPEG custom: {e}"
+            return False, "Percorso FFMPEG non valido o inesistente."
+            
+        # 2. Altrimenti cerchiamo nel PATH di sistema
+        ffmpeg_bin = shutil.which("ffmpeg")
+        if ffmpeg_bin:
+            try:
+                res = subprocess.run([ffmpeg_bin, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+                if res.returncode == 0:
+                    return True, ffmpeg_bin
+            except Exception as e:
+                return False, f"Errore esecuzione FFMPEG in PATH: {e}"
+                
+        # 3. Tentativo finale su Windows in posizioni comuni
+        if os.name == "nt":
+            common_paths = [
+                r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+                r"C:\ffmpeg\bin\ffmpeg.exe"
+            ]
+            for p in common_paths:
+                if os.path.exists(p):
+                    try:
+                        res = subprocess.run([p, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+                        if res.returncode == 0:
+                            return True, p
+                    except:
+                        pass
+                        
+        return False, "FFMPEG non trovato nel sistema. Configuralo nelle Impostazioni."
+
+    def generate_proxy(self, video_path, output_dir, ffmpeg_path=None, progress_callback=None):
+        """
+        Genera un proxy leggero H.264 MP4 da un video.
+        Ritorna (True, percorso_proxy) o (False, messaggio_errore).
+        """
+        import subprocess
+        
+        ok, executable = self.check_ffmpeg(ffmpeg_path)
+        if not ok:
+            return False, executable
+            
+        if not os.path.exists(video_path):
+            return False, "Video sorgente non trovato."
+            
+        os.makedirs(output_dir, exist_ok=True)
+        base_name = os.path.splitext(os.path.basename(video_path))[0]
+        proxy_path = os.path.join(output_dir, f"proxy_{base_name}.mp4")
+        
+        # Se il proxy esiste già, non sovrascriverlo (ottimizzazione)
+        if os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 0:
+            return True, proxy_path
+            
+        # Comando FFMPEG per proxy leggero (960x540, H.264, audio AAC)
+        # scale=960:-2 garantisce larghezza 960 e altezza proporzionale pari (evitando errori ffmpeg per altezze dispari)
+        cmd = [
+            executable, "-y",
+            "-i", video_path,
+            "-vf", "scale=960:-2",
+            "-c:v", "libx264",
+            "-crf", "28",
+            "-preset", "fast",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            proxy_path
+        ]
+        
+        try:
+            if progress_callback:
+                progress_callback(f"Transcodifica in corso: {os.path.basename(video_path)}...")
+            
+            # Nascondiamo la finestra su Windows per non far apparire schermate nere CMD moleste
+            startupinfo = None
+            if os.name == 'nt':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0 # SW_HIDE
+                
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=startupinfo
+            )
+            
+            # Attendiamo la fine del processo
+            stdout, stderr = process.communicate()
+            
+            if process.returncode == 0 and os.path.exists(proxy_path):
+                return True, proxy_path
+            else:
+                err_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Errore generico FFMPEG"
+                return False, f"FFMPEG fallito (codice {process.returncode}): {err_msg}"
+        except Exception as e:
+            return False, f"Eccezione durante transcodifica: {e}"
+
+    def apply_custom_rules(self, file_path, rules_list):
+        """
+        Applica una lista di regole personalizzate a un file.
+        Ritorna il percorso di destinazione relativo (es. 'Foto/nome.jpg') se combacia, altrimenti None.
+        """
+        import os
+        if not os.path.exists(file_path):
+            return None
+            
+        original_name = os.path.basename(file_path)
+        ext = os.path.splitext(original_name)[1].lower()
+        name_no_ext = os.path.splitext(original_name)[0].lower()
+        
+        for rule in rules_list:
+            r_type = rule.get('type')
+            r_val = rule.get('value', '').strip()
+            r_folder = rule.get('folder', '').strip()
+            
+            if not r_type or not r_folder:
+                continue
+                
+            matched = False
+            if r_type == 'Estensione':
+                extensions = [e.strip().lower() for e in r_val.split(',') if e.strip()]
+                # Supporta sia ".jpg" che "jpg"
+                if ext in extensions or ext.replace('.', '') in extensions or ('.' + ext.replace('.', '')) in extensions:
+                    matched = True
+            elif r_type == 'Nome contiene':
+                keywords = [k.strip().lower() for k in r_val.split(',') if k.strip()]
+                if any(kw in name_no_ext for kw in keywords):
+                    matched = True
+            elif r_type == 'Dimensione > (MB)':
+                try:
+                    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                    if size_mb > float(r_val):
+                        matched = True
+                except:
+                    pass
+            elif r_type == 'Dimensione < (MB)':
+                try:
+                    size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                    if size_mb < float(r_val):
+                        matched = True
+                except:
+                    pass
+                    
+            if matched:
+                r_folder = r_folder.replace('\\', '/')
+                # Pulisce slash doppi o in eccesso
+                parts = [p.strip() for p in r_folder.split('/') if p.strip()]
+                r_folder = '/'.join(parts)
+                return f"{r_folder}/{original_name}"
+                
+        return None
+
+
