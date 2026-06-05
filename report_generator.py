@@ -577,13 +577,15 @@ class ReportGenerator:
         # Stile e Font
         font_name = "helvetica"
         
-        # Pagina singola o multipla
-        page = doc.new_page(width=595, height=842) # A4
+        # Pagina singola o multipla (LANDSCAPE)
+        page_width = 842
+        page_height = 595
+        page = doc.new_page(width=page_width, height=page_height)
         
         # Disegna Intestazione
-        page.draw_rect(fitz.Rect(0, 0, 595, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
-        page.insert_textbox(fitz.Rect(20, 15, 400, 70), "DATARIUM - MHL VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
-        page.insert_textbox(fitz.Rect(20, 45, 400, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
+        page.draw_rect(fitz.Rect(0, 0, page_width, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
+        page.insert_textbox(fitz.Rect(20, 15, 600, 70), "DATARIUM - MHL VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
+        page.insert_textbox(fitz.Rect(20, 45, 600, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
         
         # Badge di stato
         overall_status = "VERIFIED"
@@ -591,8 +593,8 @@ class ReportGenerator:
             overall_status = "FAILED"
             
         status_color = (0.06, 0.72, 0.5) if overall_status == "VERIFIED" else (0.93, 0.26, 0.26)
-        page.draw_rect(fitz.Rect(450, 20, 570, 60), color=None, fill=status_color, width=0, radius=0.25)
-        page.insert_textbox(fitz.Rect(450, 28, 570, 55), overall_status, fontsize=12, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
+        page.draw_rect(fitz.Rect(page_width - 150, 20, page_width - 20, 60), color=None, fill=status_color, width=0, radius=0.25)
+        page.insert_textbox(fitz.Rect(page_width - 150, 28, page_width - 20, 55), overall_status, fontsize=12, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
         
         # Specifiche Hardware e Dettagli
         specs = cls.get_hardware_specs()
@@ -610,24 +612,26 @@ class ReportGenerator:
             total_size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} GB"
             
         dests_str = "\n".join(f"  - {d}" for d in dest_dirs)
-        page.insert_textbox(fitz.Rect(300, 100, 570, 200), 
+        page.insert_textbox(fitz.Rect(300, 100, page_width - 20, 200), 
                              cls.safe_text(f"Riepilogo Offload:\n- File Totali: {len(files_list)}\n- Dimensione Totale: {total_size_str}\n- Algoritmo: {algo}\n- Destinazioni:\n{dests_str}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         # Tabella dei File
         y = 210
         for f in files_list:
-            if y > 700:
-                page = doc.new_page(width=595, height=842)
+            if y > page_height - 100:
+                page = doc.new_page(width=page_width, height=page_height)
                 y = 40
             
-            # File Header (grigio)
-            page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.92, 0.93, 0.95))
+            # File Header (grigio chiaro)
+            page.draw_rect(fitz.Rect(20, y, page_width - 20, y+20), color=None, fill=(0.92, 0.93, 0.95))
             name_disp = f["name"]
             page.insert_text((25, y+14), cls.safe_text(name_disp), fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+            
+            thumb_start_y = y + 25
             y += 25
             
-            # Metadata rows
+            # Metadata rows (sulla sinistra)
             size_txt = f.get("size_str", "N/A")
             created_txt = f.get("created", "N/A")
             hash_algo = "xxHash 64" if algo == "xxHash64" else algo
@@ -643,7 +647,7 @@ class ReportGenerator:
             frames = f.get("frames", "N/A")
             
             if media_fmt == "Video":
-                page.insert_text((25, y+10), cls.safe_text(f"Video {resolution} {codec}  Duration: {duration} Frames: {frames}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+                page.insert_text((25, y+10), cls.safe_text(f"Video: {resolution} {codec} | Dur: {duration} | Frames: {frames}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
             else:
                 page.insert_text((25, y+10), cls.safe_text(f"Type: {media_fmt}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
             y += 15
@@ -651,32 +655,36 @@ class ReportGenerator:
             page.insert_text((25, y+10), cls.safe_text(f"{hash_algo}: {hash_val}"), fontsize=8, fontname=font_name, color=(0.4, 0.4, 0.4))
             y += 15
             
-            # Thumbnails row
+            # Thumbnails row (sulla destra)
+            max_y_for_entry = y
             if media_fmt == "Video":
                 thumbs = cls.extract_video_thumbnails(f["path"])
                 thumb_w = 85
                 thumb_h = 48
-                thumb_y = y
                 for i, t in enumerate(thumbs):
-                    thumb_x = 25 + i * (thumb_w + 5)
-                    rect = fitz.Rect(thumb_x, thumb_y, thumb_x + thumb_w, thumb_y + thumb_h)
+                    thumb_x = 280 + i * (thumb_w + 5)
+                    rect = fitz.Rect(thumb_x, thumb_start_y, thumb_x + thumb_w, thumb_start_y + thumb_h)
                     page.insert_image(rect, stream=t)
-                y += thumb_h + 15
+                max_y_for_entry = max(y, thumb_start_y + thumb_h + 10)
             elif media_fmt == "Image":
                 try:
                     import io
                     from PIL import Image
                     img = Image.open(f["path"])
-                    img.thumbnail((85, 85))
+                    if img.mode in ("RGBA", "P"):
+                        img = img.convert("RGB")
+                    img.thumbnail((120, 85))
                     bio = io.BytesIO()
                     img.save(bio, format="JPEG")
-                    rect = fitz.Rect(25, y, 25+85, y+img.size[1]*85/img.size[0])
+                    # Calcola altezza proporzionale (max 85)
+                    tw, th = img.size
+                    rect = fitz.Rect(280, thumb_start_y, 280 + tw, thumb_start_y + th)
                     page.insert_image(rect, stream=bio.getvalue())
-                    y += img.size[1]*85/img.size[0] + 15
-                except:
-                    pass
+                    max_y_for_entry = max(y, thumb_start_y + th + 10)
+                except Exception as e:
+                    print(f"Error thumbnail PDF: {e}")
             
-            y += 10
+            y = max_y_for_entry + 15
             
         doc.save(report_path)
         doc.close()
