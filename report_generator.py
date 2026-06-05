@@ -90,6 +90,15 @@ class ReportGenerator:
             if ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]:
                 # Se è immagine, proviamo a usare il path assoluto per caricarla nel browser
                 preview_elem = f'<img class="preview-img" src="file:///{it["path"].replace(chr(92), "/")}" alt="{it["name"]}"/>'
+            elif ext in [".mp4", ".mov", ".mxf", ".avi", ".mkv"]:
+                # Estrae un thumbnail video in base64 per HTML
+                thumbs = cls.extract_video_thumbnails(it["path"], num_thumbnails=1)
+                if thumbs:
+                    import base64
+                    b64 = base64.b64encode(thumbs[0]).decode('ascii')
+                    preview_elem = f'<img class="preview-img" src="data:image/jpeg;base64,{b64}" alt="Video Preview"/>'
+                else:
+                    preview_elem = '<div class="preview-placeholder">🎞️</div>'
             else:
                 preview_elem = '<div class="preview-placeholder">🎞️</div>'
                 
