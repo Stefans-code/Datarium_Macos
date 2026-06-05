@@ -569,7 +569,7 @@ class DatariumApp(ctk.CTk):
         # --- FOOTER ---
         btn_f = ctk.CTkFrame(modal, fg_color="transparent")
         btn_f.pack(side="bottom", fill="x", padx=40, pady=30)
-        ctk.CTkButton(btn_f, text="Annulla", fg_color="transparent", border_width=2, width=120, command=lambda: self.show_page("Home")).pack(side="left")
+        ctk.CTkButton(btn_f, text="Annulla", fg_color="transparent", text_color=("gray10", "gray90"), border_width=2, width=120, command=lambda: self.show_page("Home")).pack(side="left")
         ctk.CTkButton(btn_f, text="Conferma", width=140, fg_color="#10b981", hover_color="#059669", command=self.go_to_preview).pack(side="right")
 
     def auto_detect_file_types(self, folder):
@@ -2109,7 +2109,7 @@ class DatariumApp(ctk.CTk):
         res_foot = ctk.CTkFrame(v_results, fg_color="transparent")
         res_foot.pack(fill="x", side="bottom", pady=(15, 0))
         
-        ctk.CTkButton(res_foot, text="Nuovo Offload", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_offload_subpage("OffloadHome")).pack(side="left")
+        ctk.CTkButton(res_foot, text="Nuovo Offload", fg_color="transparent", text_color=("gray10", "gray90"), border_width=1, width=120, command=lambda: self.show_offload_subpage("OffloadHome")).pack(side="left")
         
         self.btn_open_report = ctk.CTkButton(res_foot, text="📄 Apri Report PDF", fg_color="#10b981", hover_color="#059669", width=220, font=ctk.CTkFont(weight="bold"), state="disabled", command=self.open_generated_report)
         self.btn_open_report.pack(side="right")
