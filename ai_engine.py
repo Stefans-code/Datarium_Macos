@@ -371,16 +371,31 @@ class AIEngine:
         """Generates a smart name using deep context and hierarchical taxonomy."""
         if not self.llm: return f"{category}/{original_name}"
         
-        # 1. Bypass se l'utente ha identificato manualmente delle persone
+        people_prefix = ""
+        subcat_override = None
+        
+        # 1. Analisi persone identificate dall'utente
         if "Persone identificate dall'utente: " in context:
             user_identified = context.split("Persone identificate dall'utente: ")[-1].strip()
-            # Pulisce e normalizza il nome fornito dall'utente
-            user_identified = re.sub(r'[^a-zA-Z0-9_ ]', '', user_identified).strip()
-            user_identified = re.sub(r'\s+', '_', user_identified)
-            if len(user_identified) > 2:
-                # Restituisce direttamente il percorso strutturato basato sul nome utente, garantendo 100% fedeltà
-                orig_ext = os.path.splitext(original_name)[1]
-                return f"{category}/Persone/Identificate/{user_identified}{orig_ext}"
+            names_list = [n.strip() for n in user_identified.split(',') if n.strip()]
+            
+            clean_names = []
+            for n in names_list:
+                cn = re.sub(r'[^a-zA-Z0-9]', '', n.replace(' ', ''))
+                if cn: clean_names.append(cn)
+                
+            if len(clean_names) == 1:
+                people_prefix = f"Foto_di_{clean_names[0]}_"
+            elif len(clean_names) > 0:
+                if len(clean_names) <= 3:
+                    people_prefix = f"Foto_di_Gruppo_{'_'.join(clean_names)}_"
+                else:
+                    initials = "".join([n[0].upper() for n in clean_names])
+                    people_prefix = f"Foto_di_Gruppo_{initials}_"
+            
+            subcat_override = "Persone_Identificate"
+            # Pulizia contesto per non confondere l'AI
+            context = context.split("Persone identificate dall'utente: ")[0].strip()
 
         # Pulizia prefissi tecnici dal contesto per non confondere il modello
         for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
@@ -441,6 +456,12 @@ class AIEngine:
                 parts = [parts[0], parts[1], name_part]
             elif len(parts) == 0:
                 parts = ["Generale", "Varie", os.path.splitext(original_name)[0]]
+                
+            if subcat_override:
+                parts[1] = subcat_override
+                
+            if people_prefix:
+                parts[-1] = f"{people_prefix}{parts[-1]}"
             
             # Sostituzione degli spazi con trattino basso esclusivamente all'interno dei singoli componenti
             parts = [re.sub(r'\s+', '_', p) for p in parts]

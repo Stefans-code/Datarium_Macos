@@ -549,7 +549,7 @@ class DatariumApp(ctk.CTk):
         self.check_dup.pack(side="left", padx=8); self.check_dup.select()
         
         self.check_identify_people_cb = ctk.CTkCheckBox(opts_row1, text="Identifica Persone", variable=self.organizer_identify_people)
-        self.check_identify_people_cb.pack(side="left", padx=8)
+        self.check_identify_people_cb.pack(side="left", padx=8); self.check_identify_people_cb.select()
         
         opts_row2 = ctk.CTkFrame(opts_container, fg_color="transparent")
         opts_row2.pack(pady=3)
@@ -1273,8 +1273,14 @@ class DatariumApp(ctk.CTk):
                         
                     os.makedirs(os.path.dirname(target), exist_ok=True)
                     
+                    base_target = target
+                    counter = 1
+                    while os.path.exists(target) and os.path.abspath(it['path']) != os.path.abspath(target):
+                        name, ext = os.path.splitext(base_target)
+                        target = f"{name}_{counter}{ext}"
+                        counter += 1
+                    
                     try:
-                        if os.path.exists(target): os.remove(target)
                         shutil.move(it['path'], target)
                         
                         # Generazione video proxy se abilitata
@@ -1580,6 +1586,10 @@ class DatariumApp(ctk.CTk):
         sd_list = getattr(self, 'hash_source_folders_list', [])
         if not sd_list and sd:
             sd_list = [sd]
+            
+        sd2 = self.hash_source_folder_2.get()
+        if sd2 and sd2 not in sd_list:
+            sd_list.append(sd2)
             
         algo = self.selected_hash_algo.get()
         if algo == "-Scegli-":
@@ -2011,6 +2021,14 @@ class DatariumApp(ctk.CTk):
                     ext = os.path.splitext(f)[1].lower()
                     new_filename = f"{album}_{idx+1}{ext}" if self.autotag_rename.get() else os.path.basename(f)
                     dest_path = os.path.join(album_dir, new_filename)
+                    
+                    base_dest = dest_path
+                    counter = 1
+                    while os.path.exists(dest_path) and os.path.abspath(f) != os.path.abspath(dest_path):
+                        name, e = os.path.splitext(base_dest)
+                        dest_path = f"{name}_{counter}{e}"
+                        counter += 1
+
                     try:
                         shutil.copy2(f, dest_path)
                     except OSError:

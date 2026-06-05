@@ -506,6 +506,41 @@ class ReportGenerator:
 """
         return html_content
 
+    @staticmethod
+    def safe_text(text):
+        if not isinstance(text, str):
+            return str(text)
+        return text.encode('latin1', 'replace').decode('latin1')
+
+    @staticmethod
+    def extract_video_thumbnails(video_path, num_thumbnails=6):
+        try:
+            import cv2
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                return []
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if total_frames <= 0:
+                cap.release()
+                return []
+            step = max(1, total_frames // (num_thumbnails + 1))
+            thumbnails = []
+            for i in range(1, num_thumbnails + 1):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, i * step)
+                ret, frame = cap.read()
+                if ret:
+                    h, w = frame.shape[:2]
+                    new_w = 85
+                    new_h = int(new_w * (h / w))
+                    frame_resized = cv2.resize(frame, (new_w, new_h))
+                    ret2, buffer = cv2.imencode('.jpg', frame_resized)
+                    if ret2:
+                        thumbnails.append(buffer.tobytes())
+            cap.release()
+            return thumbnails
+        except Exception as e:
+            return []
+
     @classmethod
     def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs):
         """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF."""
@@ -538,7 +573,7 @@ class ReportGenerator:
         # Specifiche Hardware e Dettagli
         specs = cls.get_hardware_specs()
         page.insert_textbox(fitz.Rect(20, 100, 280, 200), 
-                             f"Specifiche PC:\n• OS: {specs['os']}\n• CPU/RAM: {specs['processors']} CPUs, {specs['ram']}", 
+                             cls.safe_text(f"Specifiche PC:\n• OS: {specs['os']}\n• CPU/RAM: {specs['processors']} CPUs, {specs['ram']}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         # Calcolo statistiche
@@ -552,54 +587,72 @@ class ReportGenerator:
             
         dests_str = "\n".join(f"• {d}" for d in dest_dirs)
         page.insert_textbox(fitz.Rect(300, 100, 570, 200), 
-                             f"Riepilogo Offload:\n• File Totali: {len(files_list)}\n• Dimensione Totale: {total_size_str}\n• Algoritmo: {algo}\n• Destinazioni:\n{dests_str}", 
+                             cls.safe_text(f"Riepilogo Offload:\n• File Totali: {len(files_list)}\n• Dimensione Totale: {total_size_str}\n• Algoritmo: {algo}\n• Destinazioni:\n{dests_str}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         # Tabella dei File
-        # Intestazione Tabella
         y = 210
-        page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
-        page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-        page.insert_text((220, y+14), "Dimensione", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-        page.insert_text((300, y+14), "Checksum", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-        page.insert_text((510, y+14), "Stato", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-        
-        y += 25
         for f in files_list:
-            # Nuova pagina se andiamo fuori dai limiti dell'A4
-            if y > 800:
+            if y > 700:
                 page = doc.new_page(width=595, height=842)
                 y = 40
-                # Re-intestazione ridotta su nuova pagina
-                page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
-                page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-                page.insert_text((220, y+14), "Dimensione", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-                page.insert_text((300, y+14), "Checksum", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-                page.insert_text((510, y+14), "Stato", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
-                y += 25
             
-            # Riga del file
-            page.draw_line((20, y+18), (575, y+18), color=(0.9, 0.9, 0.9), width=0.5)
-            
-            # Troncamento del nome file se troppo lungo
+            # File Header (grigio)
+            page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.92, 0.93, 0.95))
             name_disp = f["name"]
-            if len(name_disp) > 30:
-                name_disp = name_disp[:27] + "..."
-                
-            page.insert_text((25, y+12), name_disp, fontsize=8, fontname=font_name, color=(0.1, 0.1, 0.1))
-            page.insert_text((220, y+12), f.get("size_str", "N/A"), fontsize=8, fontname=font_name, color=(0.3, 0.3, 0.3))
+            page.insert_text((25, y+14), cls.safe_text(name_disp), fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+            y += 25
             
-            # Troncamento o formattazione dell'hash
-            h_disp = f.get("hash", "N/A")
-            if len(h_disp) > 36:
-                h_disp = h_disp[:33] + "..."
-            page.insert_text((300, y+12), h_disp, fontsize=8, fontname="courier", color=(0.06, 0.5, 0.3))
+            # Metadata rows
+            size_txt = f.get("size_str", "N/A")
+            created_txt = f.get("created", "N/A")
+            hash_algo = "xxHash 64" if algo == "xxHash64" else algo
+            hash_val = f.get("hash", "N/A")
             
-            status_text = f.get("status", "Verified")
-            status_txt_color = (0.06, 0.72, 0.5) if status_text == "Verified" else (0.93, 0.26, 0.26)
-            page.insert_text((510, y+12), status_text, fontsize=8, fontname=f"{font_name}-bold", color=status_txt_color)
+            page.insert_text((25, y+10), cls.safe_text(f"Size: {size_txt}   Created: {created_txt}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+            y += 15
             
-            y += 22
+            media_fmt = f.get("media_format", "Unknown")
+            codec = f.get("codec", "N/A")
+            resolution = f.get("resolution", "N/A")
+            duration = f.get("duration", "N/A")
+            frames = f.get("frames", "N/A")
+            
+            if media_fmt == "Video":
+                page.insert_text((25, y+10), cls.safe_text(f"Video {resolution} {codec}  Duration: {duration} Frames: {frames}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+            else:
+                page.insert_text((25, y+10), cls.safe_text(f"Type: {media_fmt}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+            y += 15
+            
+            page.insert_text((25, y+10), cls.safe_text(f"{hash_algo}: {hash_val}"), fontsize=8, fontname=font_name, color=(0.4, 0.4, 0.4))
+            y += 15
+            
+            # Thumbnails row
+            if media_fmt == "Video":
+                thumbs = cls.extract_video_thumbnails(f["path"])
+                thumb_w = 85
+                thumb_h = 48
+                thumb_y = y
+                for i, t in enumerate(thumbs):
+                    thumb_x = 25 + i * (thumb_w + 5)
+                    rect = fitz.Rect(thumb_x, thumb_y, thumb_x + thumb_w, thumb_y + thumb_h)
+                    page.insert_image(rect, stream=t)
+                y += thumb_h + 15
+            elif media_fmt == "Image":
+                try:
+                    import io
+                    from PIL import Image
+                    img = Image.open(f["path"])
+                    img.thumbnail((85, 85))
+                    bio = io.BytesIO()
+                    img.save(bio, format="JPEG")
+                    rect = fitz.Rect(25, y, 25+85, y+img.size[1]*85/img.size[0])
+                    page.insert_image(rect, stream=bio.getvalue())
+                    y += img.size[1]*85/img.size[0] + 15
+                except:
+                    pass
+            
+            y += 10
             
         doc.save(report_path)
         doc.close()

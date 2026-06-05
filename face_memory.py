@@ -162,9 +162,9 @@ class FaceMemoryManager:
             # Parametri ottimali per minimizzare falsi positivi e rilevare anche facce piccole
             faces = face_cascade.detectMultiScale(
                 gray, 
-                scaleFactor=1.1, 
-                minNeighbors=5, 
-                minSize=(40, 40)
+                scaleFactor=1.05, 
+                minNeighbors=6, 
+                minSize=(60, 60)
             )
             return list(faces), img
         except Exception as e:
