@@ -1583,9 +1583,9 @@ class DatariumApp(ctk.CTk):
             w.destroy()
 
         sd = self.hash_source_folder.get()
-        sd_list = getattr(self, 'hash_source_folders_list', [])
-        if not sd_list and sd:
-            sd_list = [sd]
+        sd_list = []
+        if sd:
+            sd_list.append(sd)
             
         sd2 = self.hash_source_folder_2.get()
         if sd2 and sd2 not in sd_list:

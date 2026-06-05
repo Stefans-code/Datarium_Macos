@@ -122,18 +122,23 @@ class FaceMemoryManager:
                 print(f"[FaceMemory] Errore caricamento modello XML: {e}")
         return None
 
-    def detect_faces(self, image_path_or_pil):
-        """
-        Rileva tutti i volti nell'immagine fornita.
-        Ritorna: (lista_di_rettangoli_faccia, cv_image)
-        """
+    def detect_faces(self, media_path):
+        """Rileva facce in un'immagine o video."""
         try:
-            if isinstance(image_path_or_pil, str):
-                # Utilizziamo imread con caratteri non-ascii gestiti correttamente tramite numpy
-                img = cv2.imdecode(np.fromfile(image_path_or_pil, dtype=np.uint8), cv2.IMREAD_COLOR)
-            else:
-                # Da PIL a OpenCV BGR
-                img = cv2.cvtColor(np.array(image_path_or_pil), cv2.COLOR_RGB2BGR)
+            img = cv2.imread(media_path)
+            
+            # Se cv2.imread fallisce, prova ad aprire come video
+            if img is None:
+                cap = cv2.VideoCapture(media_path)
+                if cap.isOpened():
+                    # Salta il primissimo frame nero, vai a un po' più avanti nel video
+                    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    if total_frames > 0:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, min(30, total_frames // 4))
+                    ret, frame = cap.read()
+                    if ret:
+                        img = frame
+                cap.release()
                 
             if img is None:
                 return [], None

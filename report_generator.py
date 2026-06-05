@@ -509,8 +509,23 @@ class ReportGenerator:
     @staticmethod
     def safe_text(text):
         if not isinstance(text, str):
-            return str(text)
-        return text.encode('latin1', 'replace').decode('latin1')
+            text = str(text)
+        # Sostituisci caratteri Unicode comuni con equivalenti ASCII prima della conversione
+        replacements = {
+            '\u2022': '-',  # bullet •
+            '\u2013': '-',  # en dash
+            '\u2014': '-',  # em dash
+            '\u2018': "'",  # left single quote
+            '\u2019': "'",  # right single quote
+            '\u201c': '"',  # left double quote
+            '\u201d': '"',  # right double quote
+            '\u2026': '...', # ellipsis
+        }
+        for char, replacement in replacements.items():
+            text = text.replace(char, replacement)
+        # Rimuove emoji e caratteri non supportati da latin1 per evitare i fastidiosi "??" nel PDF
+        clean_bytes = text.encode('latin1', errors='ignore')
+        return clean_bytes.decode('latin1')
 
     @staticmethod
     def extract_video_thumbnails(video_path, num_thumbnails=6):
@@ -573,7 +588,7 @@ class ReportGenerator:
         # Specifiche Hardware e Dettagli
         specs = cls.get_hardware_specs()
         page.insert_textbox(fitz.Rect(20, 100, 280, 200), 
-                             cls.safe_text(f"Specifiche PC:\n• OS: {specs['os']}\n• CPU/RAM: {specs['processors']} CPUs, {specs['ram']}"), 
+                             cls.safe_text(f"Specifiche PC:\n- OS: {specs['os']}\n- CPU/RAM: {specs['processors']} CPUs, {specs['ram']}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         # Calcolo statistiche
@@ -585,9 +600,9 @@ class ReportGenerator:
         else:
             total_size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} GB"
             
-        dests_str = "\n".join(f"• {d}" for d in dest_dirs)
+        dests_str = "\n".join(f"  - {d}" for d in dest_dirs)
         page.insert_textbox(fitz.Rect(300, 100, 570, 200), 
-                             cls.safe_text(f"Riepilogo Offload:\n• File Totali: {len(files_list)}\n• Dimensione Totale: {total_size_str}\n• Algoritmo: {algo}\n• Destinazioni:\n{dests_str}"), 
+                             cls.safe_text(f"Riepilogo Offload:\n- File Totali: {len(files_list)}\n- Dimensione Totale: {total_size_str}\n- Algoritmo: {algo}\n- Destinazioni:\n{dests_str}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         # Tabella dei File
@@ -682,11 +697,11 @@ class ReportGenerator:
         # Specifiche Hardware e Riepilogo
         specs = cls.get_hardware_specs()
         page.insert_textbox(fitz.Rect(20, 100, 280, 180), 
-                             f"Specifiche PC:\n• OS: {specs['os']}\n• CPU/RAM: {specs['processors']} CPUs, {specs['ram']}", 
+                             cls.safe_text(f"Specifiche PC:\n- OS: {specs['os']}\n- CPU/RAM: {specs['processors']} CPUs, {specs['ram']}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         page.insert_textbox(fitz.Rect(300, 100, 570, 180), 
-                             f"Riepilogo Scansione:\n• File Analizzati: {len(files_list)}\n• Algoritmo Checksum: {algo}", 
+                             cls.safe_text(f"Riepilogo Scansione:\n- File Analizzati: {len(files_list)}\n- Algoritmo Checksum: {algo}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
         # Tabella dei File
