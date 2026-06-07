@@ -194,10 +194,16 @@ class AIEngine:
         except:
             return True
 
-    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality="full"):
+    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality=None):
         """Scarica i modelli necessari rinominandoli con nomi proprietari nel Desktop, e poi li carica."""
         import shutil
         try:
+            if quality is None:
+                final_dir = self.get_models_dir()
+                if "documentatio_leggero" in final_dir:
+                    quality = "slim"
+                else:
+                    quality = "full"
             download_dir = self.get_models_dir(force_writable=True, quality=quality)
             
             # (Repo, HF Name, Local Name)
