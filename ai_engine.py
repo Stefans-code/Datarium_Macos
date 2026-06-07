@@ -20,12 +20,12 @@ class AIEngine:
         
         # Default Text Model
         self.text_repo = "Qwen/Qwen2.5-3B-Instruct-GGUF"
-        self.text_file = "qwen2.5-3b-instruct-q4_k_m.gguf"
+        self.text_file = "documentatio.gguf"
         
         # Vision Model (LLaVa v1.5 7B - Second State Version)
         self.vision_repo = "second-state/Llava-v1.5-7B-GGUF"
-        self.vision_file = "llava-v1.5-7b-Q4_K_M.gguf"
-        self.vision_projector = "llava-v1.5-7b-mmproj-model-f16.gguf"
+        self.vision_file = "vision.gguf"
+        self.vision_projector = "projector.gguf"
         
         # Rilevamento hardware GPU e CPU
         self.hardware_info = "CPU"
@@ -140,122 +140,107 @@ class AIEngine:
         details_str = ", ".join(gpu_details) if gpu_details else "Nessuna"
         return gpu_detected, details_str
         
-    def get_models_dir(self, force_writable=False):
+    def get_models_dir(self, force_writable=False, quality=None):
         """
-        Ritorna la cartella dei modelli, provando prima accanto all'eseguibile (in sola lettura)
-        e poi ripiegando su una cartella utente scrivibile (macOS/Windows) se necessario.
+        Ritorna la cartella dei modelli sul Desktop dell'utente.
         """
-        import platform
-        system = platform.system()
-        
-        # 1. Se siamo in ambiente di sviluppo (non frozen), usiamo la cartella locale 'models'
-        if not getattr(sys, 'frozen', False):
-            models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
-            if force_writable:
-                os.makedirs(models_dir, exist_ok=True)
-            return models_dir
-            
-        # 2. Se siamo in ambiente frozen (eseguibile pacchettizzato)
-        # Controlliamo prima se i modelli sono presenti accanto all'eseguibile (es. Windows con Inno Setup)
-        exe_dir_models = os.path.join(os.path.dirname(sys.executable), "models")
-        
-        # Se i modelli esistono già accanto all'eseguibile, usiamo quello (modalità lettura)
-        if os.path.exists(exe_dir_models):
-            # Se la cartella esiste, verifichiamo se non è richiesto forzatamente di scriverci
-            if not force_writable:
-                return exe_dir_models
+        home = os.path.expanduser("~")
+        desktop = home
+        for name in ["Desktop", "Scrivania", "Schreibtisch", "Escritorio", "Bureau"]:
+            path = os.path.join(home, name)
+            if os.path.exists(path):
+                desktop = path
+                break
                 
-        # 3. Altrimenti (es. macOS, o Windows se vogliamo scaricare un modello mancante),
-        # usiamo una cartella utente scrivibile per non incorrere in PermissionError.
-        try:
-            if system == "Windows":
-                base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
-                path = os.path.join(base, "Datarium", "models")
-            elif system == "Darwin": # macOS
-                path = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium", "models")
+        if quality == "slim":
+            models_path = os.path.join(desktop, "documentatio_leggero")
+        elif quality == "full":
+            models_path = os.path.join(desktop, "documentatio_pesante")
+        else:
+            # Auto-rilevazione dinamica
+            pesante = os.path.join(desktop, "documentatio_pesante")
+            leggero = os.path.join(desktop, "documentatio_leggero")
+            if os.path.exists(os.path.join(pesante, "documentatio.gguf")):
+                models_path = pesante
+            elif os.path.exists(os.path.join(leggero, "documentatio.gguf")):
+                models_path = leggero
             else:
-                path = os.path.join(os.path.expanduser("~"), ".datarium", "models")
+                models_path = pesante
                 
-            if force_writable:
-                os.makedirs(path, exist_ok=True)
-            return path
-        except Exception as e:
-            print(f"[AIEngine] Errore risoluzione directory modelli scrivibile: {e}")
-            if force_writable:
-                os.makedirs(exe_dir_models, exist_ok=True)
-            return exe_dir_models
+        if force_writable:
+            os.makedirs(models_path, exist_ok=True)
+        return models_path
 
     def check_models_missing(self):
-        """Controlla se i modelli esistono nell'unico percorso supportato."""
+        """Controlla se i modelli esistono sul Desktop."""
         try:
-            d = self.get_models_dir()
-            if not d or not os.path.exists(d): 
-                return True
-            
-            # Controllo incrociato: devono esserci il testo, la visione E il proiettore
-            t_ok = os.path.exists(os.path.join(d, self.text_file)) or \
-                   os.path.exists(os.path.join(d, "qwen2.5-3b-instruct-q2_k.gguf"))
-            
-            v_ok = os.path.exists(os.path.join(d, self.vision_file)) or \
-                   os.path.exists(os.path.join(d, "llava-v1.5-7b-Q2_K.gguf"))
-            
-            p_ok = os.path.exists(os.path.join(d, self.vision_projector))
-            
-            if t_ok and v_ok and p_ok:
-                return False # Trovati tutti!
-            
-            return True # Qualcosa manca
+            home = os.path.expanduser("~")
+            desktop = home
+            for name in ["Desktop", "Scrivania", "Schreibtisch", "Escritorio", "Bureau"]:
+                path = os.path.join(home, name)
+                if os.path.exists(path):
+                    desktop = path
+                    break
+                    
+            for folder in ["documentatio_leggero", "documentatio_pesante"]:
+                path = os.path.join(desktop, folder)
+                if os.path.exists(path):
+                    t_ok = os.path.exists(os.path.join(path, "documentatio.gguf"))
+                    v_ok = os.path.exists(os.path.join(path, "vision.gguf"))
+                    p_ok = os.path.exists(os.path.join(path, "projector.gguf"))
+                    if t_ok and v_ok and p_ok:
+                        return False # Trovati!
+            return True
         except:
             return True
 
     def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality="full"):
-        """Ora ritorna (True/False, error_msg) per una gestione UI migliore."""
+        """Scarica i modelli necessari rinominandoli con nomi proprietari nel Desktop, e poi li carica."""
+        import shutil
         try:
-            models_dir = self.get_models_dir()
+            download_dir = self.get_models_dir(force_writable=True, quality=quality)
             
+            # (Repo, HF Name, Local Name)
             tasks = []
             if quality == "slim":
-                tasks.append((self.text_repo, "qwen2.5-3b-instruct-q2_k.gguf"))
+                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q2_k.gguf", "documentatio.gguf"))
                 if vision_mode:
-                    tasks.append((self.vision_repo, "llava-v1.5-7b-Q2_K.gguf"))
-                    tasks.append((self.vision_repo, self.vision_projector))
+                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q2_K.gguf", "vision.gguf"))
+                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
             else:
-                tasks.append((self.text_repo, self.text_file))
+                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q4_k_m.gguf", "documentatio.gguf"))
                 if vision_mode:
-                    tasks.append((self.vision_repo, self.vision_file))
-                    tasks.append((self.vision_repo, self.vision_projector))
+                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q4_K_M.gguf", "vision.gguf"))
+                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
 
-            for repo, filename in tasks:
-                # Fallback slim names
-                is_slim = False
-                alt_filename = filename
-                if "qwen" in filename.lower(): alt_filename = "qwen2.5-3b-instruct-q2_k.gguf"
-                elif "llava" in filename and "v1.5-7b" in filename and "mmproj" not in filename: alt_filename = "llava-v1.5-7b-Q2_K.gguf"
-
-                # Verifichiamo se il file esiste già nell'unica cartella modelli supportata
-                current_dir = self.get_models_dir()
-                path = os.path.join(current_dir, filename)
-                alt_path = os.path.join(current_dir, alt_filename)
-
-                if not os.path.exists(path) and not os.path.exists(alt_path):
-                    # Se manca, scarichiamo nella cartella di installazione
-                    download_dir = self.get_models_dir(force_writable=True)
-                    target_path = os.path.join(download_dir, filename)
+            for repo, hf_file, local_name in tasks:
+                target_path = os.path.join(download_dir, local_name)
+                
+                # Se il file finale esiste già, salta il download
+                if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                    continue
                     
-                    if progress_callback: progress_callback(f"Scaricamento {filename}...")
-                    try:
-                        # Sopprimiamo le barre di progresso tramite env var (compatibile con TUTTE le versioni di huggingface_hub)
-                        import os as _os
-                        _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-                        hf_hub_download(
-                            repo_id=repo, 
-                            filename=filename, 
-                            cache_dir=download_dir, 
-                            local_dir=download_dir, 
-                            local_dir_use_symlinks=False
-                        )
-                    except Exception as e:
-                        return False, f"Network Error: {str(e)}"
+                if progress_callback: 
+                    progress_callback(f"Scaricamento {local_name}...")
+                    
+                try:
+                    import os as _os
+                    _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+                    temp_path = hf_hub_download(
+                        repo_id=repo, 
+                        filename=hf_file, 
+                        cache_dir=download_dir, 
+                        local_dir=download_dir, 
+                        local_dir_use_symlinks=False
+                    )
+                    
+                    # Rinomina al nome proprietario locale
+                    if os.path.exists(temp_path) and temp_path != target_path:
+                        if os.path.exists(target_path):
+                            os.remove(target_path)
+                        shutil.move(temp_path, target_path)
+                except Exception as e:
+                    return False, f"Network Error: {str(e)}"
 
             if progress_callback: progress_callback("Caricamento... Attendere.")
             
@@ -272,11 +257,7 @@ class AIEngine:
                 
                 # Identifica i percorsi reali (main o slim)
                 t_path = os.path.join(final_models_dir, self.text_file)
-                if not os.path.exists(t_path): t_path = os.path.join(final_models_dir, "qwen2.5-3b-instruct-q2_k.gguf")
-                
                 v_path = os.path.join(final_models_dir, self.vision_file)
-                if not os.path.exists(v_path): v_path = os.path.join(final_models_dir, "llava-v1.5-7b-Q2_K.gguf")
-                
                 p_path = os.path.join(final_models_dir, self.vision_projector)
 
                 if vision_mode:
