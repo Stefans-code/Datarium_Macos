@@ -912,14 +912,11 @@ class DatariumApp(ctk.CTk):
         # Impedisci navigazione se è in corso una scansione
         if getattr(self, 'is_scanning', False):
             return
-
-        # Ogni servizio deve essere sotto licenza, se non c'è licenza reindirizza a Settings
+        
         self.is_licensed, self.license_status = self.license.verify_license()
-        if not self.is_licensed and name not in ["Setup", "Settings"]:
-            name = "Settings"
-            if hasattr(self, 'lic_status_lbl'):
-                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
-
+        if hasattr(self, 'lic_status_lbl'):
+            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color="#10b981" if self.is_licensed else "#ef4444")
+        
         # Se siamo in Setup, nascondiamo la sidebar per farlo sembrare un installer
         if name == "Setup":
             self.sidebar.grid_forget()
@@ -1619,6 +1616,13 @@ class DatariumApp(ctk.CTk):
             ctk.CTkLabel(row_frame, text=it['size'], text_color=text_color, font=ctk.CTkFont(size=11), anchor="e", justify="right").grid(row=0, column=3, padx=10, pady=4, sticky="ew")
 
     def run_hash_verification(self):
+        self.is_licensed, self.license_status = self.license.verify_license()
+        if not self.is_licensed:
+            self.show_page("Settings")
+            if hasattr(self, 'lic_status_lbl'):
+                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
+            return
+
         for w in self.hash_results_scroll.winfo_children():
             w.destroy()
 
@@ -1879,6 +1883,13 @@ class DatariumApp(ctk.CTk):
             self.autotag_dest_folder.set(folder)
 
     def run_autotag_analysis(self):
+        self.is_licensed, self.license_status = self.license.verify_license()
+        if not self.is_licensed:
+            self.show_page("Settings")
+            if hasattr(self, 'lic_status_lbl'):
+                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
+            return
+
         src = self.autotag_source_folder.get()
         dst = self.autotag_dest_folder.get()
         if not src or not dst:
@@ -2210,6 +2221,13 @@ class DatariumApp(ctk.CTk):
             webbrowser.open(pathlib.Path(self.generated_report_path).absolute().as_uri())
 
     def run_offload_process(self):
+        self.is_licensed, self.license_status = self.license.verify_license()
+        if not self.is_licensed:
+            self.show_page("Settings")
+            if hasattr(self, 'lic_status_lbl'):
+                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
+            return
+
         src = self.offload_source_folder.get()
         dests = [d for d in self.offload_destinations if d.strip()]
         algo = self.offload_algo.get()
