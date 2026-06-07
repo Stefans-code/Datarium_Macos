@@ -209,7 +209,7 @@ class AIEngine:
             # (Repo, HF Name, Local Name)
             tasks = []
             if quality == "slim":
-                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q2_k.gguf", "documentatio.gguf"))
+                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q4_k_m.gguf", "documentatio.gguf"))
                 if vision_mode:
                     tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q2_K.gguf", "vision.gguf"))
                     tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
@@ -570,6 +570,8 @@ class AIEngine:
             clean_path = re.sub(r'\s*/\s*', '/', clean_path)
             
             parts = [p.strip() for p in clean_path.split('/') if p.strip()]
+            parts = [re.sub(r'^\d+[\s._-]*', '', p).strip() for p in parts]
+            parts = [p for p in parts if p]
             
             # Meccanismo di fallback difensivo a 3 livelli (garantisce sempre la struttura corretta)
             if len(parts) == 1:
