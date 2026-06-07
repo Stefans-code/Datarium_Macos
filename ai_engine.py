@@ -208,9 +208,9 @@ class AIEngine:
                     tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q2_K.gguf", "vision.gguf"))
                     tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
             else:
-                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q4_k_m.gguf", "documentatio.gguf"))
+                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q8_0.gguf", "documentatio.gguf"))
                 if vision_mode:
-                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q4_K_M.gguf", "vision.gguf"))
+                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q8_0.gguf", "vision.gguf"))
                     tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
 
             for repo, hf_file, local_name in tasks:
