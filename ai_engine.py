@@ -17,7 +17,6 @@ class AIEngine:
     def __init__(self):
         self.llm = None
         self.is_vision = False
-        self.hardware_info = "CPU"
         
         # Default Text Model
         self.text_repo = "Qwen/Qwen2.5-3B-Instruct-GGUF"
@@ -27,6 +26,119 @@ class AIEngine:
         self.vision_repo = "second-state/Llava-v1.5-7B-GGUF"
         self.vision_file = "llava-v1.5-7b-Q4_K_M.gguf"
         self.vision_projector = "llava-v1.5-7b-mmproj-model-f16.gguf"
+        
+        # Rilevamento hardware GPU e CPU
+        self.hardware_info = "CPU"
+        self.gpu_detected, self.gpu_details = self.detect_gpu_hardware()
+        
+        self.llama_gpu_supported = False
+        if sys.platform != "dummy_platform":
+            try:
+                import importlib
+                llama_cpp = importlib.import_module("llama_cpp")
+                self.llama_gpu_supported = getattr(llama_cpp, 'llama_supports_gpu_offload', lambda: False)()
+            except ImportError:
+                # Evita il type narrowing statico di Pylance
+                self.llama_gpu_supported = os.environ.get("DATARIUM_FORCE_GPU") == "1"
+            
+        if self.gpu_detected and self.llama_gpu_supported:
+            self.hardware_info = "GPU"
+        else:
+            self.hardware_info = "CPU"
+
+    def detect_gpu_hardware(self):
+        """
+        Rileva le GPU disponibili nel sistema.
+        Ritorna una tupla (gpu_detected, gpu_details)
+        """
+        import subprocess
+        import platform
+        
+        gpu_detected = False
+        gpu_details = []
+        system = platform.system()
+        
+        try:
+            if system == "Windows":
+                # Esegui PowerShell per ottenere il nome del controller video (moderno e robusto)
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0 # SW_HIDE
+                try:
+                    res = subprocess.run(
+                        ["powershell", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        startupinfo=startupinfo
+                    )
+                    if res.returncode == 0:
+                        lines = [line.strip() for line in res.stdout.split('\n') if line.strip()]
+                        for line in lines:
+                            if any(x in line.upper() for x in ["NVIDIA", "AMD", "RADEON", "INTEL", "GEFORCE"]):
+                                if "MICROSOFT" not in line.upper():
+                                    gpu_detected = True
+                                    gpu_details.append(line)
+                except Exception as ps_err:
+                    print(f"[AIEngine] Errore query PowerShell: {ps_err}")
+                
+                # Fallback a wmic se powershell non trova nulla o fallisce
+                if not gpu_detected:
+                    try:
+                        res = subprocess.run(
+                            ["wmic", "path", "win32_VideoController", "get", "name"],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True,
+                            startupinfo=startupinfo
+                        )
+                        if res.returncode == 0:
+                            lines = [line.strip() for line in res.stdout.split('\n') if line.strip()]
+                            # Salta l'header "Name"
+                            for line in lines[1:]:
+                                if any(x in line.upper() for x in ["NVIDIA", "AMD", "RADEON", "INTEL", "GEFORCE"]):
+                                    if "MICROSOFT" not in line.upper():
+                                        gpu_detected = True
+                                        gpu_details.append(line)
+                    except Exception as wmic_err:
+                        print(f"[AIEngine] Errore query wmic: {wmic_err}")
+            elif system == "Darwin": # macOS
+                # Controlla se è Apple Silicon
+                machine = platform.machine()
+                if "arm" in machine.lower() or "aac" in machine.lower():
+                    gpu_detected = True
+                    gpu_details.append("Apple Silicon GPU")
+                else:
+                    # Esegui system_profiler
+                    res = subprocess.run(
+                        ["system_profiler", "SPDisplaysDataType"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    if res.returncode == 0:
+                        for line in res.stdout.split('\n'):
+                            if "Chipset Model:" in line:
+                                name = line.split("Chipset Model:")[1].strip()
+                                gpu_detected = True
+                                gpu_details.append(name)
+            else: # Linux / altro
+                res = subprocess.run(
+                    ["lspci"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True
+                )
+                if res.returncode == 0:
+                    for line in res.stdout.split('\n'):
+                        if "VGA" in line or "3D" in line:
+                            gpu_detected = True
+                            gpu_details.append(line.split(":")[-1].strip())
+        except Exception as e:
+            print(f"[AIEngine] Errore durante il rilevamento hardware GPU: {e}")
+            
+        details_str = ", ".join(gpu_details) if gpu_details else "Nessuna"
+        return gpu_detected, details_str
         
     def get_models_dir(self, force_writable=False):
         """
@@ -169,20 +281,50 @@ class AIEngine:
 
                 if vision_mode:
                     chat_handler = Llava15ChatHandler(clip_model_path=p_path)
-                    try:
-                        self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=30, n_batch=512, verbose=False)
-                        self.hardware_info = "GPU (Accelerata)"
-                    except:
+                    loaded = False
+                    if self.llama_gpu_supported:
+                        # 1. Prova GPU Completa (30 layers)
+                        try:
+                            self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=30, n_batch=512, verbose=False)
+                            self.hardware_info = "GPU"
+                            loaded = True
+                        except Exception as e_gpu:
+                            print(f"[AIEngine] Caricamento GPU max fallito: {e_gpu}. Provo modalità combo...")
+                            # 2. Provo Combo (15 layers)
+                            try:
+                                self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=15, n_batch=512, verbose=False)
+                                self.hardware_info = "Both"
+                                loaded = True
+                            except Exception as e_combo:
+                                print(f"[AIEngine] Caricamento GPU combo fallito: {e_combo}. Ripiego su CPU...")
+                    
+                    if not loaded:
+                        # 3. CPU Fallback (0 layers)
                         self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=1024, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
-                        self.hardware_info = "CPU (Standard)"
+                        self.hardware_info = "CPU"
                     self.is_vision = True
                 else:
-                    try:
-                        self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=30, n_batch=512, verbose=False)
-                        self.hardware_info = "GPU (Accelerata)"
-                    except:
+                    loaded = False
+                    if self.llama_gpu_supported:
+                        # 1. Prova GPU Completa (30 layers)
+                        try:
+                            self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=30, n_batch=512, verbose=False)
+                            self.hardware_info = "GPU"
+                            loaded = True
+                        except Exception as e_gpu:
+                            print(f"[AIEngine] Caricamento GPU max fallito: {e_gpu}. Provo modalità combo...")
+                            # 2. Provo Combo (15 layers)
+                            try:
+                                self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=15, n_batch=512, verbose=False)
+                                self.hardware_info = "Both"
+                                loaded = True
+                            except Exception as e_combo:
+                                print(f"[AIEngine] Caricamento GPU combo fallito: {e_combo}. Ripiego su CPU...")
+                    
+                    if not loaded:
+                        # 3. CPU Fallback (0 layers)
                         self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
-                        self.hardware_info = "CPU (Standard)"
+                        self.hardware_info = "CPU"
                     self.is_vision = False
                     
                 return True, ""
@@ -601,9 +743,9 @@ class AIEngine:
                         
         return False, "FFMPEG non trovato nel sistema. Configuralo nelle Impostazioni."
 
-    def generate_proxy(self, video_path, output_dir, ffmpeg_path=None, progress_callback=None):
+    def generate_proxy(self, video_path, output_dir, ffmpeg_path=None, progress_callback=None, resolution="540p", format_ext="mp4"):
         """
-        Genera un proxy leggero H.264 MP4 da un video.
+        Genera un proxy leggero H.264 da un video nella risoluzione e formato specificati.
         Ritorna (True, percorso_proxy) o (False, messaggio_errore).
         """
         import subprocess
@@ -617,18 +759,29 @@ class AIEngine:
             
         os.makedirs(output_dir, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(video_path))[0]
-        proxy_path = os.path.join(output_dir, f"proxy_{base_name}.mp4")
+        proxy_path = os.path.join(output_dir, f"proxy_{base_name}.{format_ext}")
         
         # Se il proxy esiste già, non sovrascriverlo (ottimizzazione)
         if os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 0:
             return True, proxy_path
             
-        # Comando FFMPEG per proxy leggero (960x540, H.264, audio AAC)
-        # scale=960:-2 garantisce larghezza 960 e altezza proporzionale pari (evitando errori ffmpeg per altezze dispari)
+        # Mappa della risoluzione in larghezza per FFMPEG scale filter
+        # scale=X:-2 garantisce larghezza X e altezza proporzionale pari (evitando errori ffmpeg per altezze dispari)
+        res_map = {
+            "1080p": "1920",
+            "720p": "1280",
+            "540p": "960",
+            "480p": "854",
+            "360p": "640"
+        }
+        width = res_map.get(resolution, "960")
+        scale_filter = f"scale={width}:-2"
+        
+        # Comando FFMPEG per proxy leggero (H.264, audio AAC)
         cmd = [
             executable, "-y",
             "-i", video_path,
-            "-vf", "scale=960:-2",
+            "-vf", scale_filter,
             "-c:v", "libx264",
             "-crf", "28",
             "-preset", "fast",

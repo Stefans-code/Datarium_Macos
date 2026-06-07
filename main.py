@@ -244,6 +244,8 @@ class DatariumApp(ctk.CTk):
         self.load_settings()
         self.scan_sidecars_var = ctk.BooleanVar(value=self.scan_sidecars_enabled)
         self.proxy_gen_var = ctk.BooleanVar(value=self.proxy_gen_enabled)
+        self.proxy_resolution_var = ctk.StringVar(value=self.proxy_resolution)
+        self.proxy_format_var = ctk.StringVar(value=self.proxy_format)
         self.use_custom_rules_var = ctk.BooleanVar(value=True)
 
         # UI Layout
@@ -279,6 +281,8 @@ class DatariumApp(ctk.CTk):
         self.ffmpeg_path = ""
         self.scan_sidecars_enabled = True
         self.proxy_gen_enabled = False
+        self.proxy_resolution = "540p (960x540)"
+        self.proxy_format = "MP4 (.mp4)"
         
         if os.path.exists(config_path):
             try:
@@ -288,6 +292,8 @@ class DatariumApp(ctk.CTk):
                     self.ffmpeg_path = data.get("ffmpeg_path", "")
                     self.scan_sidecars_enabled = data.get("scan_sidecars_enabled", True)
                     self.proxy_gen_enabled = data.get("proxy_gen_enabled", False)
+                    self.proxy_resolution = data.get("proxy_resolution", "540p (960x540)")
+                    self.proxy_format = data.get("proxy_format", "MP4 (.mp4)")
             except Exception as e:
                 print(f"Errore caricamento impostazioni: {e}")
                 
@@ -298,7 +304,9 @@ class DatariumApp(ctk.CTk):
             "custom_rules": self.custom_rules,
             "ffmpeg_path": self.ffmpeg_path,
             "scan_sidecars_enabled": self.scan_sidecars_var.get(),
-            "proxy_gen_enabled": self.proxy_gen_var.get()
+            "proxy_gen_enabled": self.proxy_gen_var.get(),
+            "proxy_resolution": self.proxy_resolution_var.get(),
+            "proxy_format": self.proxy_format_var.get()
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -663,9 +671,31 @@ class DatariumApp(ctk.CTk):
         btn_test_ff.pack(side="left", padx=5)
         
         self.ffmpeg_status_lbl = ctk.CTkLabel(ff_box, text="Stato FFMPEG: In attesa di verifica", font=ctk.CTkFont(size=11), text_color="gray")
-        self.ffmpeg_status_lbl.pack(anchor="w", padx=20, pady=(5, 15))
+        self.ffmpeg_status_lbl.pack(anchor="w", padx=20, pady=(5, 5))
         # Esegui un controllo silenzioso iniziale
         self.after(500, lambda: self.test_ffmpeg_path(silent=True))
+
+        # Riga per le impostazioni dei proxy (Risoluzione e Formato)
+        proxy_settings_row = ctk.CTkFrame(ff_box, fg_color="transparent")
+        proxy_settings_row.pack(fill="x", padx=20, pady=(5, 15))
+        
+        ctk.CTkLabel(proxy_settings_row, text="Risoluzione Proxy:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 10))
+        self.proxy_resolution_menu = ctk.CTkOptionMenu(
+            proxy_settings_row, 
+            values=["1080p (1920x1080)", "720p (1280x720)", "540p (960x540)", "480p (854x480)", "360p (640x360)"],
+            variable=self.proxy_resolution_var,
+            command=lambda v: self.save_settings()
+        )
+        self.proxy_resolution_menu.pack(side="left", padx=(0, 30))
+        
+        ctk.CTkLabel(proxy_settings_row, text="Formato Proxy:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 10))
+        self.proxy_format_menu = ctk.CTkOptionMenu(
+            proxy_settings_row, 
+            values=["MP4 (.mp4)", "MKV (.mkv)", "MOV (.mov)"],
+            variable=self.proxy_format_var,
+            command=lambda v: self.save_settings()
+        )
+        self.proxy_format_menu.pack(side="left")
 
         # Custom Rules Box
         rules_box = ctk.CTkFrame(page, corner_radius=10)
@@ -700,6 +730,8 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(hw_box, text="Status Hardware", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         self.hw_info_lbl = ctk.CTkLabel(hw_box, text=f"Rilevato: {self.ai.hardware_info}", text_color="#38bdf8")
         self.hw_info_lbl.pack(anchor="w", padx=20, pady=(0, 15))
+        
+
 
         # License
         lic_box = ctk.CTkFrame(page, corner_radius=10)
@@ -1286,7 +1318,16 @@ class DatariumApp(ctk.CTk):
                         # Generazione video proxy se abilitata
                         if self.proxy_gen_var.get() and it['type'] == "Video":
                             proxy_dir = os.path.join(os.path.dirname(target), "Proxies")
-                            self.ai.generate_proxy(target, proxy_dir, self.ffmpeg_path, progress_callback=self.update_status)
+                            res_code = self.proxy_resolution_var.get().split()[0]
+                            fmt_code = self.proxy_format_var.get().split()[0].lower()
+                            self.ai.generate_proxy(
+                                target, 
+                                proxy_dir, 
+                                ffmpeg_path=self.ffmpeg_path, 
+                                progress_callback=self.update_status,
+                                resolution=res_code,
+                                format_ext=fmt_code
+                            )
                     except Exception as e:
                         print(f"Errore spostamento/proxy {it['old']}: {e}")
                         
