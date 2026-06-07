@@ -538,13 +538,32 @@ class AIEngine:
         # Rimosso qualsiasi elenco numerato per evitare il bug di "1_..._2_..._3_" dei modelli
         messages = [
             {"role": "system", "content": (
-                "Sei un archivista esperto. Rinomina il file nel formato esatto: Categoria/Sottocategoria/Nome_Descrittivo\n"
+                "Sei un archivista esperto. Rinomina il file in: Categoria/Sottocategoria/Nome_Descrittivo\n"
                 "Regole fondamentali:\n"
-                "Il nome descrittivo deve essere in italiano ed estremamente specifico.\n"
-                "Usa da 3 a 5 parole significative separate esclusivamente da trattini bassi (_) (esempio: Bambino_Camicia_Rossa_Soridente).\n"
-                "Non usare elenchi numerati, preamboli o estensioni.\n"
-                "Rispondi SOLO ed ESCLUSIVAMENTE con la stringa Categoria/Sottocategoria/Nome."
+                "- Usa la Tassonomia consigliata per definire Categoria e Sottocategoria.\n"
+                "- Il Nome descrittivo deve essere in italiano, specifico e composto da 3 a 5 parole separate da trattini bassi (_).\n"
+                "- Non includere estensioni, elenchi numerati o spiegazioni.\n"
+                "- Rispondi SOLO con la stringa Categoria/Sottocategoria/Nome_Descrittivo."
             )},
+            # Esempio 1
+            {"role": "user", "content": (
+                "Original Name: image_102.png\n"
+                "File Type: Image\n"
+                "Descrizione: Foto di famiglia sulla spiaggia di Rimini, estate 2024.\n"
+                "Tassonomia consigliata: Viaggi(Rimini), Famiglia(Mare)\n\n"
+                "Nuovo percorso completo (Categoria/Sottocategoria/Nome_Descrittivo):"
+            )},
+            {"role": "assistant", "content": "Viaggi/Rimini/Famiglia_Spiaggia_Rimini_2024"},
+            # Esempio 2
+            {"role": "user", "content": (
+                "Original Name: ricevuta_12345.pdf\n"
+                "File Type: Doc\n"
+                "Descrizione: Ricevuta del ristorante Da Mario per cena di Nexflamma.\n"
+                "Tassonomia consigliata: Lavoro(Nexflamma), Spese(Ricevute)\n\n"
+                "Nuovo percorso completo (Categoria/Sottocategoria/Nome_Descrittivo):"
+            )},
+            {"role": "assistant", "content": "Lavoro/Nexflamma/Ricevuta_Ristorante_Da_Mario"},
+            # Query reale
             {"role": "user", "content": (
                 f"Original Name: {original_name}\n"
                 f"File Type: {category}\n"
@@ -562,8 +581,8 @@ class AIEngine:
             )
             clean_path = response['choices'][0]['message']['content'].strip()
             
-            # Final cleanup
-            clean_path = clean_path.strip("'\" ").split('(')[0].split('\'')[0].split('"')[0].strip()
+            # Final cleanup (evitiamo split su parentesi che tronca l'intero percorso se contiene tassonomie nidificate)
+            clean_path = clean_path.strip("'\" ").replace('(', '_').replace(')', '_').split('\'')[0].split('"')[0].strip()
             
             # Normalizzazione degli slash (sostituzione di backslash e rimozione spazi intorno agli slash)
             clean_path = clean_path.replace('\\', '/')
