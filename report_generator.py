@@ -42,7 +42,7 @@ class ReportGenerator:
                 cmd = "sysctl hw.memsize"
                 mem = subprocess.check_output(cmd, shell=True).decode().strip()
                 ram_gb = int(mem.split(":")[-1].strip()) // (1024 ** 3)
-        except:
+        except Exception:
             pass
             
         return {
@@ -565,9 +565,98 @@ class ReportGenerator:
         except Exception as e:
             return []
 
+    @staticmethod
+    def extract_media_info(file_path):
+        """Estrae metadati REALI (risoluzione, durata, codec, bitrate, camera) da video e immagini.
+        Ritorna sempre un dizionario; i campi non disponibili valgono 'N/A' (mai dati fittizi)."""
+        ext = os.path.splitext(file_path)[1].lower()
+        video_exts = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v',
+                      '.mpg', '.mpeg', '.m2ts', '.mts', '.braw', '.r3d', '.mxf', '.crm']
+        image_exts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.tif', '.gif',
+                      '.heic', '.heif', '.nef', '.cr2', '.cr3', '.arw', '.dng', '.raf', '.rw2', '.orf']
+
+        info = {
+            "media_format": "Data",
+            "codec": "N/A",
+            "duration": "N/A",
+            "resolution": "N/A",
+            "camera": "N/A",
+            "shot": "N/A",
+            "frames": "N/A",
+            "bitrate": "N/A",
+            "audio": "N/A",
+        }
+
+        try:
+            if ext in video_exts:
+                info["media_format"] = "Video"
+                import cv2
+                cap = cv2.VideoCapture(file_path)
+                if cap.isOpened():
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 0
+                    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+                    if width and height:
+                        info["resolution"] = f"{width} x {height}"
+                    if frame_count > 0:
+                        info["frames"] = str(frame_count)
+                    if fps and frame_count > 0:
+                        total_seconds = frame_count / fps
+                        h = int(total_seconds // 3600)
+                        m = int((total_seconds % 3600) // 60)
+                        s = int(total_seconds % 60)
+                        info["duration"] = f"{h}:{m:02d}:{s:02d}"
+                        try:
+                            size_bytes = os.path.getsize(file_path)
+                            mbps = (size_bytes / (1024 * 1024)) / total_seconds
+                            info["bitrate"] = f"{mbps:.1f} MB/s"
+                        except Exception:
+                            pass
+
+                    # Codec a partire dal codice FOURCC
+                    try:
+                        fourcc_int = int(cap.get(cv2.CAP_PROP_FOURCC))
+                        if fourcc_int:
+                            codec = "".join(chr((fourcc_int >> 8 * i) & 0xFF) for i in range(4))
+                            codec = "".join(c for c in codec if c.isprintable()).strip()
+                            if codec:
+                                info["codec"] = codec
+                    except Exception:
+                        pass
+                cap.release()
+
+            elif ext in image_exts:
+                info["media_format"] = "Image"
+                try:
+                    from PIL import Image, ExifTags
+                    img = Image.open(file_path)
+                    info["resolution"] = f"{img.width} x {img.height}"
+                    info["codec"] = img.format or ext.replace('.', '').upper()
+                    exif = getattr(img, "_getexif", lambda: None)()
+                    if exif:
+                        make = model = ""
+                        for tag, value in exif.items():
+                            decoded = ExifTags.TAGS.get(tag, tag)
+                            if decoded == "Make":
+                                make = str(value).strip()
+                            elif decoded == "Model":
+                                model = str(value).strip()
+                        camera = (make + " " + model).strip()
+                        if camera:
+                            info["camera"] = camera
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return info
+
     @classmethod
-    def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs):
-        """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF."""
+    def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs, production_meta=None):
+        """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF.
+        production_meta: dizionario opzionale {etichetta: valore} di metadati produzione (stile Silverstack)."""
         os.makedirs(output_dir, exist_ok=True)
         report_path = os.path.join(output_dir, f"{report_id}_MHL_Report.pdf")
         
@@ -616,8 +705,26 @@ class ReportGenerator:
                              cls.safe_text(f"Riepilogo Offload:\n- File Totali: {len(files_list)}\n- Dimensione Totale: {total_size_str}\n- Algoritmo: {algo}\n- Destinazioni:\n{dests_str}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
-        # Tabella dei File
+        # Sezione Metadati Produzione (stile Silverstack), se forniti
         y = 210
+        if production_meta:
+            page.draw_rect(fitz.Rect(20, y, page_width - 20, y + 18), color=None, fill=(0.85, 0.87, 0.92))
+            page.insert_text((25, y + 13), "METADATI PRODUZIONE", fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+            y += 24
+            meta_pairs = [(k, v) for k, v in production_meta.items() if k != "Note"]
+            meta_str = "    ".join(f"{k}: {v}" for k, v in meta_pairs)
+            if meta_str:
+                page.insert_textbox(fitz.Rect(25, y, page_width - 25, y + 45),
+                                    cls.safe_text(meta_str), fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
+                y += 48
+            note_val = production_meta.get("Note")
+            if note_val:
+                page.insert_textbox(fitz.Rect(25, y, page_width - 25, y + 40),
+                                    cls.safe_text(f"Note: {note_val}"), fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
+                y += 42
+            y += 8
+
+        # Tabella dei File
         for f in files_list:
             if y > page_height - 100:
                 page = doc.new_page(width=page_width, height=page_height)

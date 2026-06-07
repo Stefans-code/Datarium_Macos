@@ -3,7 +3,7 @@ import sys
 import tempfile
 try:
     os.chdir(tempfile.gettempdir())
-except:
+except Exception:
     pass
 
 # Dummy imports block to prevent linter errors and force PyInstaller to statically package C-extensions
@@ -200,7 +200,7 @@ class DatariumApp(ctk.CTk):
                 
             if os.path.exists(self.icon_path):
                 self.iconbitmap(self.icon_path)
-        except: pass
+        except Exception: pass
 
         # Core Engines
         self.ai = AIEngine()
@@ -239,6 +239,24 @@ class DatariumApp(ctk.CTk):
         self.offload_dest_folder_2 = ctk.StringVar(value="")
         self.offload_algo = ctk.StringVar(value="xxHash64")
         self.offload_report_id = ctk.StringVar(value="A" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+
+        # Metadati produzione (stile Silverstack), inclusi nel report MHL dell'Offload
+        self.offload_meta_fields = [
+            ("production", "Produzione"),
+            ("director", "Regista"),
+            ("dop", "Dir. Fotografia"),
+            ("scene", "Scena"),
+            ("shot", "Inquadratura"),
+            ("take", "Take"),
+            ("reel", "Reel / Card"),
+            ("camera", "Camera"),
+            ("camera_model", "Modello Camera"),
+            ("lens", "Obiettivo"),
+            ("fps", "FPS"),
+            ("location", "Luogo"),
+        ]
+        self.offload_meta_vars = {key: ctk.StringVar(value="") for key, _ in self.offload_meta_fields}
+        self.offload_notes_text = None
 
         # Settings state
         self.load_settings()
@@ -433,7 +451,7 @@ class DatariumApp(ctk.CTk):
                 try: 
                     pct = int(text.split('%')[0].split('|')[-1].strip()) / 100
                     self.after(0, lambda: self.setup_progress.set(pct))
-                except: pass
+                except Exception: pass
 
     def init_home_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -730,8 +748,6 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(hw_box, text="Status Hardware", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         self.hw_info_lbl = ctk.CTkLabel(hw_box, text=f"Rilevato: {self.ai.hardware_info}", text_color="#38bdf8")
         self.hw_info_lbl.pack(anchor="w", padx=20, pady=(0, 15))
-        
-
 
         # License
         lic_box = ctk.CTkFrame(page, corner_radius=10)
@@ -839,26 +855,35 @@ class DatariumApp(ctk.CTk):
                 timeout=5
             )
             return
-        except:
+        except Exception:
             pass
             
         try:
             if os.name == 'nt':
-                # Semplice script PowerShell non bloccante per Windows Toast
-                ps_script = f"""
-                [void][System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");
-                $notification = New-Object System.Windows.Forms.NotifyIcon;
-                $notification.Icon = [System.Drawing.SystemIcons]::Information;
-                $notification.BalloonTipIcon = "Info";
-                $notification.BalloonTipTitle = "{title}";
-                $notification.BalloonTipText = "{message}";
-                $notification.Visible = $True;
-                $notification.ShowBalloonTip(5000);
-                """
+                # I valori vengono passati come variabili d'ambiente (NON interpolati nello
+                # script): così apici o virgolette nei nomi file non possono rompere lo script
+                # PowerShell né iniettare comandi.
+                ps_script = (
+                    '[void][System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms");'
+                    '$notification = New-Object System.Windows.Forms.NotifyIcon;'
+                    '$notification.Icon = [System.Drawing.SystemIcons]::Information;'
+                    '$notification.BalloonTipIcon = "Info";'
+                    '$notification.BalloonTipTitle = $env:DATARIUM_NOTIF_TITLE;'
+                    '$notification.BalloonTipText = $env:DATARIUM_NOTIF_TEXT;'
+                    '$notification.Visible = $True;'
+                    '$notification.ShowBalloonTip(5000);'
+                )
                 import subprocess
-                subprocess.Popen(["powershell", "-Command", ps_script], startupinfo=subprocess.STARTUPINFO())
+                env = os.environ.copy()
+                env["DATARIUM_NOTIF_TITLE"] = str(title)
+                env["DATARIUM_NOTIF_TEXT"] = str(message)
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    startupinfo=subprocess.STARTUPINFO(),
+                    env=env
+                )
                 return
-        except:
+        except Exception:
             pass
 
     # --- LOGIC ---
@@ -912,11 +937,14 @@ class DatariumApp(ctk.CTk):
         # Impedisci navigazione se è in corso una scansione
         if getattr(self, 'is_scanning', False):
             return
-        
+
+        # Ogni servizio deve essere sotto licenza, se non c'è licenza reindirizza a Settings
         self.is_licensed, self.license_status = self.license.verify_license()
-        if hasattr(self, 'lic_status_lbl'):
-            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color="#10b981" if self.is_licensed else "#ef4444")
-        
+        if not self.is_licensed and name not in ["Setup", "Settings"]:
+            name = "Settings"
+            if hasattr(self, 'lic_status_lbl'):
+                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
+
         # Se siamo in Setup, nascondiamo la sidebar per farlo sembrare un installer
         if name == "Setup":
             self.sidebar.grid_forget()
@@ -1033,15 +1061,25 @@ class DatariumApp(ctk.CTk):
                     else: 
                         text_items.append({"old": f, "path": os.path.join(root, f), "type": "Other"})
             
-            # Limit total to 100 for stability
-            all_items = (text_items + vision_items)[:100]
+            all_items = text_items + vision_items
             valid_items = []
             
-            # Filtro duplicati
+            # Filtro duplicati: pre-filtro per dimensione. Due file identici hanno la stessa
+            # dimensione, quindi calcoliamo l'hash (lettura completa) solo dove c'è una possibile
+            # collisione, evitando di leggere per intero i file di dimensione unica (spesso video di GB).
+            for item in all_items:
+                try:
+                    item['_size'] = os.path.getsize(item['path'])
+                except OSError:
+                    item['_size'] = -1
+            size_counts = {}
+            for item in all_items:
+                size_counts[item['_size']] = size_counts.get(item['_size'], 0) + 1
+
             sh = {}
             for idx, item in enumerate(all_items):
                 if self.stop_ai: return
-                if self.check_dup.get():
+                if self.check_dup.get() and size_counts.get(item['_size'], 0) > 1:
                     h = self.ai.compute_file_hash(item['path'])
                     if h in sh: item['skip'] = True
                     else: sh[h] = True
@@ -1257,23 +1295,34 @@ class DatariumApp(ctk.CTk):
                 zip_path_full = os.path.join(zip_dest_dir, zip_name) 
                 
                 try:
+                    # I file già compressi (foto/video/archivi/audio) vengono solo archiviati
+                    # (ZIP_STORED): ricomprimerli con DEFLATE non riduce la dimensione ma rallenta
+                    # enormemente il backup. I documenti restano compressi normalmente.
+                    precompressed_exts = {
+                        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.avif', '.jxl',
+                        '.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.mts', '.m2ts', '.mxf',
+                        '.braw', '.r3d', '.wmv', '.flv', '.3gp',
+                        '.zip', '.gz', '.7z', '.rar', '.mp3', '.aac', '.m4a', '.ogg', '.flac', '.opus'
+                    }
                     with zipfile.ZipFile(zip_path_full, 'w', zipfile.ZIP_DEFLATED) as zipf:
                         all_files = []
                         for root, dirs, files in os.walk(src):
                             for file in files:
                                 all_files.append(os.path.join(root, file))
-                        
+
                         total = len(all_files)
                         for i, file_path in enumerate(all_files):
                             if self.stop_ai: break
-                            
+
                             fname = os.path.basename(file_path)
                             if fname.startswith("Backup_Datarium_") or fname == zip_name:
                                 continue
-                                
+
                             rel_path = os.path.relpath(file_path, src)
-                            zipf.write(file_path, rel_path)
-                            
+                            ext = os.path.splitext(fname)[1].lower()
+                            ctype = zipfile.ZIP_STORED if ext in precompressed_exts else zipfile.ZIP_DEFLATED
+                            zipf.write(file_path, rel_path, compress_type=ctype)
+
                             if i % 10 == 0:
                                 self.set_progress(0.01 + 0.09 * (i/max(1, total)))
                     
@@ -1339,39 +1388,6 @@ class DatariumApp(ctk.CTk):
 
         import threading
         threading.Thread(target=run_org_bg, daemon=True).start()
-
-    def open_dest_folder(self):
-        folder = filedialog.askdirectory()
-        if folder: self.control_folder.set(folder)
-
-    def open_backup_folder(self):
-        folder = filedialog.askdirectory()
-        if folder: self.backup_folder.set(folder)
-
-    def go_to_preview(self):
-        # Re-check license status just before preview to catch revoked licenses
-        self.is_licensed, self.license_status = self.license.verify_license()
-        if not self.is_licensed:
-            self.show_page("Settings")
-            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color="#ef4444")
-            return
-            
-        self.show_page("Preview")
-        self.is_scanning = True
-        self.set_sidebar_state("disabled")
-        self.stop_ai = False
-        threading.Thread(target=self.process_files_bg, daemon=True).start()
-
-    def process_activation(self):
-        token = self.license_entry.get().strip()
-        ok, msg = self.license.verify_license(token)
-        if ok:
-            self.license.save_license(token)
-            self.is_licensed = True
-            self.license_status = msg
-            self.lic_status_lbl.configure(text=f"Stato: {msg}", text_color="#10b981")
-        else:
-            self.lic_status_lbl.configure(text=f"Errore: {msg}", text_color="#ef4444")
 
     def init_hash_pages(self):
         # 1. Page: HashHome (Drawing 2 updated)
@@ -1457,6 +1473,15 @@ class DatariumApp(ctk.CTk):
         # 3. Page: HashResults (Drawing 3)
         page_results = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["HashResults"] = page_results
+
+        # Barra di avanzamento e stato (visibili durante il calcolo degli hash)
+        self.hash_progress_frame = ctk.CTkFrame(page_results, fg_color="transparent")
+        self.hash_progress_frame.pack(fill="x", pady=(0, 5))
+        self.hash_status_lbl = ctk.CTkLabel(self.hash_progress_frame, text="", font=ctk.CTkFont(size=12, weight="bold"))
+        self.hash_status_lbl.pack(anchor="w", padx=5)
+        self.hash_progress_bar = ctk.CTkProgressBar(self.hash_progress_frame, height=10)
+        self.hash_progress_bar.pack(fill="x", padx=5, pady=(2, 0))
+        self.hash_progress_bar.set(0)
 
         # A single master scrollable frame to hold all tables/sections
         self.hash_results_scroll = ctk.CTkScrollableFrame(page_results, fg_color=("gray95", "gray10"))
@@ -1560,6 +1585,30 @@ class DatariumApp(ctk.CTk):
         except Exception as e:
             return f"Error: {e}"
 
+    def compute_hashes(self, file_path, algos):
+        """Calcola più hash in UNA SOLA lettura del file (evita di rileggerlo per ogni algoritmo).
+        Ritorna un dizionario {algoritmo: hash_esadecimale}."""
+        import hashlib
+        hashers = {}
+        for algo in algos:
+            if algo == "MD5":
+                hashers[algo] = hashlib.md5()
+            elif algo == "SHA-1":
+                hashers[algo] = hashlib.sha1()
+            elif algo == "xxHash64":
+                import xxhash
+                hashers[algo] = xxhash.xxh64()
+            else:
+                hashers[algo] = hashlib.sha256()
+        try:
+            with open(file_path, "rb") as f:
+                while chunk := f.read(65536):
+                    for h in hashers.values():
+                        h.update(chunk)
+            return {a: getattr(h, "hexdigest")() for a, h in hashers.items()}
+        except Exception as e:
+            return {a: f"Error: {e}" for a in algos}
+
     def check_content_equal(self, f1, f2):
         try:
             with open(f1, "rb") as a, open(f2, "rb") as b:
@@ -1570,7 +1619,7 @@ class DatariumApp(ctk.CTk):
                         return False
                     if not ch1:
                         return True
-        except:
+        except Exception:
             return False
 
     def create_section_header(self, parent, text):
@@ -1616,13 +1665,6 @@ class DatariumApp(ctk.CTk):
             ctk.CTkLabel(row_frame, text=it['size'], text_color=text_color, font=ctk.CTkFont(size=11), anchor="e", justify="right").grid(row=0, column=3, padx=10, pady=4, sticky="ew")
 
     def run_hash_verification(self):
-        self.is_licensed, self.license_status = self.license.verify_license()
-        if not self.is_licensed:
-            self.show_page("Settings")
-            if hasattr(self, 'lic_status_lbl'):
-                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
-            return
-
         for w in self.hash_results_scroll.winfo_children():
             w.destroy()
 
@@ -1653,34 +1695,32 @@ class DatariumApp(ctk.CTk):
         self.show_page("HashResults")
         self.is_scanning = True
         self.set_sidebar_state("disabled")
-        self.loading_lbl = ctk.CTkLabel(self.hash_results_scroll, text="Calcolo hash in corso. Attendere...", font=ctk.CTkFont(size=14, weight="bold"))
-        self.loading_lbl.pack(pady=20)
-        
+        self.hash_progress_bar.set(0)
+        self.hash_status_lbl.configure(text="Preparazione calcolo hash...")
+
         threading.Thread(target=self._run_hash_verification_bg, args=(files_to_hash, sd_list, algo), daemon=True).start()
+
+    def _update_hash_progress(self, idx, total, name):
+        """Aggiorna barra e stato del calcolo hash (chiamato dal thread UI)."""
+        if hasattr(self, 'hash_progress_bar') and self.hash_progress_bar.winfo_exists():
+            self.hash_progress_bar.set((idx + 1) / max(1, total))
+        if hasattr(self, 'hash_status_lbl') and self.hash_status_lbl.winfo_exists():
+            self.hash_status_lbl.configure(text=f"Calcolo hash {idx + 1}/{total}: {name}")
 
     def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
         try:
             results = []
             source_paths = set()
 
+            # 1. Raccogli la lista completa dei file da elaborare (sorgenti + cartelle),
+            #    così possiamo mostrare una barra di avanzamento reale.
+            tasks = []  # (path, is_source)
             for sf in files_to_hash:
                 if os.path.exists(sf):
-                    source_paths.add(os.path.abspath(sf))
-                    hash_val = self.compute_hash(sf, algo)
-                    sz = os.path.getsize(sf)
-                    ext = os.path.splitext(sf)[1].upper().replace('.', '')
-                    results.append({
-                        "name": os.path.basename(sf),
-                        "path": sf,
-                        "type": ext if ext else "FILE",
-                        "hash": hash_val,
-                        "size": self.format_file_size(sz),
-                        "is_source": True
-                    })
-                    if sf not in self.recent_hash_files:
-                        self.recent_hash_files.insert(0, sf)
-                        self.recent_hash_files = self.recent_hash_files[:10]
-                        self.after(0, self.update_recent_hash_ui)
+                    ap = os.path.abspath(sf)
+                    if ap not in source_paths:
+                        source_paths.add(ap)
+                        tasks.append((sf, True))
 
             for sd in sd_list:
                 if os.path.isdir(sd):
@@ -1689,18 +1729,37 @@ class DatariumApp(ctk.CTk):
                             p = os.path.join(root, f)
                             if os.path.abspath(p) in source_paths:
                                 continue
-                            h = self.compute_hash(p, algo)
-                            sz_f = os.path.getsize(p)
-                            ext_f = os.path.splitext(p)[1].upper().replace('.', '')
-                            results.append({
-                                "name": f,
-                                "path": p,
-                                "type": ext_f if ext_f else "FILE",
-                                "hash": h,
-                                "size": self.format_file_size(sz_f),
-                                "is_source": False
-                            })
-            
+                            tasks.append((p, False))
+
+            total = len(tasks)
+            if total == 0:
+                self.after(0, self._render_hash_results, results)
+                return
+
+            # 2. Calcola gli hash aggiornando barra e stato a ogni file
+            for idx, (p, is_source) in enumerate(tasks):
+                name = os.path.basename(p)
+                self.after(0, lambda n=name, i=idx: self._update_hash_progress(i, total, n))
+                hash_val = self.compute_hash(p, algo)
+                try:
+                    sz = os.path.getsize(p)
+                except Exception:
+                    sz = 0
+                ext = os.path.splitext(p)[1].upper().replace('.', '')
+                results.append({
+                    "name": name,
+                    "path": p,
+                    "type": ext if ext else "FILE",
+                    "hash": hash_val,
+                    "size": self.format_file_size(sz),
+                    "is_source": is_source
+                })
+
+                if is_source and p not in self.recent_hash_files:
+                    self.recent_hash_files.insert(0, p)
+                    self.recent_hash_files = self.recent_hash_files[:10]
+                    self.after(0, self.update_recent_hash_ui)
+
             self.after(0, self._render_hash_results, results)
         finally:
             self.is_scanning = False
@@ -1708,9 +1767,11 @@ class DatariumApp(ctk.CTk):
 
     def _render_hash_results(self, results):
         self.last_hash_results = results
-        if hasattr(self, 'loading_lbl') and self.loading_lbl.winfo_exists():
-            self.loading_lbl.destroy()
-            
+        if hasattr(self, 'hash_progress_bar') and self.hash_progress_bar.winfo_exists():
+            self.hash_progress_bar.set(1.0)
+        if hasattr(self, 'hash_status_lbl') and self.hash_status_lbl.winfo_exists():
+            self.hash_status_lbl.configure(text=f"✓ Completato: {len(results)} file elaborati")
+
         hash_counts = {}
         for r in results:
             hash_counts[r['hash']] = hash_counts.get(r['hash'], 0) + 1
@@ -1883,13 +1944,6 @@ class DatariumApp(ctk.CTk):
             self.autotag_dest_folder.set(folder)
 
     def run_autotag_analysis(self):
-        self.is_licensed, self.license_status = self.license.verify_license()
-        if not self.is_licensed:
-            self.show_page("Settings")
-            if hasattr(self, 'lic_status_lbl'):
-                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
-            return
-
         src = self.autotag_source_folder.get()
         dst = self.autotag_dest_folder.get()
         if not src or not dst:
@@ -1942,7 +1996,7 @@ class DatariumApp(ctk.CTk):
                             album_name = album_name.replace(ch, "")
                         album_name = album_name.capitalize()
                         albums.setdefault(album_name, []).append(path)
-                    except:
+                    except Exception:
                         albums.setdefault("Ricordi", []).append(path)
 
                 self.current_albums = albums
@@ -1957,42 +2011,7 @@ class DatariumApp(ctk.CTk):
                             visual_albums.setdefault(album, []).extend(files)
                     self.current_albums = visual_albums
 
-                    # Grid of visual album cards
-                    grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
-                    grid_f.pack(fill="both", expand=True)
-                    grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
-
-                    for idx, (album, files) in enumerate(self.current_albums.items()):
-                        card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
-                        card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
-
-                        # Carica anteprima copertina dell'album
-                        preview_img = None
-                        for f_path in files:
-                            ext = os.path.splitext(f_path)[1].lower()
-                            if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif']:
-                                try:
-                                    from PIL import Image
-                                    pil_img = Image.open(f_path)
-                                    pil_img.thumbnail((160, 100))
-                                    preview_img = ctk.CTkImage(light_image=pil_img, size=pil_img.size)
-                                    break
-                                except:
-                                    pass
-
-                        if preview_img:
-                            lbl_icon = ctk.CTkLabel(card, text="", image=preview_img)
-                        else:
-                            lbl_icon = ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52))
-                        lbl_icon.pack(pady=(20, 5))
-                        
-                        lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
-                        lbl_name.pack(padx=10)
-
-                        ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
-
-                        btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
-                        btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+                    self._render_album_grid()
 
                     self.btn_confirm_at.configure(state="normal", text="Conferma")
                     self.show_autotag_subpage("Album")
@@ -2004,50 +2023,53 @@ class DatariumApp(ctk.CTk):
 
         threading.Thread(target=scan_bg, daemon=True).start()
 
+    def _render_album_grid(self):
+        """Ridisegna la griglia delle card degli album basandosi su self.current_albums."""
+        for w in self.autotag_album_scroll.winfo_children():
+            w.destroy()
+
+        grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
+        grid_f.pack(fill="both", expand=True)
+        grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
+
+        for idx, (album, files) in enumerate(self.current_albums.items()):
+            card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
+            card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
+
+            # Carica anteprima copertina dell'album
+            preview_img = None
+            for f_path in files:
+                ext = os.path.splitext(f_path)[1].lower()
+                if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif']:
+                    try:
+                        from PIL import Image
+                        pil_img = Image.open(f_path)
+                        pil_img.thumbnail((160, 100))
+                        preview_img = ctk.CTkImage(light_image=pil_img, size=pil_img.size)
+                        break
+                    except Exception:
+                        pass
+
+            if preview_img:
+                lbl_icon = ctk.CTkLabel(card, text="", image=preview_img)
+            else:
+                lbl_icon = ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52))
+            lbl_icon.pack(pady=(20, 5))
+
+            lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
+            lbl_name.pack(padx=10)
+
+            ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
+
+            btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
+            btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+
     def edit_album_name(self, old_name):
         from tkinter import simpledialog
         new_name = simpledialog.askstring("Modifica Nome Album", f"Inserisci un nuovo nome per l'album '{old_name}':")
         if new_name and new_name.strip() and new_name != old_name:
             self.current_albums[new_name.strip()] = self.current_albums.pop(old_name)
-            # Re-render UI
-            for w in self.autotag_album_scroll.winfo_children():
-                w.destroy()
-            
-            grid_f = ctk.CTkFrame(self.autotag_album_scroll, fg_color="transparent")
-            grid_f.pack(fill="both", expand=True)
-            grid_f.columnconfigure((0, 1, 2), weight=1, minsize=220)
-
-            for idx, (album, files) in enumerate(self.current_albums.items()):
-                card = ctk.CTkFrame(grid_f, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
-                card.grid(row=idx // 3, column=idx % 3, padx=12, pady=12, sticky="nsew")
-
-                # Carica anteprima copertina dell'album
-                preview_img = None
-                for f_path in files:
-                    ext = os.path.splitext(f_path)[1].lower()
-                    if ext in ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.heic', '.heif']:
-                        try:
-                            from PIL import Image
-                            pil_img = Image.open(f_path)
-                            pil_img.thumbnail((160, 100))
-                            preview_img = ctk.CTkImage(light_image=pil_img, size=pil_img.size)
-                            break
-                        except:
-                            pass
-
-                if preview_img:
-                    lbl_icon = ctk.CTkLabel(card, text="", image=preview_img)
-                else:
-                    lbl_icon = ctk.CTkLabel(card, text="📁", font=ctk.CTkFont(size=52))
-                lbl_icon.pack(pady=(20, 5))
-                
-                lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
-                lbl_name.pack(padx=10)
-
-                ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
-
-                btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
-                btn_edit.pack(pady=(0, 20), padx=15, fill="x")
+            self._render_album_grid()
 
     def rename_and_create_albums(self):
         import shutil
@@ -2070,7 +2092,8 @@ class DatariumApp(ctk.CTk):
             for idx, f in enumerate(files):
                 try:
                     ext = os.path.splitext(f)[1].lower()
-                    new_filename = f"{album}_{idx+1}{ext}" if self.autotag_rename.get() else os.path.basename(f)
+                    orig_base = os.path.splitext(os.path.basename(f))[0]
+                    new_filename = f"{album}_{orig_base}{ext}" if self.autotag_rename.get() else os.path.basename(f)
                     dest_path = os.path.join(album_dir, new_filename)
                     
                     base_dest = dest_path
@@ -2084,7 +2107,7 @@ class DatariumApp(ctk.CTk):
                         shutil.copy2(f, dest_path)
                     except OSError:
                         shutil.copy(f, dest_path)
-                except:
+                except Exception:
                     pass
 
         from tkinter import messagebox
@@ -2138,6 +2161,29 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(g, text="ID Report:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=4, column=0, sticky="w", pady=12)
         self.ent_off_id = ctk.CTkEntry(g, textvariable=self.offload_report_id, font=ctk.CTkFont(size=12), height=35)
         self.ent_off_id.grid(row=4, column=1, columnspan=2, padx=(15, 0), sticky="w", ipadx=100)
+
+        # --- Sezione Metadati Produzione (stile Silverstack) ---
+        meta_header = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        meta_header.pack(fill="x", padx=30, pady=(20, 0))
+        ctk.CTkLabel(meta_header, text="🎬 Metadati Produzione", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
+        ctk.CTkLabel(meta_header, text="(opzionali - inclusi nel report MHL)", font=ctk.CTkFont(size=11, slant="italic"), text_color="gray").pack(side="left", padx=10)
+
+        meta_grid = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        meta_grid.pack(fill="x", padx=30, pady=(5, 0))
+        for _c in range(3):
+            meta_grid.columnconfigure(_c * 2 + 1, weight=1)
+
+        for idx, (key, label) in enumerate(self.offload_meta_fields):
+            r = idx // 3
+            c = (idx % 3) * 2
+            ctk.CTkLabel(meta_grid, text=f"{label}:", font=ctk.CTkFont(size=11)).grid(row=r, column=c, sticky="w", padx=(0, 6), pady=5)
+            ctk.CTkEntry(meta_grid, textvariable=self.offload_meta_vars[key], height=30).grid(row=r, column=c + 1, sticky="ew", padx=(0, 15), pady=5)
+
+        notes_row = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        notes_row.pack(fill="x", padx=30, pady=(8, 0))
+        ctk.CTkLabel(notes_row, text="Note:", font=ctk.CTkFont(size=11)).pack(anchor="w")
+        self.offload_notes_text = ctk.CTkTextbox(notes_row, height=60)
+        self.offload_notes_text.pack(fill="x", pady=(2, 0))
 
         # Action Button
         ctk.CTkButton(cfg_box, text="⚡ Avvia Offload & Genera Report", fg_color="#10b981", hover_color="#059669", height=50, width=320, font=ctk.CTkFont(weight="bold", size=15), corner_radius=10, command=self.run_offload_process).pack(pady=30)
@@ -2221,17 +2267,21 @@ class DatariumApp(ctk.CTk):
             webbrowser.open(pathlib.Path(self.generated_report_path).absolute().as_uri())
 
     def run_offload_process(self):
-        self.is_licensed, self.license_status = self.license.verify_license()
-        if not self.is_licensed:
-            self.show_page("Settings")
-            if hasattr(self, 'lic_status_lbl'):
-                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
-            return
-
         src = self.offload_source_folder.get()
         dests = [d for d in self.offload_destinations if d.strip()]
         algo = self.offload_algo.get()
         report_id = self.offload_report_id.get()
+
+        # Raccogli i metadati di produzione (solo i campi compilati) per il report MHL
+        production_meta = {}
+        for key, label in self.offload_meta_fields:
+            val = self.offload_meta_vars[key].get().strip()
+            if val:
+                production_meta[label] = val
+        if self.offload_notes_text is not None:
+            notes = self.offload_notes_text.get("1.0", "end").strip()
+            if notes:
+                production_meta["Note"] = notes
 
         if not src or not dests:
             from tkinter import messagebox
@@ -2277,10 +2327,12 @@ class DatariumApp(ctk.CTk):
                         sz = os.path.getsize(it["path"])
                         sz_str = self.format_file_size(sz)
 
-                        # Compute source hashes
+                        # Calcolo checksum sorgente: entrambi gli hash in una sola lettura del file
                         self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Calcolo checksum: {name}..."))
-                        src_hash = self.compute_hash(it["path"], algo)
-                        src_hash_alt = self.compute_hash(it["path"], "SHA-256" if algo == "xxHash64" else "MD5")
+                        alt_algo = "SHA-256" if algo == "xxHash64" else "MD5"
+                        src_hashes = self.compute_hashes(it["path"], [algo, alt_algo])
+                        src_hash = src_hashes[algo]
+                        src_hash_alt = src_hashes[alt_algo]
 
                         mtime = os.path.getmtime(it["path"])
                         ctime = os.path.getctime(it["path"])
@@ -2316,9 +2368,8 @@ class DatariumApp(ctk.CTk):
 
                         status = "Verified" if copy_success else "Failed"
 
-                        # Media metadata extraction mock / standard details
-                        ext = os.path.splitext(it["name"])[1].lower()
-                        media_format = "Video" if ext in ['.mp4', '.mov', '.avi', '.mkv', '.braw', '.r3d', '.mxf'] else ("Image" if ext in ['.jpg', '.jpeg', '.png', '.webp', '.nef', '.cr2', '.arw', '.dng'] else "Data")
+                        # Estrazione metadati REALI del media (risoluzione, durata, codec, bitrate...)
+                        media_info = ReportGenerator.extract_media_info(it["path"])
 
                         results.append({
                             "name": it["name"],
@@ -2330,15 +2381,15 @@ class DatariumApp(ctk.CTk):
                             "hash": src_hash,
                             "hash_alt": src_hash_alt,
                             "status": status,
-                            "media_format": media_format,
-                            "codec": "H.264 / AAC" if media_format == "Video" else ("JPEG" if media_format == "Image" else "N/A"),
-                            "duration": "0:00:15" if media_format == "Video" else "N/A",
-                            "resolution": "HD - 1920 x 1080" if media_format == "Video" else "N/A",
-                            "camera": "Sony FX3" if media_format == "Video" else "N/A",
-                            "shot": "Scene 1" if media_format == "Video" else "N/A",
-                            "frames": "375" if media_format == "Video" else "N/A",
-                            "bitrate": "12.5 MB/s" if media_format == "Video" else "N/A",
-                            "audio": "Audio Format: Linear PCM\nChannels: 2\nSample Rate: 48.0 kHz\nAudio Bit Depth: 24-bit\nAudio Bit Rate: 1.5 MB/s" if media_format == "Video" else "N/A"
+                            "media_format": media_info["media_format"],
+                            "codec": media_info["codec"],
+                            "duration": media_info["duration"],
+                            "resolution": media_info["resolution"],
+                            "camera": media_info["camera"],
+                            "shot": media_info["shot"],
+                            "frames": media_info["frames"],
+                            "bitrate": media_info["bitrate"],
+                            "audio": media_info["audio"]
                         })
 
                     except Exception as e:
@@ -2359,7 +2410,7 @@ class DatariumApp(ctk.CTk):
                 self.after(0, lambda: self.offload_status_lbl.configure(text="Generazione Report..."))
                 first_dst = dests[0]
                 report_dir = os.path.join(first_dst, "MHL_Reports")
-                report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, dests)
+                report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, dests, production_meta)
                 self.generated_report_path = report_path
                 
                 # Copiamo il report in tutte le altre destinazioni per sicurezza
@@ -2368,7 +2419,7 @@ class DatariumApp(ctk.CTk):
                         other_report_dir = os.path.join(other_dst, "MHL_Reports")
                         os.makedirs(other_report_dir, exist_ok=True)
                         shutil.copy2(report_path, os.path.join(other_report_dir, os.path.basename(report_path)))
-                    except:
+                    except Exception:
                         pass
 
                 def render_results_ui():

@@ -30,7 +30,7 @@ class LicenseManager:
             
             os.makedirs(path, exist_ok=True)
             return os.path.join(path, "license.datarium")
-        except:
+        except Exception:
             # Fallback alla cartella corrente se tutto fallisce
             return "license.datarium"
 
@@ -52,7 +52,7 @@ class LicenseManager:
                 try:
                     cmd = "powershell -command \"(Get-CimInstance Win32_BaseBoard).SerialNumber\""
                     mb_serial = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, timeout=5).decode().strip()
-                except:
+                except Exception:
                     mb_serial = "STABLE-MB-ID"
 
                 raw_id = f"{machine_guid}-{mb_serial}-DATARIUM-SECURE"
@@ -104,7 +104,7 @@ class LicenseManager:
                     return True
                 elif result is False:
                     return False
-        except:
+        except Exception:
             pass
 
         # 2. Fallback tramite REST API classica (caso in cui l'RPC non sia stato creato)
@@ -122,7 +122,7 @@ class LicenseManager:
                         return True
                     if any(item.get("status") == "revoked" for item in data):
                         return False
-        except:
+        except Exception:
             pass
         return None
 
@@ -133,7 +133,7 @@ class LicenseManager:
         if online_valid is False:
             if os.path.exists(self.license_path):
                 try: os.remove(self.license_path)
-                except: pass
+                except Exception: pass
             return False, "Licenza revocata o terminata (Database validation failed)"
 
         if not token:
@@ -141,7 +141,7 @@ class LicenseManager:
                 try:
                     with open(self.license_path, "r") as f:
                         token = f.read().strip()
-                except:
+                except Exception:
                     return False, "Errore lettura licenza"
             else:
                 return False, "Licenza mancante"

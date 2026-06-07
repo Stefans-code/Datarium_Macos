@@ -17,236 +17,255 @@ class AIEngine:
     def __init__(self):
         self.llm = None
         self.is_vision = False
+        self.hardware_info = "CPU"
         
         # Default Text Model
         self.text_repo = "Qwen/Qwen2.5-3B-Instruct-GGUF"
-        self.text_file = "documentatio.gguf"
+        self.text_file = "qwen2.5-3b-instruct-q4_k_m.gguf"
         
         # Vision Model (LLaVa v1.5 7B - Second State Version)
         self.vision_repo = "second-state/Llava-v1.5-7B-GGUF"
-        self.vision_file = "vision.gguf"
-        self.vision_projector = "projector.gguf"
-        
-        # Rilevamento hardware GPU e CPU
-        self.hardware_info = "CPU"
-        self.gpu_detected, self.gpu_details = self.detect_gpu_hardware()
-        
-        self.llama_gpu_supported = False
-        if sys.platform != "dummy_platform":
-            try:
-                import importlib
-                llama_cpp = importlib.import_module("llama_cpp")
-                self.llama_gpu_supported = getattr(llama_cpp, 'llama_supports_gpu_offload', lambda: False)()
-            except ImportError:
-                # Evita il type narrowing statico di Pylance
-                self.llama_gpu_supported = os.environ.get("DATARIUM_FORCE_GPU") == "1"
-            
-        if self.gpu_detected and self.llama_gpu_supported:
-            self.hardware_info = "GPU"
-        else:
-            self.hardware_info = "CPU"
+        self.vision_file = "llava-v1.5-7b-Q4_K_M.gguf"
+        self.vision_projector = "llava-v1.5-7b-mmproj-model-f16.gguf"
 
-    def detect_gpu_hardware(self):
-        """
-        Rileva le GPU disponibili nel sistema.
-        Ritorna una tupla (gpu_detected, gpu_details)
-        """
-        import subprocess
+        # Rilevamento hardware universale (CPU/GPU, multipiattaforma e multi-marca).
+        # Eseguito una sola volta e messo in cache; alimenta anche l'etichetta delle Impostazioni.
+        self._hw_info = None
+        try:
+            self.hardware_info = self.detect_hardware()["label"]
+        except Exception:
+            self.hardware_info = "CPU"
+        
+    def detect_hardware(self, force=False):
+        """Rileva CPU e GPU in modo universale (Windows / Linux / macOS; NVIDIA / AMD / Intel / Apple)
+        e decide la configurazione d'esecuzione migliore per llama.cpp.
+
+        Logica di scelta:
+          - usa la GPU solo se la libreria llama.cpp è compilata con un backend GPU
+            (CUDA, ROCm, Metal, Vulkan...) E c'è una GPU "potente" (discreta o Apple Silicon);
+          - le GPU integrate Intel di norma non battono la CPU per gli LLM, quindi si preferisce la CPU;
+          - in ogni caso l'etichetta riflette ciò che viene REALMENTE usato.
+
+        Il risultato è messo in cache: il rilevamento (subprocess) avviene una sola volta."""
+        if self._hw_info is not None and not force:
+            return self._hw_info
+
         import platform
-        
-        gpu_detected = False
-        gpu_details = []
         system = platform.system()
-        
+        machine = platform.machine().lower()
+        cpu_cores = os.cpu_count() or 4
+
+        info = {
+            "os": system,
+            "cpu_cores": cpu_cores,
+            "gpus": [],
+            "gpu_vendor": None,
+            "lib_gpu_support": False,
+            "use_gpu": False,
+            "n_gpu_layers": 0,
+            "label": f"CPU ({cpu_cores} core)",
+        }
+
+        # 1. La build di llama.cpp è in grado di scaricare layer sulla GPU?
+        try:
+            import importlib
+            _llama = importlib.import_module("llama_cpp")
+            if hasattr(_llama, "llama_supports_gpu_offload"):
+                info["lib_gpu_support"] = bool(_llama.llama_supports_gpu_offload())
+        except Exception:
+            info["lib_gpu_support"] = False
+
+        # 2. GPU fisicamente presenti (multipiattaforma, indipendente dalla marca)
+        info["gpus"] = self._list_gpus(system)
+        info["gpu_vendor"] = self._classify_vendor(info["gpus"])
+
+        # Apple Silicon espone sempre una GPU integrata utilizzabile via Metal
+        if system == "Darwin" and machine in ("arm64", "aarch64") and not info["gpu_vendor"]:
+            info["gpu_vendor"] = "Apple"
+
+        # 3. Decisione su cosa conviene davvero usare
+        strong_gpu = info["gpu_vendor"] in ("NVIDIA", "AMD", "Apple")
+        if info["lib_gpu_support"] and strong_gpu:
+            info["use_gpu"] = True
+            info["n_gpu_layers"] = -1  # offload completo: llama.cpp scarica tutti i layer possibili
+            gpu_name = info["gpus"][0] if info["gpus"] else info["gpu_vendor"]
+            info["label"] = f"GPU: {gpu_name}"
+        else:
+            info["use_gpu"] = False
+            info["n_gpu_layers"] = 0
+            if info["gpu_vendor"] and not info["lib_gpu_support"]:
+                info["label"] = f"CPU ({cpu_cores} core) - GPU {info['gpu_vendor']} rilevata ma libreria CPU-only"
+            elif info["gpu_vendor"] == "Intel":
+                info["label"] = f"CPU ({cpu_cores} core) - GPU Intel integrata (CPU preferita)"
+            else:
+                info["label"] = f"CPU ({cpu_cores} core)"
+
+        self._hw_info = info
+        return info
+
+    def _list_gpus(self, system):
+        """Elenca i nomi delle GPU presenti, in modo multipiattaforma e indipendente dalla marca."""
+        import subprocess
+        gpus = []
         try:
             if system == "Windows":
-                # Esegui PowerShell per ottenere il nome del controller video (moderno e robusto)
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0 # SW_HIDE
-                try:
-                    res = subprocess.run(
-                        ["powershell", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True,
-                        startupinfo=startupinfo
-                    )
-                    if res.returncode == 0:
-                        lines = [line.strip() for line in res.stdout.split('\n') if line.strip()]
-                        for line in lines:
-                            if any(x in line.upper() for x in ["NVIDIA", "AMD", "RADEON", "INTEL", "GEFORCE"]):
-                                if "MICROSOFT" not in line.upper():
-                                    gpu_detected = True
-                                    gpu_details.append(line)
-                except Exception as ps_err:
-                    print(f"[AIEngine] Errore query PowerShell: {ps_err}")
-                
-                # Fallback a wmic se powershell non trova nulla o fallisce
-                if not gpu_detected:
-                    try:
-                        res = subprocess.run(
-                            ["wmic", "path", "win32_VideoController", "get", "name"],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True,
-                            startupinfo=startupinfo
-                        )
-                        if res.returncode == 0:
-                            lines = [line.strip() for line in res.stdout.split('\n') if line.strip()]
-                            # Salta l'header "Name"
-                            for line in lines[1:]:
-                                if any(x in line.upper() for x in ["NVIDIA", "AMD", "RADEON", "INTEL", "GEFORCE"]):
-                                    if "MICROSOFT" not in line.upper():
-                                        gpu_detected = True
-                                        gpu_details.append(line)
-                    except Exception as wmic_err:
-                        print(f"[AIEngine] Errore query wmic: {wmic_err}")
-            elif system == "Darwin": # macOS
-                # Controlla se è Apple Silicon
-                machine = platform.machine()
-                if "arm" in machine.lower() or "aac" in machine.lower():
-                    gpu_detected = True
-                    gpu_details.append("Apple Silicon GPU")
-                else:
-                    # Esegui system_profiler
-                    res = subprocess.run(
-                        ["system_profiler", "SPDisplaysDataType"],
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    if res.returncode == 0:
-                        for line in res.stdout.split('\n'):
-                            if "Chipset Model:" in line:
-                                name = line.split("Chipset Model:")[1].strip()
-                                gpu_detected = True
-                                gpu_details.append(name)
-            else: # Linux / altro
-                res = subprocess.run(
-                    ["lspci"],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                if res.returncode == 0:
-                    for line in res.stdout.split('\n'):
-                        if "VGA" in line or "3D" in line:
-                            gpu_detected = True
-                            gpu_details.append(line.split(":")[-1].strip())
-        except Exception as e:
-            print(f"[AIEngine] Errore durante il rilevamento hardware GPU: {e}")
-            
-        details_str = ", ".join(gpu_details) if gpu_details else "Nessuna"
-        return gpu_detected, details_str
+                out = subprocess.check_output(
+                    ["powershell", "-NoProfile", "-Command",
+                     "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+                    stderr=subprocess.DEVNULL, timeout=8,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                ).decode(errors="ignore")
+                gpus = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            elif system == "Darwin":
+                out = subprocess.check_output(
+                    ["system_profiler", "SPDisplaysDataType"],
+                    stderr=subprocess.DEVNULL, timeout=10
+                ).decode(errors="ignore")
+                for line in out.splitlines():
+                    line = line.strip()
+                    if line.startswith("Chipset Model:"):
+                        gpus.append(line.split(":", 1)[1].strip())
+            else:  # Linux e Unix-like
+                out = subprocess.check_output(
+                    ["lspci"], stderr=subprocess.DEVNULL, timeout=8
+                ).decode(errors="ignore")
+                for line in out.splitlines():
+                    if any(k in line for k in ("VGA compatible controller", "3D controller", "Display controller")):
+                        gpus.append(line.split(":", 2)[-1].strip())
+        except Exception:
+            pass
+        return gpus
+
+    def _classify_vendor(self, gpus):
+        """Determina la marca della GPU 'migliore' tra quelle rilevate.
+        Preferenza alle GPU discrete potenti (NVIDIA > AMD > Apple) rispetto all'integrata Intel."""
+        text = " ".join(gpus).lower()
+        if any(k in text for k in ("nvidia", "geforce", "rtx", "gtx", "quadro", "tesla", "titan")):
+            return "NVIDIA"
+        if any(k in text for k in ("radeon", "firepro", "amd ", " rx ")):
+            return "AMD"
+        if "apple" in text:
+            return "Apple"
+        if "intel" in text and any(k in text for k in ("arc", "iris", "uhd", "graphics")):
+            return "Intel"
+        return None
+
+    def get_models_dir(self, force_writable=False):
+        """
+        Ritorna la cartella dei modelli, provando prima accanto all'eseguibile (in sola lettura)
+        e poi ripiegando su una cartella utente scrivibile (macOS/Windows) se necessario.
+        """
+        import platform
+        system = platform.system()
         
-    def get_models_dir(self, force_writable=False, quality=None):
-        """
-        Ritorna la cartella dei modelli sul Desktop dell'utente.
-        """
-        home = os.path.expanduser("~")
-        desktop = home
-        for name in ["Desktop", "Scrivania", "Schreibtisch", "Escritorio", "Bureau"]:
-            path = os.path.join(home, name)
-            if os.path.exists(path):
-                desktop = path
-                break
+        # 1. Se siamo in ambiente di sviluppo (non frozen), usiamo la cartella locale 'models'
+        if not getattr(sys, 'frozen', False):
+            models_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+            if force_writable:
+                os.makedirs(models_dir, exist_ok=True)
+            return models_dir
+            
+        # 2. Se siamo in ambiente frozen (eseguibile pacchettizzato)
+        # Controlliamo prima se i modelli sono presenti accanto all'eseguibile (es. Windows con Inno Setup)
+        exe_dir_models = os.path.join(os.path.dirname(sys.executable), "models")
+        
+        # Se i modelli esistono già accanto all'eseguibile, usiamo quello (modalità lettura)
+        if os.path.exists(exe_dir_models):
+            # Se la cartella esiste, verifichiamo se non è richiesto forzatamente di scriverci
+            if not force_writable:
+                return exe_dir_models
                 
-        if quality == "slim":
-            models_path = os.path.join(desktop, "documentatio_leggero")
-        elif quality == "full":
-            models_path = os.path.join(desktop, "documentatio_pesante")
-        else:
-            # Auto-rilevazione dinamica
-            pesante = os.path.join(desktop, "documentatio_pesante")
-            leggero = os.path.join(desktop, "documentatio_leggero")
-            if os.path.exists(os.path.join(pesante, "documentatio.gguf")):
-                models_path = pesante
-            elif os.path.exists(os.path.join(leggero, "documentatio.gguf")):
-                models_path = leggero
+        # 3. Altrimenti (es. macOS, o Windows se vogliamo scaricare un modello mancante),
+        # usiamo una cartella utente scrivibile per non incorrere in PermissionError.
+        try:
+            if system == "Windows":
+                base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+                path = os.path.join(base, "Datarium", "models")
+            elif system == "Darwin": # macOS
+                path = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium", "models")
             else:
-                models_path = pesante
+                path = os.path.join(os.path.expanduser("~"), ".datarium", "models")
                 
-        if force_writable:
-            os.makedirs(models_path, exist_ok=True)
-        return models_path
+            if force_writable:
+                os.makedirs(path, exist_ok=True)
+            return path
+        except Exception as e:
+            print(f"[AIEngine] Errore risoluzione directory modelli scrivibile: {e}")
+            if force_writable:
+                os.makedirs(exe_dir_models, exist_ok=True)
+            return exe_dir_models
 
     def check_models_missing(self):
-        """Controlla se i modelli esistono sul Desktop."""
+        """Controlla se i modelli esistono nell'unico percorso supportato."""
         try:
-            home = os.path.expanduser("~")
-            desktop = home
-            for name in ["Desktop", "Scrivania", "Schreibtisch", "Escritorio", "Bureau"]:
-                path = os.path.join(home, name)
-                if os.path.exists(path):
-                    desktop = path
-                    break
-                    
-            for folder in ["documentatio_leggero", "documentatio_pesante"]:
-                path = os.path.join(desktop, folder)
-                if os.path.exists(path):
-                    t_ok = os.path.exists(os.path.join(path, "documentatio.gguf"))
-                    v_ok = os.path.exists(os.path.join(path, "vision.gguf"))
-                    p_ok = os.path.exists(os.path.join(path, "projector.gguf"))
-                    if t_ok and v_ok and p_ok:
-                        return False # Trovati!
-            return True
-        except:
+            d = self.get_models_dir()
+            if not d or not os.path.exists(d): 
+                return True
+            
+            # Controllo incrociato: devono esserci il testo, la visione E il proiettore
+            t_ok = os.path.exists(os.path.join(d, self.text_file)) or \
+                   os.path.exists(os.path.join(d, "qwen2.5-3b-instruct-q2_k.gguf"))
+            
+            v_ok = os.path.exists(os.path.join(d, self.vision_file)) or \
+                   os.path.exists(os.path.join(d, "llava-v1.5-7b-Q2_K.gguf"))
+            
+            p_ok = os.path.exists(os.path.join(d, self.vision_projector))
+            
+            if t_ok and v_ok and p_ok:
+                return False # Trovati tutti!
+            
+            return True # Qualcosa manca
+        except Exception:
             return True
 
-    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality=None):
-        """Scarica i modelli necessari rinominandoli con nomi proprietari nel Desktop, e poi li carica."""
-        import shutil
+    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality="full"):
+        """Ora ritorna (True/False, error_msg) per una gestione UI migliore."""
         try:
-            if quality is None:
-                final_dir = self.get_models_dir()
-                if "documentatio_leggero" in final_dir:
-                    quality = "slim"
-                else:
-                    quality = "full"
-            download_dir = self.get_models_dir(force_writable=True, quality=quality)
+            models_dir = self.get_models_dir()
             
-            # (Repo, HF Name, Local Name)
             tasks = []
             if quality == "slim":
-                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q4_k_m.gguf", "documentatio.gguf"))
+                tasks.append((self.text_repo, "qwen2.5-3b-instruct-q2_k.gguf"))
                 if vision_mode:
-                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q2_K.gguf", "vision.gguf"))
-                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
+                    tasks.append((self.vision_repo, "llava-v1.5-7b-Q2_K.gguf"))
+                    tasks.append((self.vision_repo, self.vision_projector))
             else:
-                tasks.append(("Qwen/Qwen2.5-3B-Instruct-GGUF", "qwen2.5-3b-instruct-q8_0.gguf", "documentatio.gguf"))
+                tasks.append((self.text_repo, self.text_file))
                 if vision_mode:
-                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-Q8_0.gguf", "vision.gguf"))
-                    tasks.append(("second-state/Llava-v1.5-7B-GGUF", "llava-v1.5-7b-mmproj-model-f16.gguf", "projector.gguf"))
+                    tasks.append((self.vision_repo, self.vision_file))
+                    tasks.append((self.vision_repo, self.vision_projector))
 
-            for repo, hf_file, local_name in tasks:
-                target_path = os.path.join(download_dir, local_name)
-                
-                # Se il file finale esiste già, salta il download
-                if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
-                    continue
+            for repo, filename in tasks:
+                # Fallback slim names
+                is_slim = False
+                alt_filename = filename
+                if "qwen" in filename.lower(): alt_filename = "qwen2.5-3b-instruct-q2_k.gguf"
+                elif "llava" in filename and "v1.5-7b" in filename and "mmproj" not in filename: alt_filename = "llava-v1.5-7b-Q2_K.gguf"
+
+                # Verifichiamo se il file esiste già nell'unica cartella modelli supportata
+                current_dir = self.get_models_dir()
+                path = os.path.join(current_dir, filename)
+                alt_path = os.path.join(current_dir, alt_filename)
+
+                if not os.path.exists(path) and not os.path.exists(alt_path):
+                    # Se manca, scarichiamo nella cartella di installazione
+                    download_dir = self.get_models_dir(force_writable=True)
+                    target_path = os.path.join(download_dir, filename)
                     
-                if progress_callback: 
-                    progress_callback(f"Scaricamento {local_name}...")
-                    
-                try:
-                    import os as _os
-                    _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-                    temp_path = hf_hub_download(
-                        repo_id=repo, 
-                        filename=hf_file, 
-                        cache_dir=download_dir, 
-                        local_dir=download_dir, 
-                        local_dir_use_symlinks=False
-                    )
-                    
-                    # Rinomina al nome proprietario locale
-                    if os.path.exists(temp_path) and temp_path != target_path:
-                        if os.path.exists(target_path):
-                            os.remove(target_path)
-                        shutil.move(temp_path, target_path)
-                except Exception as e:
-                    return False, f"Network Error: {str(e)}"
+                    if progress_callback: progress_callback(f"Scaricamento {filename}...")
+                    try:
+                        # Sopprimiamo le barre di progresso tramite env var (compatibile con TUTTE le versioni di huggingface_hub)
+                        import os as _os
+                        _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+                        hf_hub_download(
+                            repo_id=repo, 
+                            filename=filename, 
+                            cache_dir=download_dir, 
+                            local_dir=download_dir, 
+                            local_dir_use_symlinks=False
+                        )
+                    except Exception as e:
+                        return False, f"Network Error: {str(e)}"
 
             if progress_callback: progress_callback("Caricamento... Attendere.")
             
@@ -263,55 +282,35 @@ class AIEngine:
                 
                 # Identifica i percorsi reali (main o slim)
                 t_path = os.path.join(final_models_dir, self.text_file)
+                if not os.path.exists(t_path): t_path = os.path.join(final_models_dir, "qwen2.5-3b-instruct-q2_k.gguf")
+                
                 v_path = os.path.join(final_models_dir, self.vision_file)
+                if not os.path.exists(v_path): v_path = os.path.join(final_models_dir, "llava-v1.5-7b-Q2_K.gguf")
+                
                 p_path = os.path.join(final_models_dir, self.vision_projector)
+
+                # Configurazione decisa dal rilevamento hardware universale
+                hw = self.detect_hardware()
+                ngl = hw["n_gpu_layers"]
+                cpu_label = f"CPU ({hw['cpu_cores']} core)"
 
                 if vision_mode:
                     chat_handler = Llava15ChatHandler(clip_model_path=p_path)
-                    loaded = False
-                    if self.llama_gpu_supported:
-                        # 1. Prova GPU Completa (30 layers)
-                        try:
-                            self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=30, n_batch=512, verbose=False)
-                            self.hardware_info = "GPU"
-                            loaded = True
-                        except Exception as e_gpu:
-                            print(f"[AIEngine] Caricamento GPU max fallito: {e_gpu}. Provo modalità combo...")
-                            # 2. Provo Combo (15 layers)
-                            try:
-                                self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=15, n_batch=512, verbose=False)
-                                self.hardware_info = "Both"
-                                loaded = True
-                            except Exception as e_combo:
-                                print(f"[AIEngine] Caricamento GPU combo fallito: {e_combo}. Ripiego su CPU...")
-                    
-                    if not loaded:
-                        # 3. CPU Fallback (0 layers)
+                    try:
+                        self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
+                        self.hardware_info = hw["label"]
+                    except Exception:
+                        # Rete di sicurezza: se l'offload su GPU fallisce a runtime, ripiega su CPU
                         self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=1024, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
-                        self.hardware_info = "CPU"
+                        self.hardware_info = cpu_label
                     self.is_vision = True
                 else:
-                    loaded = False
-                    if self.llama_gpu_supported:
-                        # 1. Prova GPU Completa (30 layers)
-                        try:
-                            self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=30, n_batch=512, verbose=False)
-                            self.hardware_info = "GPU"
-                            loaded = True
-                        except Exception as e_gpu:
-                            print(f"[AIEngine] Caricamento GPU max fallito: {e_gpu}. Provo modalità combo...")
-                            # 2. Provo Combo (15 layers)
-                            try:
-                                self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=15, n_batch=512, verbose=False)
-                                self.hardware_info = "Both"
-                                loaded = True
-                            except Exception as e_combo:
-                                print(f"[AIEngine] Caricamento GPU combo fallito: {e_combo}. Ripiego su CPU...")
-                    
-                    if not loaded:
-                        # 3. CPU Fallback (0 layers)
+                    try:
+                        self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
+                        self.hardware_info = hw["label"]
+                    except Exception:
                         self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
-                        self.hardware_info = "CPU"
+                        self.hardware_info = cpu_label
                     self.is_vision = False
                     
                 return True, ""
@@ -332,7 +331,7 @@ class AIEngine:
                     decoded = ExifTags.TAGS.get(tag, tag)
                     if decoded in ['DateTimeOriginal', 'Make', 'Model', 'Software']:
                         meta[decoded] = str(value)
-        except:
+        except Exception:
             pass
             
         # Fallback: aggiungi data di creazione/modifica del file se non trovata in EXIF
@@ -342,7 +341,7 @@ class AIEngine:
                 mtime = os.path.getmtime(file_path)
                 dt = datetime.datetime.fromtimestamp(mtime)
                 meta['FileModificationDate'] = dt.strftime("%Y:%m:%d %H:%M:%S")
-            except:
+            except Exception:
                 pass
         return meta
 
@@ -474,7 +473,15 @@ class AIEngine:
                     break
             cleaned_contexts.append(c)
             
-        summaries = "\n".join([c[:150] for c in cleaned_contexts if c][:40])
+        non_empty = [c for c in cleaned_contexts if c]
+        if len(non_empty) > 40:
+            # Campionamento distribuito sull'intera lista (non solo i primi 40) così la
+            # tassonomia è rappresentativa di tutta la cartella, non solo dei file iniziali.
+            step = len(non_empty) / 40.0
+            sampled = [non_empty[int(i * step)] for i in range(40)]
+        else:
+            sampled = non_empty
+        summaries = "\n".join(c[:150] for c in sampled)
         if not summaries: return "Varie"
         
         messages = [
@@ -493,7 +500,7 @@ class AIEngine:
                 temperature=0.5
             )
             return response['choices'][0]['message']['content'].strip()
-        except:
+        except Exception:
             return "Documentazione(Lavoro, Personale), Immagini(Viaggi, Natura), Archivio(Varie)"
 
     def get_smart_name(self, original_name, category, context="", taxonomy=""):
@@ -538,32 +545,13 @@ class AIEngine:
         # Rimosso qualsiasi elenco numerato per evitare il bug di "1_..._2_..._3_" dei modelli
         messages = [
             {"role": "system", "content": (
-                "Sei un archivista esperto. Rinomina il file in: Categoria/Sottocategoria/Nome_Descrittivo\n"
+                "Sei un archivista esperto. Rinomina il file nel formato esatto: Categoria/Sottocategoria/Nome_Descrittivo\n"
                 "Regole fondamentali:\n"
-                "- Usa la Tassonomia consigliata per definire Categoria e Sottocategoria.\n"
-                "- Il Nome descrittivo deve essere in italiano, specifico e composto da 3 a 5 parole separate da trattini bassi (_).\n"
-                "- Non includere estensioni, elenchi numerati o spiegazioni.\n"
-                "- Rispondi SOLO con la stringa Categoria/Sottocategoria/Nome_Descrittivo."
+                "Il nome descrittivo deve essere in italiano ed estremamente specifico.\n"
+                "Usa da 3 a 5 parole significative separate esclusivamente da trattini bassi (_) (esempio: Bambino_Camicia_Rossa_Soridente).\n"
+                "Non usare elenchi numerati, preamboli o estensioni.\n"
+                "Rispondi SOLO ed ESCLUSIVAMENTE con la stringa Categoria/Sottocategoria/Nome."
             )},
-            # Esempio 1
-            {"role": "user", "content": (
-                "Original Name: image_102.png\n"
-                "File Type: Image\n"
-                "Descrizione: Foto di famiglia sulla spiaggia di Rimini, estate 2024.\n"
-                "Tassonomia consigliata: Viaggi(Rimini), Famiglia(Mare)\n\n"
-                "Nuovo percorso completo (Categoria/Sottocategoria/Nome_Descrittivo):"
-            )},
-            {"role": "assistant", "content": "Viaggi/Rimini/Famiglia_Spiaggia_Rimini_2024"},
-            # Esempio 2
-            {"role": "user", "content": (
-                "Original Name: ricevuta_12345.pdf\n"
-                "File Type: Doc\n"
-                "Descrizione: Ricevuta del ristorante Da Mario per cena di Nexflamma.\n"
-                "Tassonomia consigliata: Lavoro(Nexflamma), Spese(Ricevute)\n\n"
-                "Nuovo percorso completo (Categoria/Sottocategoria/Nome_Descrittivo):"
-            )},
-            {"role": "assistant", "content": "Lavoro/Nexflamma/Ricevuta_Ristorante_Da_Mario"},
-            # Query reale
             {"role": "user", "content": (
                 f"Original Name: {original_name}\n"
                 f"File Type: {category}\n"
@@ -581,16 +569,14 @@ class AIEngine:
             )
             clean_path = response['choices'][0]['message']['content'].strip()
             
-            # Final cleanup (evitiamo split su parentesi che tronca l'intero percorso se contiene tassonomie nidificate)
-            clean_path = clean_path.strip("'\" ").replace('(', '_').replace(')', '_').split('\'')[0].split('"')[0].strip()
+            # Final cleanup
+            clean_path = clean_path.strip("'\" ").split('(')[0].split('\'')[0].split('"')[0].strip()
             
             # Normalizzazione degli slash (sostituzione di backslash e rimozione spazi intorno agli slash)
             clean_path = clean_path.replace('\\', '/')
             clean_path = re.sub(r'\s*/\s*', '/', clean_path)
             
             parts = [p.strip() for p in clean_path.split('/') if p.strip()]
-            parts = [re.sub(r'^\d+[\s._-]*', '', p).strip() for p in parts]
-            parts = [p for p in parts if p]
             
             # Meccanismo di fallback difensivo a 3 livelli (garantisce sempre la struttura corretta)
             if len(parts) == 1:
@@ -675,7 +661,7 @@ class AIEngine:
                 clean = " ".join(words[:2])
                 
             return clean.capitalize() if clean else "Varie"
-        except:
+        except Exception:
             return "Varie"
 
     def compute_file_hash(self, file_path, algo="MD5"):
@@ -695,7 +681,7 @@ class AIEngine:
                 while len(buf) > 0:
                     hasher.update(buf); buf = afile.read(65536)
             return getattr(hasher, "hexdigest")()
-        except: return None
+        except Exception: return None
 
     def check_ffmpeg(self, custom_path=None):
         """
@@ -746,7 +732,7 @@ class AIEngine:
                         res = subprocess.run([p, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
                         if res.returncode == 0:
                             return True, p
-                    except:
+                    except Exception:
                         pass
                         
         return False, "FFMPEG non trovato nel sistema. Configuralo nelle Impostazioni."
@@ -863,14 +849,14 @@ class AIEngine:
                     size_mb = os.path.getsize(file_path) / (1024 * 1024)
                     if size_mb > float(r_val):
                         matched = True
-                except:
+                except Exception:
                     pass
             elif r_type == 'Dimensione < (MB)':
                 try:
                     size_mb = os.path.getsize(file_path) / (1024 * 1024)
                     if size_mb < float(r_val):
                         matched = True
-                except:
+                except Exception:
                     pass
                     
             if matched:
