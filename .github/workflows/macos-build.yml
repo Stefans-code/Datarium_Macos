@@ -31,9 +31,9 @@ jobs:
         ${{ matrix.prefix }} python -m pip install --upgrade pip --no-cache-dir
         # Install llama-cpp-python by compiling from source to avoid corrupted wheels and match Windows version
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
-          CMAKE_ARGS="-DLLAMA_METAL=on" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.2.77 --no-cache-dir
+          CMAKE_ARGS="-DGGML_METAL=on" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         else
-          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.2.77 --no-cache-dir
+          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
