@@ -38,43 +38,14 @@ jobs:
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
         ${{ matrix.prefix }} pip install -r requirements.txt --no-cache-dir
-        ${{ matrix.prefix }} pip install pyinstaller pyarmor==9.2.4 --no-cache-dir
+        ${{ matrix.prefix }} pip install pyinstaller cython --no-cache-dir
         
-    - name: Build with PyInstaller
+    - name: Build protected app (Cython + PyInstaller)
+      env:
+        BUILD_ARCH_PREFIX: ${{ matrix.prefix }}
       run: |
-        # Invece di PyArmor (che ha limiti di dimensione file per la versione trial), usiamo i file originali
-        mkdir -p obfuscated
-        cp main.py ai_engine.py license_manager.py face_memory.py report_generator.py obfuscated/
-        cp icon.ico obfuscated/icon.ico
-        
-        # Bundling
-        ${{ matrix.prefix }} pyinstaller --noconsole --onedir --noconfirm \
-          --icon=icon.ico \
-          --paths obfuscated \
-          --collect-all customtkinter \
-          --collect-all llama_cpp \
-          --collect-all huggingface_hub \
-          --collect-all certifi \
-          --collect-all requests \
-          --hidden-import customtkinter \
-          --hidden-import llama_cpp \
-          --hidden-import ai_engine \
-          --hidden-import license_manager \
-          --hidden-import face_memory \
-          --hidden-import report_generator \
-          --hidden-import PIL \
-          --hidden-import fitz \
-          --hidden-import docx \
-          --hidden-import jwt \
-          --hidden-import cryptography \
-          --add-data "icon.ico:." \
-          --add-data "assets:assets" \
-          --add-data "obfuscated/ai_engine.py:." \
-          --add-data "obfuscated/license_manager.py:." \
-          --add-data "obfuscated/face_memory.py:." \
-          --add-data "obfuscated/report_generator.py:." \
-          --name "Datarium" \
-          obfuscated/main.py
+        # Compila i moduli core in binari nativi (.so) e impacchetta: codice non decompilabile.
+        python build_protected.py
 
     - name: Compress App Bundle
       run: |

@@ -205,7 +205,7 @@ class DatariumApp(ctk.CTk):
         # Core Engines
         self.ai = AIEngine()
         self.license = LicenseManager()
-        self.face_mem = FaceMemoryManager(base_models_dir=self.ai.get_models_dir())
+        self.face_mem = FaceMemoryManager()  # i dati volti vivono in LOCALAPPDATA/faces, non in models/
         
         # State
         self.source_folder = ctk.StringVar(value="")
@@ -928,8 +928,9 @@ class DatariumApp(ctk.CTk):
                     else:
                         self.after(0, lambda: messagebox.showinfo("Aggiornamenti", f"Il software è aggiornato alla versione più recente (v{current_version})!"))
             except Exception as e:
+                err = str(e)
                 self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
-                self.after(0, lambda: messagebox.showerror("Errore", f"Impossibile verificare gli aggiornamenti: {e}"))
+                self.after(0, lambda: messagebox.showerror("Errore", f"Impossibile verificare gli aggiornamenti: {err}"))
 
         threading.Thread(target=check_upd_bg, daemon=True).start()
 
@@ -1329,7 +1330,8 @@ class DatariumApp(ctk.CTk):
                     self.set_progress(0.1)
                 except Exception as e:
                     from tkinter import messagebox
-                    self.after(0, lambda: messagebox.showerror("Errore Backup", f"Impossibile creare lo ZIP: {e}"))
+                    err = str(e)
+                    self.after(0, lambda: messagebox.showerror("Errore Backup", f"Impossibile creare lo ZIP: {err}"))
                     return
 
                 self.update_status("🚀 Riorganizzazione in corso...")

@@ -19,14 +19,35 @@ class AIEngine:
         self.is_vision = False
         self.hardware_info = "CPU"
         
-        # Default Text Model
-        self.text_repo = "Qwen/Qwen2.5-3B-Instruct-GGUF"
-        self.text_file = "qwen2.5-3b-instruct-q4_k_m.gguf"
+        # --- Configurazione modelli ARGUS: vedi self.PROFILES qui sotto ---
         
-        # Vision Model (LLaVa v1.5 7B - Second State Version)
-        self.vision_repo = "second-state/Llava-v1.5-7B-GGUF"
-        self.vision_file = "llava-v1.5-7b-Q4_K_M.gguf"
-        self.vision_projector = "llava-v1.5-7b-mmproj-model-f16.gguf"
+        # ==========================================================
+        #  ARGUS - modelli rinominati (Apache 2.0; vedi NOTICE.txt accanto ai modelli).
+        #  Due PROFILI scelti in fase d'installazione: "slim" (Leggero/Minor) e "full" (Pesante/Maior).
+        #  Ogni voce = (repo HuggingFace, nome file ORIGINALE da scaricare, nome ARGUS locale)
+        # ==========================================================
+        self.PROFILES = {
+            # ARGUS MINOR - Leggero. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
+            "slim": {
+                "text":   ("Stegeno/Nexflamma_Models", "Argus-Minor-text-Q2_K.gguf",     "Argus-Minor-text-Q2_K.gguf"),
+                "vision": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision.gguf",        "Argus-Minor-vision.gguf"),
+                "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision-mmproj.gguf", "Argus-Minor-vision-mmproj.gguf"),
+                "handler": "moondream",
+            },
+            # ARGUS MAIOR - Pesante. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
+            "full": {
+                "text":   ("Stegeno/Nexflamma_Models", "Argus-Maior-text-Q4_K_M.gguf",   "Argus-Maior-text-Q4_K_M.gguf"),
+                "vision": ("Stegeno/Nexflamma_Models", "Argus-Maior-vision-Q4_K_M.gguf", "Argus-Maior-vision-Q4_K_M.gguf"),
+                "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Maior-vision-mmproj.gguf", "Argus-Maior-vision-mmproj.gguf"),
+                "handler": "qwen2.5-vl",
+            },
+        }
+        # Attributi di compatibilita' (default = profilo "full" / Pesante)
+        self.text_repo = self.PROFILES["full"]["text"][0]
+        self.text_file = self.PROFILES["full"]["text"][2]
+        self.vision_repo = self.PROFILES["full"]["vision"][0]
+        self.vision_file = self.PROFILES["full"]["vision"][2]
+        self.vision_projector = self.PROFILES["full"]["mmproj"][2]
 
         # Rilevamento hardware universale (CPU/GPU, multipiattaforma e multi-marca).
         # Eseguito una sola volta e messo in cache; alimenta anche l'etichetta delle Impostazioni.
@@ -196,114 +217,98 @@ class AIEngine:
             return exe_dir_models
 
     def check_models_missing(self):
-        """Controlla se i modelli esistono nell'unico percorso supportato."""
+        """Manca qualcosa? False se almeno un profilo (slim/full) ha testo + visione + mmproj."""
         try:
             d = self.get_models_dir()
-            if not d or not os.path.exists(d): 
+            if not d or not os.path.exists(d):
                 return True
-            
-            # Controllo incrociato: devono esserci il testo, la visione E il proiettore
-            t_ok = os.path.exists(os.path.join(d, self.text_file)) or \
-                   os.path.exists(os.path.join(d, "qwen2.5-3b-instruct-q2_k.gguf"))
-            
-            v_ok = os.path.exists(os.path.join(d, self.vision_file)) or \
-                   os.path.exists(os.path.join(d, "llava-v1.5-7b-Q2_K.gguf"))
-            
-            p_ok = os.path.exists(os.path.join(d, self.vision_projector))
-            
-            if t_ok and v_ok and p_ok:
-                return False # Trovati tutti!
-            
-            return True # Qualcosa manca
+            for prof in self.PROFILES.values():
+                t_ok = os.path.exists(os.path.join(d, prof["text"][2]))
+                v_ok = os.path.exists(os.path.join(d, prof["vision"][2]))
+                p_ok = os.path.exists(os.path.join(d, prof["mmproj"][2]))
+                if t_ok and v_ok and p_ok:
+                    return False  # almeno un profilo completo presente
+            return True
         except Exception:
             return True
 
+    def _select_handler(self, handler_name, clip_model_path):
+        """Restituisce il chat handler di visione giusto per il profilo Argus."""
+        import importlib
+        fmt = importlib.import_module("llama_cpp.llama_chat_format")
+        if handler_name == "moondream":
+            return fmt.MoondreamChatHandler(clip_model_path=clip_model_path)
+        if handler_name == "qwen2.5-vl":
+            HandlerCls = (getattr(fmt, "Qwen25VLChatHandler", None)
+                          or getattr(fmt, "Qwen2VLChatHandler", None))
+            if HandlerCls is None:
+                raise RuntimeError(
+                    "Il profilo PESANTE (Argus Maior / Qwen2.5-VL) richiede una versione "
+                    "recente di llama-cpp-python. Aggiorna la libreria oppure usa il profilo LEGGERO."
+                )
+            return HandlerCls(clip_model_path=clip_model_path)
+        return fmt.Llava15ChatHandler(clip_model_path=clip_model_path)
+
     def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality="full"):
-        """Ora ritorna (True/False, error_msg) per una gestione UI migliore."""
+        """Scarica (se serve) e carica i modelli ARGUS del profilo scelto. Ritorna (ok, err_msg)."""
         try:
-            models_dir = self.get_models_dir()
-            
-            tasks = []
-            if quality == "slim":
-                tasks.append((self.text_repo, "qwen2.5-3b-instruct-q2_k.gguf"))
-                if vision_mode:
-                    tasks.append((self.vision_repo, "llava-v1.5-7b-Q2_K.gguf"))
-                    tasks.append((self.vision_repo, self.vision_projector))
-            else:
-                tasks.append((self.text_repo, self.text_file))
-                if vision_mode:
-                    tasks.append((self.vision_repo, self.vision_file))
-                    tasks.append((self.vision_repo, self.vision_projector))
+            prof = self.PROFILES["slim"] if quality == "slim" else self.PROFILES["full"]
 
-            for repo, filename in tasks:
-                # Fallback slim names
-                is_slim = False
-                alt_filename = filename
-                if "qwen" in filename.lower(): alt_filename = "qwen2.5-3b-instruct-q2_k.gguf"
-                elif "llava" in filename and "v1.5-7b" in filename and "mmproj" not in filename: alt_filename = "llava-v1.5-7b-Q2_K.gguf"
+            # Ogni voce = (repo, nome_originale_HF, nome_ARGUS_locale)
+            tasks = [prof["text"]]
+            if vision_mode:
+                tasks.append(prof["vision"])
+                tasks.append(prof["mmproj"])
 
-                # Verifichiamo se il file esiste già nell'unica cartella modelli supportata
-                current_dir = self.get_models_dir()
-                path = os.path.join(current_dir, filename)
-                alt_path = os.path.join(current_dir, alt_filename)
+            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+            os.environ["HF_HUB_DISABLE_XET"] = "1"  # il backend Xet si impicca su alcune reti
 
-                if not os.path.exists(path) and not os.path.exists(alt_path):
-                    # Se manca, scarichiamo nella cartella di installazione
-                    download_dir = self.get_models_dir(force_writable=True)
-                    target_path = os.path.join(download_dir, filename)
-                    
-                    if progress_callback: progress_callback(f"Scaricamento {filename}...")
-                    try:
-                        # Sopprimiamo le barre di progresso tramite env var (compatibile con TUTTE le versioni di huggingface_hub)
-                        import os as _os
-                        _os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-                        hf_hub_download(
-                            repo_id=repo, 
-                            filename=filename, 
-                            cache_dir=download_dir, 
-                            local_dir=download_dir, 
-                            local_dir_use_symlinks=False
-                        )
-                    except Exception as e:
-                        return False, f"Network Error: {str(e)}"
+            for repo, src_name, argus_name in tasks:
+                final_dir = self.get_models_dir()
+                if os.path.exists(os.path.join(final_dir, argus_name)):
+                    continue  # gia' presente col nome Argus
+                dl_dir = self.get_models_dir(force_writable=True)
+                if progress_callback: progress_callback(f"Scaricamento {argus_name}...")
+                try:
+                    src_path = hf_hub_download(repo_id=repo, filename=src_name, local_dir=dl_dir)
+                except Exception as e:
+                    return False, f"Network Error: {str(e)}"
+                # Rinomina il file scaricato col nome ARGUS
+                dst_path = os.path.join(dl_dir, argus_name)
+                try:
+                    if os.path.abspath(src_path) != os.path.abspath(dst_path):
+                        if os.path.exists(dst_path): os.remove(dst_path)
+                        os.replace(src_path, dst_path)
+                except Exception as e:
+                    return False, f"Rename Error: {str(e)}"
 
             if progress_callback: progress_callback("Caricamento... Attendere.")
-            
-            # Caricamento effettivo: usiamo get_models_dir() che risolve il percorso migliore
+
+            # --- Caricamento effettivo ---
             try:
                 import importlib
-                llama_cpp = importlib.import_module("llama_cpp")
-                Llama = llama_cpp.Llama
-                llama_chat_format = importlib.import_module("llama_cpp.llama_chat_format")
-                Llava15ChatHandler = llama_chat_format.Llava15ChatHandler
-                
-                n_threads = os.cpu_count() or 4
-                final_models_dir = self.get_models_dir()
-                
-                # Identifica i percorsi reali (main o slim)
-                t_path = os.path.join(final_models_dir, self.text_file)
-                if not os.path.exists(t_path): t_path = os.path.join(final_models_dir, "qwen2.5-3b-instruct-q2_k.gguf")
-                
-                v_path = os.path.join(final_models_dir, self.vision_file)
-                if not os.path.exists(v_path): v_path = os.path.join(final_models_dir, "llava-v1.5-7b-Q2_K.gguf")
-                
-                p_path = os.path.join(final_models_dir, self.vision_projector)
+                Llama = importlib.import_module("llama_cpp").Llama
 
-                # Configurazione decisa dal rilevamento hardware universale
+                n_threads = os.cpu_count() or 4
+                final_dir = self.get_models_dir()
+                t_path = os.path.join(final_dir, prof["text"][2])
+                v_path = os.path.join(final_dir, prof["vision"][2])
+                p_path = os.path.join(final_dir, prof["mmproj"][2])
+
                 hw = self.detect_hardware()
                 ngl = hw["n_gpu_layers"]
                 cpu_label = f"CPU ({hw['cpu_cores']} core)"
 
                 if vision_mode:
-                    chat_handler = Llava15ChatHandler(clip_model_path=p_path)
+                    chat_handler = self._select_handler(prof["handler"], p_path)
                     try:
                         self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
                         self.hardware_info = hw["label"]
                     except Exception:
-                        # Rete di sicurezza: se l'offload su GPU fallisce a runtime, ripiega su CPU
                         self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=1024, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
                         self.hardware_info = cpu_label
                     self.is_vision = True
+                    self._active_handler = prof["handler"]
                 else:
                     try:
                         self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
@@ -312,7 +317,7 @@ class AIEngine:
                         self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
                         self.hardware_info = cpu_label
                     self.is_vision = False
-                    
+
                 return True, ""
             except Exception as le:
                 return False, f"Load Error: {str(le)}"
@@ -415,13 +420,21 @@ class AIEngine:
                 img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
                 data_url = f"data:image/jpeg;base64,{img_str}"
                 
-                prompt_text = (
-                    "Describe this image with high precision. List:\n"
-                    "1) The main subject, objects, and people (specify their clothing, age, actions, or details),\n"
-                    "2) Any visible text, writing, or logos (read word-for-word),\n"
-                    "3) Setting and background.\n"
-                    "Be highly descriptive and precise."
-                )
+                # Prompt adattivo: Moondream rende meglio con richieste brevi,
+                # Qwen2.5-VL/altri con istruzioni dettagliate.
+                if getattr(self, "_active_handler", None) == "moondream":
+                    prompt_text = (
+                        "Describe this image in detail: main subjects, objects, people "
+                        "(clothing, actions), any visible text or logos, and the setting."
+                    )
+                else:
+                    prompt_text = (
+                        "Describe this image with high precision. List:\n"
+                        "1) The main subject, objects, and people (specify their clothing, age, actions, or details),\n"
+                        "2) Any visible text, writing, or logos (read word-for-word),\n"
+                        "3) Setting and background.\n"
+                        "Be highly descriptive and precise."
+                    )
                 
                 response = self.llm.create_chat_completion(
                     messages=[
