@@ -37,7 +37,10 @@ jobs:
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           CMAKE_ARGS="-DGGML_METAL=on" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         else
-          CMAKE_ARGS="-DGGML_NATIVE=OFF" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
+          # Intel x86_64 emulato: NIENTE Metal (i file mtmd con Metal crashano in emulazione;
+          # su Mac Intel l'inferenza va comunque su CPU), niente istruzioni native, e
+          # parallelismo ridotto per non esaurire la RAM durante la compilazione emulata.
+          CMAKE_ARGS="-DGGML_METAL=OFF -DGGML_NATIVE=OFF" FORCE_CMAKE=1 CMAKE_BUILD_PARALLEL_LEVEL=2 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
