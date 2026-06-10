@@ -5,14 +5,18 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+concurrency:
+  group: macos-build-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     strategy:
       matrix:
         include:
-          - runner: macos-13
+          - runner: macos-14
             arch: Intel
-            prefix: ""
+            prefix: "arch -x86_64"
           - runner: macos-14
             arch: AppleSilicon
             prefix: ""
@@ -33,7 +37,7 @@ jobs:
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           CMAKE_ARGS="-DGGML_METAL=on" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         else
-          ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
+          CMAKE_ARGS="-DGGML_NATIVE=OFF" FORCE_CMAKE=1 ${{ matrix.prefix }} python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
