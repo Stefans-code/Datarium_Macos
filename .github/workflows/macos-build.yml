@@ -43,21 +43,35 @@ jobs:
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           CMAKE_ARGS="-DGGML_METAL=on" FORCE_CMAKE=1 python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         else
-          # Intel x86_64 emulato (Rosetta) sul runner arm64 VELOCE. La build compila tutto;
-          # l'UNICO blocco era il link finale contro OpenSSL di Homebrew, presente solo in arm64.
-          # Datarium NON usa il downloader interno di llama.cpp (i modelli arrivano via
-          # huggingface_hub in Python), quindi rendo OpenSSL non trovabile: cosi' cpp-httplib
-          # viene compilato SENZA SSL e il link non chiede piu' libssl/libcrypto arm64.
-          # Metodo a livello di FILESYSTEM: agisce davvero, a differenza dei flag CMake ignorati.
-          for p in /opt/homebrew/Cellar/openssl@3 /opt/homebrew/opt/openssl@3 \
-                   /opt/homebrew/opt/openssl /opt/homebrew/include/openssl \
-                   /opt/homebrew/lib/pkgconfig/openssl.pc; do
-            [ -e "$p" ] && sudo mv "$p" "${p}.hidden" 2>/dev/null || true
+          # Intel x86_64 emulato (Rosetta) sul runner arm64 VELOCE. Unico blocco storico: il
+          # link finale contro OpenSSL di Homebrew, presente solo in arm64 sul runner. Datarium
+          # NON usa il downloader interno di llama.cpp, quindi DISATTIVO OpenSSL: cpp-httplib
+          # compila senza SSL e il link non chiede piu' libssl/libcrypto.
+          # Lo faccio in modo RIDONDANTE e indipendente dall'immagine-runner (e' questo che
+          # cambiava tra una run e l'altra), con 3 livelli:
+          #  (1) nascondo OpenSSL da ENTRAMBI i prefix Homebrew (arm64 /opt/homebrew e
+          #      Intel /usr/local) e da ogni punto che CMake/pkg-config controllano;
+          #  (2) OPENSSL_ROOT_DIR fasullo;
+          #  (3) CMAKE_DISABLE_FIND_PACKAGE_OpenSSL nella initial-cache: find_package lo
+          #      rispetta a prescindere dal filesystem.
+          for PREFIX in /opt/homebrew /usr/local; do
+            for p in "$PREFIX/Cellar/openssl@3" "$PREFIX/Cellar/openssl@1.1" \
+                     "$PREFIX/opt/openssl" "$PREFIX/opt/openssl@3" "$PREFIX/opt/openssl@1.1" \
+                     "$PREFIX/include/openssl" \
+                     "$PREFIX/lib/pkgconfig/openssl.pc" "$PREFIX/lib/pkgconfig/libssl.pc" \
+                     "$PREFIX/lib/pkgconfig/libcrypto.pc"; do
+              [ -e "$p" ] && sudo mv "$p" "$p.hidden" 2>/dev/null || true
+            done
+            for f in "$PREFIX"/lib/libssl*.dylib "$PREFIX"/lib/libcrypto*.dylib; do
+              [ -e "$f" ] && sudo mv "$f" "$f.hidden" 2>/dev/null || true
+            done
           done
-          # -j1 seriale: evita OOM in emulazione sui file mtmd. OPENSSL_ROOT_DIR fasullo come
-          # ulteriore garanzia che find_package(OpenSSL) fallisca -> SSL disattivato.
+          echo ">> OpenSSL residuo dopo l'hide (deve essere vuoto):"
+          find /opt/homebrew/lib /usr/local/lib -maxdepth 1 \( -name 'libssl*' -o -name 'libcrypto*' \) 2>/dev/null || true
+          # -j1 seriale: contiene la memoria in emulazione (no OOM sui file mtmd/link).
           OPENSSL_ROOT_DIR=/nonexistent CMAKE_BUILD_PARALLEL_LEVEL=1 \
-            arch -x86_64 python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
+            arch -x86_64 python -m pip install llama-cpp-python==0.3.28 --no-cache-dir \
+            --config-settings=cmake.define.CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
