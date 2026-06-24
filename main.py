@@ -412,7 +412,8 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(login_box, text="DATARIUM", font=ctk.CTkFont(size=36, weight="bold")).pack(pady=(30, 10))
         ctk.CTkLabel(login_box, text="Completamento dell'installazione...", font=ctk.CTkFont(size=18), text_color="gray").pack()
         
-        self.model_choice_var = ctk.StringVar(value="full")
+        # Default = profilo GIA' installato (se c'e'), cosi' non si propone uno switch slim<->full
+        self.model_choice_var = ctk.StringVar(value=(self.ai.get_installed_quality() or "full"))
         opt_f = ctk.CTkFrame(login_box, fg_color="transparent")
         opt_f.pack(pady=10)
         ctk.CTkRadioButton(opt_f, text="Qualità Massima AI (Consigliato - 6GB)", variable=self.model_choice_var, value="full").pack(anchor="w", pady=5)

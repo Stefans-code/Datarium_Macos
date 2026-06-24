@@ -232,6 +232,23 @@ class AIEngine:
         except Exception:
             return True
 
+    def get_installed_quality(self):
+        """Rileva quale profilo e' GIA' installato nei modelli: 'full', 'slim' o None.
+        Serve a usare SEMPRE il profilo scelto/installato senza passare da slim a full."""
+        try:
+            d = self.get_models_dir()
+            if not d or not os.path.exists(d):
+                return None
+            for q in ("full", "slim"):
+                prof = self.PROFILES[q]
+                if (os.path.exists(os.path.join(d, prof["text"][2]))
+                        and os.path.exists(os.path.join(d, prof["vision"][2]))
+                        and os.path.exists(os.path.join(d, prof["mmproj"][2]))):
+                    return q
+        except Exception:
+            pass
+        return None
+
     def _select_handler(self, handler_name, clip_model_path):
         """Restituisce il chat handler di visione giusto per il profilo Argus."""
         import importlib
@@ -249,9 +266,13 @@ class AIEngine:
             return HandlerCls(clip_model_path=clip_model_path)
         return fmt.Llava15ChatHandler(clip_model_path=clip_model_path)
 
-    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality="full"):
-        """Scarica (se serve) e carica i modelli ARGUS del profilo scelto. Ritorna (ok, err_msg)."""
+    def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality=None):
+        """Scarica (se serve) e carica i modelli ARGUS del profilo scelto. Ritorna (ok, err_msg).
+        Se quality non e' specificata, usa il profilo GIA' installato: cosi' i servizi
+        (Organizer/AutoTag) non passano mai da slim a full ne' riscaricano il modello sbagliato."""
         try:
+            if quality not in ("full", "slim"):
+                quality = self.get_installed_quality() or "full"
             prof = self.PROFILES["slim"] if quality == "slim" else self.PROFILES["full"]
 
             # Ogni voce = (repo, nome_originale_HF, nome_ARGUS_locale)
