@@ -168,7 +168,6 @@ def main():
         "--hidden-import=fitz",
         "--hidden-import=docx",
         "--hidden-import=jwt",
-        "--hidden-import=cryptography",
     ] + icon_arg + add_data + ["main.py"]
     run(cmd, cwd=STAGE)
 

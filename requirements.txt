@@ -5,7 +5,6 @@ huggingface-hub
 pymupdf
 python-docx
 PyJWT
-cryptography
 xxhash
 pillow-heif
 opencv-contrib-python
