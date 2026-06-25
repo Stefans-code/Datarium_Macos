@@ -27,7 +27,7 @@ jobs:
             arch: AppleSilicon
             prefix: ""
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
     - uses: actions/checkout@v4
@@ -68,16 +68,39 @@ jobs:
           done
           echo ">> OpenSSL residuo dopo l'hide (deve essere vuoto):"
           find /opt/homebrew/lib /usr/local/lib -maxdepth 1 \( -name 'libssl*' -o -name 'libcrypto*' \) 2>/dev/null || true
-          # -j1 seriale: contiene la memoria in emulazione (no OOM sui file mtmd/link).
-          OPENSSL_ROOT_DIR=/nonexistent CMAKE_BUILD_PARALLEL_LEVEL=1 \
-            arch -x86_64 python -m pip install llama-cpp-python==0.3.28 --no-cache-dir \
-            --config-settings=cmake.define.CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON
+          # La compilazione emulata e' BALLERINA (la #56 identica passava, #57-#59 no): uso
+          # un RETRY (3 tentativi) e PRODUCO la wheel x86_64 con 'pip wheel'. La wheel viene poi
+          # caricata come artifact: appena un build va a buon fine, in futuro si installera'
+          # direttamente la wheel pronta (1 min, niente piu' compilazione emulata).
+          # -j1 seriale per contenere la memoria in emulazione.
+          mkdir -p "$RUNNER_TEMP/wheelhouse"
+          ok=""
+          for attempt in 1 2 3; do
+            echo "===== Build llama-cpp x86_64 0.3.28 - tentativo $attempt/3 ====="
+            if OPENSSL_ROOT_DIR=/nonexistent CMAKE_BUILD_PARALLEL_LEVEL=1 \
+                 arch -x86_64 python -m pip wheel "llama-cpp-python==0.3.28" --no-deps --no-cache-dir \
+                 -w "$RUNNER_TEMP/wheelhouse" \
+                 --config-settings=cmake.define.CMAKE_DISABLE_FIND_PACKAGE_OpenSSL=ON; then
+              ok="yes"; break
+            fi
+            echo "Tentativo $attempt fallito, riprovo tra poco..."; sleep 10
+          done
+          if [ -z "$ok" ]; then echo "::error::Build llama-cpp x86_64 fallita dopo 3 tentativi"; exit 1; fi
+          arch -x86_64 python -m pip install "$RUNNER_TEMP"/wheelhouse/llama_cpp_python-*.whl
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt
         ${{ matrix.prefix }} pip install -r requirements.txt --no-cache-dir
         ${{ matrix.prefix }} pip install pyinstaller cython --no-cache-dir
-        
+
+    - name: Upload x86_64 wheel (riuso futuro -> install veloce e affidabile)
+      if: always() && matrix.arch == 'Intel'
+      uses: actions/upload-artifact@v4
+      with:
+        name: llama-cpp-python-0.3.28-macos-x86_64-wheel
+        path: ${{ runner.temp }}/wheelhouse/*.whl
+        if-no-files-found: ignore
+
     - name: Build protected app (Cython + PyInstaller)
       env:
         BUILD_ARCH_PREFIX: ${{ matrix.prefix }}
