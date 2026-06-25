@@ -86,7 +86,11 @@ jobs:
             echo "Tentativo $attempt fallito, riprovo tra poco..."; sleep 10
           done
           if [ -z "$ok" ]; then echo "::error::Build llama-cpp x86_64 fallita dopo 3 tentativi"; exit 1; fi
-          arch -x86_64 python -m pip install "$RUNNER_TEMP"/wheelhouse/llama_cpp_python-*.whl
+          echo ">> Wheel prodotta:"; ls -la "$RUNNER_TEMP/wheelhouse"
+          # Installo la wheel appena costruita in modo robusto: --find-links la trova per nome
+          # nella wheelhouse (niente glob fragile) e scarica le dipendenze da PyPI.
+          arch -x86_64 python -m pip install --no-cache-dir \
+            --find-links "$RUNNER_TEMP/wheelhouse" "llama-cpp-python==0.3.28"
         fi
         # Remove llama-cpp-python from requirements.txt to avoid overwriting or compiling from source
         sed -i '' '/llama-cpp-python/d' requirements.txt

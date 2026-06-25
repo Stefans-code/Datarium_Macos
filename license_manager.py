@@ -61,7 +61,7 @@ class LicenseManager:
                 # Seriale Hardware Apple (con query mirata e veloce)
                 try:
                     cmd = "ioreg -rd1 -c IOPlatformExpertDevice"
-                    output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode()
+                    output = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL, timeout=5).decode()
                     serial = "MACOS-FALLBACK"
                     for line in output.splitlines():
                         if "IOPlatformSerialNumber" in line:
