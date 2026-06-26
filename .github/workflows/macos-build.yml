@@ -97,14 +97,6 @@ jobs:
         ${{ matrix.prefix }} pip install -r requirements.txt --no-cache-dir
         ${{ matrix.prefix }} pip install pyinstaller cython --no-cache-dir
 
-    - name: Upload x86_64 wheel (riuso futuro -> install veloce e affidabile)
-      if: always() && matrix.arch == 'Intel'
-      uses: actions/upload-artifact@v4
-      with:
-        name: llama-cpp-python-0.3.28-macos-x86_64-wheel
-        path: ${{ runner.temp }}/wheelhouse/*.whl
-        if-no-files-found: ignore
-
     - name: Build protected app (Cython + PyInstaller)
       env:
         BUILD_ARCH_PREFIX: ${{ matrix.prefix }}
