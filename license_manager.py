@@ -4,15 +4,50 @@ import hashlib
 import platform
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 class LicenseManager:
     # Deve corrispondere a license_maker.py
     LICENSE_SECRET = "vocius_offline_secure_key_2026_x99"
     ALGORITHM = "HS256"
+    TRIAL_DAYS = 30
 
     def __init__(self):
         self.license_path = self._get_license_directory()
+
+    def _is_trial_build(self):
+        """Vero solo nella build di valutazione: presenza del file 'trial_mode.flag'
+        accanto alle risorse dell'app (bundlato SOLO nel DMG/installer trial)."""
+        try:
+            base = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+            return os.path.exists(os.path.join(base, "trial_mode.flag"))
+        except Exception:
+            return False
+
+    def _get_trial_marker_path(self):
+        return os.path.join(os.path.dirname(self.license_path), "trial_start.dat")
+
+    def check_trial(self):
+        """Modalita' valutazione: TRIAL_DAYS giorni dal primo avvio, nessun HWID/licenza richiesti."""
+        marker = self._get_trial_marker_path()
+        now = datetime.now(timezone.utc)
+        start = now
+        if os.path.exists(marker):
+            try:
+                with open(marker, "r") as f:
+                    start = datetime.fromisoformat(f.read().strip())
+            except Exception:
+                start = now
+        else:
+            try:
+                with open(marker, "w") as f:
+                    f.write(now.isoformat())
+            except Exception:
+                pass
+        expiry = start + timedelta(days=self.TRIAL_DAYS)
+        if now > expiry:
+            return False, f"Periodo di valutazione di {self.TRIAL_DAYS} giorni terminato"
+        return True, f"Valutazione (Scadenza: {expiry.strftime('%d/%m/%Y')})"
 
     def _get_license_directory(self):
         """Individua una cartella scrivibile persistente per la licenza."""
@@ -144,6 +179,8 @@ class LicenseManager:
                 except Exception:
                     return False, "Errore lettura licenza"
             else:
+                if self._is_trial_build():
+                    return self.check_trial()
                 return False, "Licenza mancante"
 
         try:

@@ -160,3 +160,35 @@ jobs:
       with:
         name: Datarium-macOS-Universal-DMG
         path: Datarium_macOS.dmg
+
+    - name: Build Trial App Bundles (30-day evaluation, no license required)
+      run: |
+        # Riusa gli stessi bundle gia' compilati: la modalita' trial e' attivata a runtime
+        # dalla sola presenza di 'trial_mode.flag' accanto alle risorse dell'app
+        # (letto da license_manager.py via sys._MEIPASS), quindi non serve ricompilare.
+        mkdir -p dmg_folder_trial
+        cp -R "dmg_folder/Datarium (Intel).app" "dmg_folder_trial/Datarium (Intel).app"
+        cp -R "dmg_folder/Datarium (Apple Silicon).app" "dmg_folder_trial/Datarium (Apple Silicon).app"
+        touch "dmg_folder_trial/Datarium (Intel).app/Contents/MacOS/trial_mode.flag"
+        touch "dmg_folder_trial/Datarium (Apple Silicon).app/Contents/MacOS/trial_mode.flag"
+
+    - name: Create Trial Universal DMG
+      run: |
+        create-dmg \
+          --volname "Datarium Installer (Trial 30gg)" \
+          --window-pos 200 120 \
+          --window-size 650 450 \
+          --icon-size 100 \
+          --icon "Datarium (Apple Silicon).app" 150 150 \
+          --icon "Datarium (Intel).app" 350 150 \
+          --hide-extension "Datarium (Apple Silicon).app" \
+          --hide-extension "Datarium (Intel).app" \
+          --app-drop-link 550 150 \
+          "Datarium_macOS_Trial.dmg" \
+          "dmg_folder_trial"
+
+    - name: Upload Trial Universal DMG Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Datarium-macOS-Universal-DMG-Trial
+        path: Datarium_macOS_Trial.dmg

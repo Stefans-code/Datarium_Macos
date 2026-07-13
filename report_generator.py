@@ -91,12 +91,15 @@ class ReportGenerator:
                 # Se è immagine, proviamo a usare il path assoluto per caricarla nel browser
                 preview_elem = f'<img class="preview-img" src="file:///{it["path"].replace(chr(92), "/")}" alt="{it["name"]}"/>'
             elif ext in [".mp4", ".mov", ".mxf", ".avi", ".mkv"]:
-                # Estrae un thumbnail video in base64 per HTML
-                thumbs = cls.extract_video_thumbnails(it["path"], num_thumbnails=1)
+                # Estrae piu' frame video in base64 per mostrare una strip nel report HTML
+                thumbs = cls.extract_video_thumbnails(it["path"])
                 if thumbs:
                     import base64
-                    b64 = base64.b64encode(thumbs[0]).decode('ascii')
-                    preview_elem = f'<img class="preview-img" src="data:image/jpeg;base64,{b64}" alt="Video Preview"/>'
+                    imgs = "".join(
+                        f'<img class="preview-thumb" src="data:image/jpeg;base64,{base64.b64encode(t).decode("ascii")}" alt="Video Frame {i+1}"/>'
+                        for i, t in enumerate(thumbs)
+                    )
+                    preview_elem = f'<div class="preview-strip">{imgs}</div>'
                 else:
                     preview_elem = '<div class="preview-placeholder">🎞️</div>'
             else:
@@ -298,6 +301,21 @@ class ReportGenerator:
             background-color: #000;
             display: block;
             margin-bottom: 6px;
+        }}
+        .preview-strip {{
+            display: flex;
+            flex-wrap: wrap;
+            gap: 3px;
+            width: 120px;
+            margin-bottom: 6px;
+        }}
+        .preview-thumb {{
+            width: 37px;
+            height: 25px;
+            object-fit: cover;
+            border-radius: 3px;
+            border: 1px solid #444;
+            background-color: #000;
         }}
         .preview-placeholder {{
             width: 120px;
@@ -537,7 +555,7 @@ class ReportGenerator:
         return clean_bytes.decode('latin1')
 
     @staticmethod
-    def extract_video_thumbnails(video_path, num_thumbnails=6):
+    def extract_video_thumbnails(video_path, num_thumbnails=5):
         try:
             import cv2
             cap = cv2.VideoCapture(video_path)
@@ -855,7 +873,7 @@ class ReportGenerator:
             
             page.draw_line((20, y+18), (575, y+18), color=(0.9, 0.9, 0.9), width=0.5)
             
-            name_disp = f["name"]
+            name_disp = cls.safe_text(f["name"])
             if len(name_disp) > 30:
                 name_disp = name_disp[:27] + "..."
             page.insert_text((25, y+12), name_disp, fontsize=8, fontname=font_name, color=(0.1, 0.1, 0.1))
