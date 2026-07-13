@@ -166,11 +166,21 @@ jobs:
         # Riusa gli stessi bundle gia' compilati: la modalita' trial e' attivata a runtime
         # dalla sola presenza di 'trial_mode.flag' accanto alle risorse dell'app
         # (letto da license_manager.py via sys._MEIPASS), quindi non serve ricompilare.
+        # PyInstaller 6.x metta le risorse onedir in una sottocartella '_internal' (non
+        # piu' alla radice del bundle): individuiamo la cartella giusta cercando dove
+        # e' finito 'icon.ico' (stessa risoluzione usata a runtime da sys._MEIPASS),
+        # invece di assumere un percorso fisso.
         mkdir -p dmg_folder_trial
         cp -R "dmg_folder/Datarium (Intel).app" "dmg_folder_trial/Datarium (Intel).app"
         cp -R "dmg_folder/Datarium (Apple Silicon).app" "dmg_folder_trial/Datarium (Apple Silicon).app"
-        touch "dmg_folder_trial/Datarium (Intel).app/Contents/MacOS/trial_mode.flag"
-        touch "dmg_folder_trial/Datarium (Apple Silicon).app/Contents/MacOS/trial_mode.flag"
+        for app in "Datarium (Intel).app" "Datarium (Apple Silicon).app"; do
+          icon_path=$(find "dmg_folder_trial/$app" -name "icon.ico" -print -quit)
+          if [ -z "$icon_path" ]; then
+            echo "::error::icon.ico non trovato in $app, impossibile localizzare _MEIPASS"
+            exit 1
+          fi
+          touch "$(dirname "$icon_path")/trial_mode.flag"
+        done
 
     - name: Create Trial Universal DMG
       run: |
