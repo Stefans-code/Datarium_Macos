@@ -258,6 +258,14 @@ class DatariumApp(ctk.CTk):
         self.offload_meta_vars = {key: ctk.StringVar(value="") for key, _ in self.offload_meta_fields}
         self.offload_notes_text = None
 
+        # Ingest Feature State (Fase 0: copia -> verifica -> tag AI -> report)
+        self.ingest_source_folder = ctk.StringVar(value="")
+        self.ingest_dest_folder = ctk.StringVar(value="")
+        self.ingest_organize_ai = ctk.BooleanVar(value=True)
+        self.ingest_make_report = ctk.BooleanVar(value=True)
+        self.ingest_report_id = ctk.StringVar(value="ING" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
+        self.ingest_report_path = None
+
         # Settings state
         self.load_settings()
         self.scan_sidecars_var = ctk.BooleanVar(value=self.scan_sidecars_enabled)
@@ -360,14 +368,17 @@ class DatariumApp(ctk.CTk):
         self.btn_offload = ctk.CTkButton(self.sidebar, text="⚡ Offload", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"))
         self.btn_offload.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
 
+        self.btn_ingest = ctk.CTkButton(self.sidebar, text="🚀 Ingest", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("IngestHome"))
+        self.btn_ingest.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
+
         # Bottom Buttons
-        self.sidebar.grid_rowconfigure(6, weight=1)
+        self.sidebar.grid_rowconfigure(7, weight=1)
         
         self.btn_settings = ctk.CTkButton(self.sidebar, text="\u2699 Impostazioni", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"))
-        self.btn_settings.grid(row=7, column=0, padx=20, pady=10, sticky="ew")
+        self.btn_settings.grid(row=8, column=0, padx=20, pady=10, sticky="ew")
 
         self.appearance_mode_segmented = ctk.CTkSegmentedButton(self.sidebar, values=["🌙 Dark", "☀️ Light"], command=self.change_appearance_mode)
-        self.appearance_mode_segmented.grid(row=8, column=0, padx=20, pady=(10, 30), sticky="ew")
+        self.appearance_mode_segmented.grid(row=9, column=0, padx=20, pady=(10, 30), sticky="ew")
         self.appearance_mode_segmented.set("🌙 Dark")
 
     def setup_main_content(self):
@@ -384,6 +395,7 @@ class DatariumApp(ctk.CTk):
         self.init_hash_pages()
         self.init_autotag_page()
         self.init_offload_pages()
+        self.init_ingest_pages()
 
     def init_organizer_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -966,7 +978,7 @@ class DatariumApp(ctk.CTk):
         ctk.set_appearance_mode(mode)
 
     def set_sidebar_state(self, state="normal"):
-        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_settings]
+        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_ingest, self.btn_settings]
         for btn in buttons:
             btn.configure(state=state)
         if hasattr(self, 'appearance_mode_segmented'):
@@ -2448,6 +2460,271 @@ class DatariumApp(ctk.CTk):
                 self.after(0, lambda: self.set_sidebar_state("normal"))
 
         threading.Thread(target=offload_bg, daemon=True).start()
+
+    # ==================== INGEST (Fase 0: copia -> verifica -> tag AI -> report) ====================
+    def init_ingest_pages(self):
+        self.ingest_master_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["IngestHome"] = self.ingest_master_frame
+        self.pages["IngestResults"] = self.ingest_master_frame
+
+        self.ingest_views = {}
+
+        # --- Vista configurazione ---
+        v_home = ctk.CTkFrame(self.ingest_master_frame, fg_color="transparent")
+        self.ingest_views["IngestHome"] = v_home
+
+        ctk.CTkLabel(v_home, text="🚀 Ingest AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+
+        cfg_box = ctk.CTkScrollableFrame(v_home, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
+        cfg_box.pack(fill="both", expand=True, padx=5, pady=5)
+
+        ctk.CTkLabel(cfg_box, text="Un solo flusso: Copia · Verifica · Tag · Report", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(20, 5))
+        ctk.CTkLabel(cfg_box, text="Copia i file dalla card/SSD, ne verifica l'integrità con checksum, li organizza in album con l'AI e genera un report di verifica — tutto in un colpo solo.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=700, justify="left").pack(anchor="w", padx=30, pady=(0, 20))
+
+        g = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        g.pack(fill="x", padx=30, pady=10)
+        g.columnconfigure(1, weight=1)
+
+        ctk.CTkLabel(g, text="Cartella Sorgente (Card/SSD):", font=ctk.CTkFont(weight="bold", size=13)).grid(row=0, column=0, sticky="w", pady=12)
+        ctk.CTkEntry(g, textvariable=self.ingest_source_folder, font=ctk.CTkFont(size=12), height=35).grid(row=0, column=1, padx=(15, 10), sticky="ew")
+        ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_ingest_source).grid(row=0, column=2)
+
+        ctk.CTkLabel(g, text="Cartella Destinazione:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=1, column=0, sticky="w", pady=12)
+        ctk.CTkEntry(g, textvariable=self.ingest_dest_folder, font=ctk.CTkFont(size=12), height=35).grid(row=1, column=1, padx=(15, 10), sticky="ew")
+        ctk.CTkButton(g, text="📂", width=45, height=35, command=self.pick_ingest_dest).grid(row=1, column=2)
+
+        ctk.CTkLabel(g, text="Algoritmo Verifica:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=2, column=0, sticky="w", pady=12)
+        ctk.CTkOptionMenu(g, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5"], height=35).grid(row=2, column=1, columnspan=2, padx=(15, 0), sticky="w")
+
+        opt_f = ctk.CTkFrame(cfg_box, fg_color="transparent")
+        opt_f.pack(fill="x", padx=30, pady=(5, 0))
+        ctk.CTkCheckBox(opt_f, text="Organizza le foto in album con l'AI", variable=self.ingest_organize_ai).pack(anchor="w", pady=4)
+        ctk.CTkCheckBox(opt_f, text="Genera report di verifica (PDF)", variable=self.ingest_make_report).pack(anchor="w", pady=4)
+
+        ctk.CTkButton(cfg_box, text="🚀 Avvia Ingest", fg_color="#10b981", hover_color="#059669", height=50, width=280, font=ctk.CTkFont(weight="bold", size=15), corner_radius=10, command=self.run_ingest_process).pack(pady=30)
+
+        # --- Vista risultati ---
+        v_results = ctk.CTkFrame(self.ingest_master_frame, fg_color="transparent")
+        self.ingest_views["IngestResults"] = v_results
+
+        ctk.CTkLabel(v_results, text="🚀 Ingest in corso", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+
+        self.ingest_status_lbl = ctk.CTkLabel(v_results, text="Inizializzazione...", font=ctk.CTkFont(size=16, weight="bold"))
+        self.ingest_status_lbl.pack(pady=10)
+
+        self.ingest_progress_bar = ctk.CTkProgressBar(v_results, height=15)
+        self.ingest_progress_bar.pack(fill="x", padx=10, pady=10)
+        self.ingest_progress_bar.set(0)
+
+        self.ingest_results_scroll = ctk.CTkScrollableFrame(v_results, fg_color=("gray95", "gray10"))
+        self.ingest_results_scroll.pack(fill="both", expand=True, padx=5, pady=5)
+
+        res_foot = ctk.CTkFrame(v_results, fg_color="transparent")
+        res_foot.pack(fill="x", side="bottom", pady=(15, 0))
+        ctk.CTkButton(res_foot, text="Nuovo Ingest", fg_color="transparent", text_color=("gray10", "gray90"), border_width=1, width=120, command=lambda: self.show_ingest_subpage("IngestHome")).pack(side="left")
+        self.btn_ingest_open_report = ctk.CTkButton(res_foot, text="📄 Apri Report PDF", fg_color="#10b981", hover_color="#059669", width=220, font=ctk.CTkFont(weight="bold"), state="disabled", command=self.open_ingest_report)
+        self.btn_ingest_open_report.pack(side="right")
+
+        self.show_ingest_subpage("IngestHome")
+
+    def show_ingest_subpage(self, name):
+        if name == "IngestHome":
+            import datetime
+            self.ingest_report_id.set(f"ING{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        for v in self.ingest_views.values():
+            v.pack_forget()
+        self.ingest_views[name].pack(fill="both", expand=True)
+
+    def pick_ingest_source(self):
+        folder = filedialog.askdirectory(title="Seleziona Cartella Sorgente (Card/SSD)")
+        if folder:
+            self.ingest_source_folder.set(folder)
+
+    def pick_ingest_dest(self):
+        folder = filedialog.askdirectory(title="Seleziona Cartella Destinazione")
+        if folder:
+            self.ingest_dest_folder.set(folder)
+
+    def open_ingest_report(self):
+        if getattr(self, "ingest_report_path", None) and os.path.exists(self.ingest_report_path):
+            import webbrowser
+            webbrowser.open(pathlib.Path(self.ingest_report_path).absolute().as_uri())
+
+    def _ingest_album_for(self, path, use_ai):
+        """Cartella-album per un file: AI per le foto, altrimenti per tipo. Non solleva mai."""
+        ext = os.path.splitext(path)[1].lower()
+        image_exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tiff', '.tif']
+        video_exts = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mxf', '.mpg', '.mpeg', '.mts', '.m2ts', '.wmv']
+        if use_ai and ext in image_exts:
+            try:
+                context = self.ai.extract_context(path)
+                album = self.ai.get_album_name(context) if context else "Varie"
+                for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
+                    album = album.replace(ch, "")
+                album = album.strip().capitalize()
+                return album or "Varie"
+            except Exception:
+                return "Foto"
+        if ext in image_exts:
+            return "Foto"
+        if ext in video_exts:
+            return "Video"
+        return "Documenti"
+
+    def run_ingest_process(self):
+        src = self.ingest_source_folder.get()
+        dest = self.ingest_dest_folder.get()
+        algo = self.offload_algo.get()
+        report_id = self.ingest_report_id.get()
+        use_ai = self.ingest_organize_ai.get()
+        make_report = self.ingest_make_report.get()
+
+        from tkinter import messagebox
+        if not src or not dest:
+            messagebox.showwarning("Selezione Mancante", "Seleziona la cartella sorgente e quella di destinazione.")
+            return
+        if os.path.abspath(src) == os.path.abspath(dest):
+            messagebox.showwarning("Cartelle uguali", "Sorgente e destinazione non possono coincidere.")
+            return
+
+        self.show_ingest_subpage("IngestResults")
+        self.btn_ingest_open_report.configure(state="disabled")
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
+        for w in self.ingest_results_scroll.winfo_children():
+            w.destroy()
+        self.ingest_status_lbl.configure(text="Avvio Ingest...", text_color=("gray10", "gray90"))
+        self.ingest_progress_bar.set(0)
+
+        def ingest_bg():
+            try:
+                import os
+                import shutil
+                import datetime
+                from report_generator import ReportGenerator
+
+                if use_ai and not self.is_ai_loaded:
+                    self.after(0, lambda: self.ingest_status_lbl.configure(text="🧠 Caricamento modello AI..."))
+                    try:
+                        ok_ai, _ = self.ai.download_model_if_needed(vision_mode=True, progress_callback=None)
+                        if ok_ai:
+                            self.is_ai_loaded = True
+                    except Exception:
+                        pass
+                use_ai_eff = use_ai and self.is_ai_loaded
+
+                files_to_copy = []
+                for root, _, files in os.walk(src):
+                    for f in files:
+                        files_to_copy.append({"name": f, "path": os.path.join(root, f)})
+
+                if not files_to_copy:
+                    self.after(0, lambda: self.ingest_status_lbl.configure(text="❌ Nessun file trovato nella sorgente.", text_color="#ef4444"))
+                    return
+
+                total = len(files_to_copy)
+                done = 0
+                results = []
+                alt_algo = "SHA-256" if algo == "xxHash64" else "MD5"
+
+                for it in files_to_copy:
+                    album = "Varie"
+                    try:
+                        sz = os.path.getsize(it["path"])
+                        sz_str = self.format_file_size(sz)
+
+                        self.after(0, lambda n=it["name"]: self.ingest_status_lbl.configure(text=f"Checksum: {n}..."))
+                        src_hashes = self.compute_hashes(it["path"], [algo, alt_algo])
+                        src_hash = src_hashes.get(algo, "")
+                        src_hash_alt = src_hashes.get(alt_algo, "")
+
+                        self.after(0, lambda n=it["name"]: self.ingest_status_lbl.configure(text=f"Analisi AI: {n}..."))
+                        album = self._ingest_album_for(it["path"], use_ai_eff)
+
+                        target_dir = os.path.join(dest, album)
+                        os.makedirs(target_dir, exist_ok=True)
+                        target_path = os.path.join(target_dir, it["name"])
+                        if os.path.exists(target_path):
+                            base, extp = os.path.splitext(it["name"])
+                            k = 1
+                            while os.path.exists(os.path.join(target_dir, f"{base}_{k}{extp}")):
+                                k += 1
+                            target_path = os.path.join(target_dir, f"{base}_{k}{extp}")
+
+                        self.after(0, lambda n=it["name"]: self.ingest_status_lbl.configure(text=f"Copia: {n}..."))
+                        try:
+                            shutil.copy2(it["path"], target_path)
+                        except OSError:
+                            shutil.copy(it["path"], target_path)
+
+                        self.after(0, lambda n=it["name"]: self.ingest_status_lbl.configure(text=f"Verifica: {n}..."))
+                        dest_hash = self.compute_hash(target_path, algo)
+                        if (not src_hash or src_hash.startswith("Error") or
+                                not dest_hash or dest_hash.startswith("Error") or
+                                dest_hash != src_hash):
+                            status = "Failed"
+                        else:
+                            status = "Verified"
+
+                        mtime = os.path.getmtime(it["path"])
+                        ctime = os.path.getctime(it["path"])
+                        media_info = ReportGenerator.extract_media_info(it["path"])
+
+                        results.append({
+                            "name": it["name"], "path": it["path"],
+                            "size_bytes": sz, "size_str": sz_str,
+                            "created": datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S"),
+                            "modified": datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                            "hash": src_hash, "hash_alt": src_hash_alt, "status": status,
+                            "media_format": media_info["media_format"], "codec": media_info["codec"],
+                            "duration": media_info["duration"], "resolution": media_info["resolution"],
+                            "camera": media_info["camera"], "shot": album, "frames": media_info["frames"],
+                            "bitrate": media_info["bitrate"], "audio": media_info["audio"],
+                            "album": album,
+                        })
+                    except Exception as e:
+                        print(f"Ingest errore su {it['name']}: {e}")
+                        results.append({
+                            "name": it["name"], "path": it["path"], "size_bytes": 0,
+                            "size_str": "0 B", "hash": "ERROR", "status": "Failed",
+                            "shot": album, "album": album,
+                        })
+
+                    done += 1
+                    self.after(0, lambda v=done / total: self.ingest_progress_bar.set(v))
+
+                self.ingest_report_path = None
+                if make_report:
+                    self.after(0, lambda: self.ingest_status_lbl.configure(text="Generazione report..."))
+                    try:
+                        report_dir = os.path.join(dest, "Ingest_Reports")
+                        self.ingest_report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, [dest], None)
+                    except Exception as e:
+                        print(f"Errore report ingest: {e}")
+
+                def render():
+                    n_ok = sum(1 for r in results if r.get("status") == "Verified")
+                    n_fail = len(results) - n_ok
+                    if n_fail == 0:
+                        self.ingest_status_lbl.configure(text=f"✓ Ingest completato: {n_ok} file verificati.", text_color="#10b981")
+                    else:
+                        self.ingest_status_lbl.configure(text=f"⚠ Completato con avvisi: {n_ok} ok, {n_fail} falliti.", text_color="#f59e0b")
+                    if getattr(self, "ingest_report_path", None) and os.path.exists(self.ingest_report_path):
+                        self.btn_ingest_open_report.configure(state="normal")
+                    for res in results:
+                        row = ctk.CTkFrame(self.ingest_results_scroll, fg_color="transparent")
+                        row.pack(fill="x", pady=2)
+                        ok = res.get("status") == "Verified"
+                        ctk.CTkLabel(row, text="✓" if ok else "❌", text_color="#10b981" if ok else "#ef4444", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", padx=10)
+                        ctk.CTkLabel(row, text=res["name"], font=ctk.CTkFont(size=12, weight="bold"), anchor="w").pack(side="left", fill="x", expand=True, padx=5)
+                        ctk.CTkLabel(row, text=f"📁 {res.get('album', '')}", font=ctk.CTkFont(size=11), text_color="gray").pack(side="right", padx=10)
+
+                self.after(0, render)
+            finally:
+                self.is_scanning = False
+                self.after(0, lambda: self.set_sidebar_state("normal"))
+
+        threading.Thread(target=ingest_bg, daemon=True).start()
 
 if __name__ == "__main__":
     try:
