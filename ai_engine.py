@@ -1,6 +1,7 @@
 import os
 import re
 import sys
+import time
 import hashlib
 import base64
 from io import BytesIO
@@ -11,6 +12,12 @@ try:
     pillow_heif.register_heif_opener()
 except ImportError:
     pass
+# --- Xet OFF: DEVE stare PRIMA dell'import di huggingface_hub ---
+# huggingface_hub legge HF_HUB_DISABLE_XET all'import (constants.py -> is_xet_available()):
+# impostarla dopo l'import NON ha effetto. Il backend Xet di HF "si impicca" su alcune reti
+# sui file multi-GB; forziamo il download HTTP classico (che supporta il resume).
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 from huggingface_hub import hf_hub_download
 
 class AIEngine:
@@ -281,8 +288,7 @@ class AIEngine:
                 tasks.append(prof["vision"])
                 tasks.append(prof["mmproj"])
 
-            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
-            os.environ["HF_HUB_DISABLE_XET"] = "1"  # il backend Xet si impicca su alcune reti
+            # Xet e progress-bar gia' disabilitati a livello di modulo (prima dell'import)
 
             for repo, src_name, argus_name in tasks:
                 final_dir = self.get_models_dir()
@@ -290,10 +296,23 @@ class AIEngine:
                     continue  # gia' presente col nome Argus
                 dl_dir = self.get_models_dir(force_writable=True)
                 if progress_callback: progress_callback(f"Scaricamento {argus_name}...")
-                try:
-                    src_path = hf_hub_download(repo_id=repo, filename=src_name, local_dir=dl_dir)
-                except Exception as e:
-                    return False, f"Network Error: {str(e)}"
+                # Retry con backoff: hf_hub_download RIPRENDE (resume) i file .incomplete,
+                # quindi ritentare e' economico e assorbe gli stalli del CDN Xet-bridge di HF.
+                src_path = None
+                last_err = None
+                for attempt in range(1, 5):
+                    try:
+                        if progress_callback and attempt > 1:
+                            progress_callback(f"Scaricamento {argus_name}... (tentativo {attempt}/4)")
+                        src_path = hf_hub_download(repo_id=repo, filename=src_name, local_dir=dl_dir)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if attempt < 4:
+                            time.sleep(3 * attempt)
+                if last_err is not None or src_path is None:
+                    return False, f"Network Error: {str(last_err)}"
                 # Rinomina il file scaricato col nome ARGUS
                 dst_path = os.path.join(dl_dir, argus_name)
                 try:
