@@ -19,6 +19,65 @@ except ImportError:
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 from huggingface_hub import hf_hub_download
+import threading
+
+
+# Dimensioni approssimative (MB) dei file su Stegeno/Nexflamma_Models, solo per mostrare
+# "fatti X/Y MB" nella UI durante il download (vedi _start_progress_monitor). Se HF cambia
+# le dimensioni non e' un problema: e' solo un'etichetta informativa, non un controllo.
+_MODEL_SIZE_HINTS_MB = {
+    "Argus-Maior-text-Q4_K_M.gguf": 2100,
+    "Argus-Maior-vision-Q4_K_M.gguf": 4680,
+    "Argus-Maior-vision-mmproj.gguf": 1350,
+    "Argus-Minor-text-Q2_K.gguf": 1380,
+    "Argus-Minor-vision.gguf": 2840,
+    "Argus-Minor-vision-mmproj.gguf": 910,
+}
+
+
+def _incomplete_bytes(dl_dir):
+    """Somma i byte dei file .incomplete che huggingface_hub scrive durante il download
+    (in <dl_dir>/.cache/huggingface/download/). Usata per mostrare progresso reale invece
+    della barra "muta" (disabilitata sopra) e per capire se il CDN Xet-bridge si e' impuntato."""
+    cache_dir = os.path.join(dl_dir, ".cache", "huggingface", "download")
+    total = 0
+    if os.path.isdir(cache_dir):
+        for root, _dirs, files in os.walk(cache_dir):
+            for fn in files:
+                if fn.endswith(".incomplete"):
+                    try:
+                        total += os.path.getsize(os.path.join(root, fn))
+                    except OSError:
+                        pass
+    return total
+
+
+def _start_progress_monitor(dl_dir, argus_name, expected_mb, progress_callback, stop_event):
+    """Thread di sola lettura (non tocca il download in corso): ogni ~3s legge quanti byte
+    sono stati scritti finora e aggiorna la UI con MB scaricati + velocita', cosi' l'utente
+    vede che il download e' vivo anche quando il CDN Xet-bridge rallenta parecchio."""
+    def _run():
+        last_bytes, last_t = 0, time.time()
+        while not stop_event.is_set():
+            if stop_event.wait(3):
+                break
+            cur_bytes = _incomplete_bytes(dl_dir)
+            now = time.time()
+            speed_kbs = max(0, (cur_bytes - last_bytes) / max(now - last_t, 0.001) / 1024)
+            cur_mb = cur_bytes / (1024 * 1024)
+            if progress_callback:
+                if expected_mb:
+                    progress_callback(
+                        f"Scaricamento {argus_name}... {cur_mb:.0f}/{expected_mb:.0f} MB "
+                        f"({speed_kbs:.0f} KB/s)"
+                    )
+                else:
+                    progress_callback(f"Scaricamento {argus_name}... {cur_mb:.0f} MB ({speed_kbs:.0f} KB/s)")
+            last_bytes, last_t = cur_bytes, now
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    return th
+
 
 class AIEngine:
     def __init__(self):
@@ -298,19 +357,29 @@ class AIEngine:
                 if progress_callback: progress_callback(f"Scaricamento {argus_name}...")
                 # Retry con backoff: hf_hub_download RIPRENDE (resume) i file .incomplete,
                 # quindi ritentare e' economico e assorbe gli stalli del CDN Xet-bridge di HF.
+                # In parallelo un thread di sola lettura mostra MB scaricati + velocita' reale,
+                # cosi' l'utente vede che il download e' vivo anche se il CDN rallenta parecchio
+                # (con file da 2-5 GB uno stallo/resume ogni 10s puo' apparire "bloccato" a lungo
+                # anche se in realta' sta ancora avanzando, solo molto lentamente).
+                expected_mb = _MODEL_SIZE_HINTS_MB.get(src_name)
                 src_path = None
                 last_err = None
-                for attempt in range(1, 5):
+                for attempt in range(1, 6):
+                    stop_event = threading.Event()
+                    monitor = _start_progress_monitor(dl_dir, argus_name, expected_mb, progress_callback, stop_event)
                     try:
                         if progress_callback and attempt > 1:
-                            progress_callback(f"Scaricamento {argus_name}... (tentativo {attempt}/4)")
+                            progress_callback(f"Scaricamento {argus_name}... (tentativo {attempt}/5)")
                         src_path = hf_hub_download(repo_id=repo, filename=src_name, local_dir=dl_dir)
                         last_err = None
                         break
                     except Exception as e:
                         last_err = e
-                        if attempt < 4:
+                        if attempt < 5:
                             time.sleep(3 * attempt)
+                    finally:
+                        stop_event.set()
+                        monitor.join(timeout=1)
                 if last_err is not None or src_path is None:
                     return False, f"Network Error: {str(last_err)}"
                 # Rinomina il file scaricato col nome ARGUS
