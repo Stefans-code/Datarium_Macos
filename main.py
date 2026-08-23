@@ -257,6 +257,7 @@ class DatariumApp(ctk.CTk):
         ]
         self.offload_meta_vars = {key: ctk.StringVar(value="") for key, _ in self.offload_meta_fields}
         self.offload_notes_text = None
+        self.offload_make_proxy = ctk.BooleanVar(value=False)
 
         # Ingest Feature State (Fase 0-2: coda, trigger auto, multi-destinazione, proxy)
         self.ingest_destinations = []
@@ -2203,6 +2204,9 @@ class DatariumApp(ctk.CTk):
         self.offload_notes_text = ctk.CTkTextbox(notes_row, height=60)
         self.offload_notes_text.pack(fill="x", pady=(2, 0))
 
+        # Opzione proxy video (ffmpeg)
+        ctk.CTkCheckBox(cfg_box, text="Genera proxy video (ffmpeg) durante l'offload", variable=self.offload_make_proxy).pack(anchor="w", padx=30, pady=(14, 0))
+
         # Action Button
         ctk.CTkButton(cfg_box, text="⚡ Avvia Offload & Genera Report", fg_color="#10b981", hover_color="#059669", height=50, width=320, font=ctk.CTkFont(weight="bold", size=15), corner_radius=10, command=self.run_offload_process).pack(pady=30)
 
@@ -2289,6 +2293,7 @@ class DatariumApp(ctk.CTk):
         dests = [d for d in self.offload_destinations if d.strip()]
         algo = self.offload_algo.get()
         report_id = self.offload_report_id.get()
+        make_proxy = self.offload_make_proxy.get()
 
         # Raccogli i metadati di produzione (solo i campi compilati) per il report MHL
         production_meta = {}
@@ -2337,7 +2342,32 @@ class DatariumApp(ctk.CTk):
                     return
 
                 total_files = len(files_to_copy)
+                total_bytes = 0
+                for _x in files_to_copy:
+                    try:
+                        total_bytes += os.path.getsize(_x["path"])
+                    except Exception:
+                        pass
+
+                # Controllo spazio libero: servono total_bytes su OGNI destinazione
+                low_space = []
+                for d in dests:
+                    try:
+                        free = shutil.disk_usage(d).free
+                        if free < total_bytes:
+                            low_space.append((d, free))
+                    except Exception:
+                        pass
+                if low_space:
+                    msg = "Spazio insufficiente su: " + ", ".join(
+                        f"{os.path.basename(x[0]) or x[0]} ({self.format_file_size(x[1])} liberi / {self.format_file_size(total_bytes)} necessari)"
+                        for x in low_space)
+                    self.after(0, lambda m=msg: self.offload_status_lbl.configure(text="❌ " + m, text_color="#ef4444"))
+                    return
+
                 processed_files = 0
+                copied_bytes = 0
+                start_time = time.time()
                 results = []
 
                 for it in files_to_copy:
@@ -2364,15 +2394,26 @@ class DatariumApp(ctk.CTk):
                             os.makedirs(os.path.dirname(target_path), exist_ok=True)
 
                             self.after(0, lambda name=it["name"], dest=os.path.basename(d): self.offload_status_lbl.configure(text=f"Copia {name} in {dest}..."))
-                            try:
-                                shutil.copy2(it["path"], target_path)
-                            except OSError:
+                            # Retry copia (drive USB lenti/ballerini): fino a 3 tentativi
+                            copied_ok = False
+                            for _attempt in range(1, 4):
                                 try:
-                                    shutil.copy(it["path"], target_path)
-                                except Exception as ce:
-                                    copy_success = False
-                                    print(f"Errore copia fallita per {it['name']}: {ce}")
-                                    continue
+                                    shutil.copy2(it["path"], target_path)
+                                    copied_ok = True
+                                    break
+                                except OSError:
+                                    try:
+                                        shutil.copy(it["path"], target_path)
+                                        copied_ok = True
+                                        break
+                                    except Exception as ce:
+                                        if _attempt < 3:
+                                            time.sleep(1.5 * _attempt)
+                                        else:
+                                            print(f"Errore copia fallita per {it['name']}: {ce}")
+                            if not copied_ok:
+                                copy_success = False
+                                continue
 
                             # Verification
                             self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
@@ -2383,6 +2424,13 @@ class DatariumApp(ctk.CTk):
                                 not dest_hash or dest_hash.startswith("Error") or 
                                 dest_hash != src_hash):
                                 copy_success = False
+
+                        # Proxy video (ffmpeg) sulla prima destinazione (best-effort)
+                        if make_proxy:
+                            try:
+                                self._ingest_make_proxy_file(it["path"], os.path.join(dests[0], "Proxies"))
+                            except Exception:
+                                pass
 
                         status = "Verified" if copy_success else "Failed"
 
@@ -2421,8 +2469,21 @@ class DatariumApp(ctk.CTk):
                         })
 
                     processed_files += 1
+                    try:
+                        copied_bytes += os.path.getsize(it["path"])
+                    except Exception:
+                        pass
+                    elapsed = max(0.001, time.time() - start_time)
+                    speed = copied_bytes / elapsed
+                    remaining = max(0, total_bytes - copied_bytes)
+                    eta_s = int(remaining / speed) if speed > 0 else 0
+                    speed_str = self.format_file_size(int(speed)) + "/s"
+                    eta_str = (f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s")
                     progress_val = processed_files / total_files
-                    self.after(0, lambda val=progress_val: self.offload_progress_bar.set(val))
+                    self.after(0, lambda val=progress_val, s=speed_str, e=eta_str, n=processed_files, t=total_files: (
+                        self.offload_progress_bar.set(val),
+                        self.offload_status_lbl.configure(text=f"{n}/{t} file · {s} · ETA {e}", text_color=("gray10", "white"))
+                    ))
 
                 # Generate and save report
                 self.after(0, lambda: self.offload_status_lbl.configure(text="Generazione Report..."))
@@ -2752,6 +2813,15 @@ class DatariumApp(ctk.CTk):
         ff = (self.ffmpeg_path or "").strip() if hasattr(self, "ffmpeg_path") else ""
         if not ff or not os.path.exists(ff):
             ff = _sh.which("ffmpeg") or ""
+        if not ff:
+            # PATH ridotto quando l'app parte da Finder/launcher: usa la ricerca completa
+            # dell'engine (posizioni comuni Homebrew/MacPorts/apt oltre al PATH).
+            try:
+                ok_ff, found = self.ai.check_ffmpeg(None)
+                if ok_ff:
+                    ff = found
+            except Exception:
+                pass
         if not ff:
             return None
         try:

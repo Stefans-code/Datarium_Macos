@@ -21,7 +21,6 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 from huggingface_hub import hf_hub_download
 import threading
 
-
 # Dimensioni approssimative (MB) dei file su Stegeno/Nexflamma_Models, solo per mostrare
 # "fatti X/Y MB" nella UI durante il download (vedi _start_progress_monitor). Se HF cambia
 # le dimensioni non e' un problema: e' solo un'etichetta informativa, non un controllo.
@@ -77,6 +76,170 @@ def _start_progress_monitor(dl_dir, argus_name, expected_mb, progress_callback, 
     th = threading.Thread(target=_run, daemon=True)
     th.start()
     return th
+
+
+# ==========================================================================================
+#  Downloader HTTP multi-connessione (Range) — aggirare il throttling del CDN di HuggingFace
+# ==========================================================================================
+# Perche' esiste: dal 2026 HF serve i GGUF tramite il backend Xet. Su parecchie reti il
+# xet-bridge fa "trickle" (pochi KB/s per connessione) e un file da 2-5 GB sembra bloccato.
+# Il throttling e' PER CONNESSIONE: aprendo piu' richieste Range in parallelo la banda
+# aggregata torna normale. Qui sotto: N segmenti paralleli, ognuno su un file .partN che
+# viene ripreso (resume) se il download si interrompe, poi i pezzi vengono concatenati.
+# Se il server non supporta i Range si ricade su un singolo stream con resume, e se anche
+# quello fallisce download_model_if_needed ritenta con hf_hub_download (vedi sotto).
+
+_DL_CONNECTIONS = 4          # connessioni parallele per file
+_DL_CHUNK = 1024 * 1024      # 1 MB per read()
+_DL_SOCKET_TIMEOUT = 60      # secondi senza un solo byte prima di considerare morto il socket
+_DL_UA = "Datarium/1.0 (+https://huggingface.co)"
+
+
+def _hf_resolve_url(repo, filename):
+    return "https://huggingface.co/" + repo + "/resolve/main/" + filename + "?download=true"
+
+
+def _remote_file_info(url, timeout=30):
+    """Ritorna (dimensione_byte, supporta_range). Non solleva: (0, False) se non si sa."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": _DL_UA})
+        req.get_method = lambda: "HEAD"
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            size = int(resp.headers.get("Content-Length") or 0)
+            accepts = (resp.headers.get("Accept-Ranges") or "").lower()
+            # HF espone la dimensione reale del file LFS anche quando Content-Length manca
+            linked = resp.headers.get("X-Linked-Size")
+            if not size and linked:
+                size = int(linked)
+        return size, ("bytes" in accepts)
+    except Exception:
+        return 0, False
+
+
+def _part_path(dest_path, idx):
+    return dest_path + ".part" + str(idx)
+
+
+def _download_range(url, part_file, start, end, stop_event, errors, idx):
+    """Scarica [start, end] (inclusi) in part_file, riprendendo da quanto gia' presente."""
+    import urllib.request
+    for attempt in range(1, 7):
+        if stop_event.is_set():
+            return
+        have = os.path.getsize(part_file) if os.path.exists(part_file) else 0
+        if have > (end - start + 1):
+            # pezzo sporco da un run precedente: ributtalo via e riparti
+            try:
+                os.remove(part_file)
+            except OSError:
+                pass
+            have = 0
+        if start + have > end:
+            return  # segmento gia' completo
+        headers = {"User-Agent": _DL_UA, "Range": "bytes=" + str(start + have) + "-" + str(end)}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_DL_SOCKET_TIMEOUT) as resp:
+                with open(part_file, "ab") as fh:
+                    while not stop_event.is_set():
+                        chunk = resp.read(_DL_CHUNK)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            if os.path.getsize(part_file) >= (end - start + 1):
+                return  # completo
+            # stream chiuso prima del previsto: ritenta, il resume riparte da dove siamo
+        except Exception as exc:
+            errors[idx] = exc
+        if attempt < 6 and not stop_event.is_set():
+            time.sleep(min(2 * attempt, 10))
+    if not stop_event.is_set():
+        have = os.path.getsize(part_file) if os.path.exists(part_file) else 0
+        if start + have <= end:
+            errors[idx] = errors.get(idx) or IOError(
+                "segmento " + str(idx) + " incompleto (" + str(have) + "/" + str(end - start + 1) + " byte)")
+
+
+def _parts_bytes(dest_path, n_parts):
+    total = 0
+    for i in range(n_parts):
+        try:
+            total += os.path.getsize(_part_path(dest_path, i))
+        except OSError:
+            pass
+    return total
+
+
+def _download_parallel(url, dest_path, label, total_size, progress_callback, connections=_DL_CONNECTIONS):
+    """Scarica url in dest_path con `connections` richieste Range parallele.
+    Solleva un'eccezione se non ci riesce (il chiamante ricade su hf_hub_download)."""
+    if total_size <= 0:
+        raise IOError("dimensione remota sconosciuta")
+    n = max(1, min(connections, 8))
+    seg = total_size // n
+    bounds = []
+    for i in range(n):
+        start = i * seg
+        end = (total_size - 1) if i == n - 1 else (start + seg - 1)
+        bounds.append((start, end))
+
+    stop_event = threading.Event()
+    errors = {}
+    threads = []
+    for i, (start, end) in enumerate(bounds):
+        th = threading.Thread(target=_download_range,
+                              args=(url, _part_path(dest_path, i), start, end, stop_event, errors, i),
+                              daemon=True)
+        th.start()
+        threads.append(th)
+
+    # progresso: somma dei .partN (nessuna interferenza col download, sola lettura)
+    total_mb = total_size / (1024 * 1024)
+    last_bytes, last_t = _parts_bytes(dest_path, n), time.time()
+    try:
+        while any(th.is_alive() for th in threads):
+            time.sleep(2)
+            cur = _parts_bytes(dest_path, n)
+            now = time.time()
+            speed = max(0, (cur - last_bytes) / max(now - last_t, 0.001) / 1024)
+            if progress_callback:
+                progress_callback("Scaricamento " + label + "... " + str(int(cur / (1024 * 1024))) + "/"
+                                  + str(int(total_mb)) + " MB (" + str(int(speed)) + " KB/s, "
+                                  + str(n) + " connessioni)")
+            last_bytes, last_t = cur, now
+    except BaseException:
+        stop_event.set()   # interruzione dell'app: i .partN restano per il resume
+        raise
+    for th in threads:
+        th.join(timeout=30)
+
+    got = _parts_bytes(dest_path, n)
+    if got < total_size:
+        raise IOError("download incompleto: " + str(got) + "/" + str(total_size) + " byte"
+                      + (" - " + str(list(errors.values())[0]) if errors else ""))
+
+    # concatena i pezzi nel file finale, poi ripulisce
+    if progress_callback:
+        progress_callback("Finalizzazione " + label + "...")
+    tmp_final = dest_path + ".merging"
+    with open(tmp_final, "wb") as out:
+        for i in range(n):
+            with open(_part_path(dest_path, i), "rb") as pf:
+                while True:
+                    buf = pf.read(4 * 1024 * 1024)
+                    if not buf:
+                        break
+                    out.write(buf)
+    if os.path.exists(dest_path):
+        os.remove(dest_path)
+    os.replace(tmp_final, dest_path)
+    for i in range(n):
+        try:
+            os.remove(_part_path(dest_path, i))
+        except OSError:
+            pass
+    return dest_path
 
 
 class AIEngine:
@@ -330,7 +493,7 @@ class AIEngine:
                     "recente di llama-cpp-python. Aggiorna la libreria oppure usa il profilo LEGGERO."
                 )
             return HandlerCls(clip_model_path=clip_model_path)
-        return fmt.Llava15ChatHandler(clip_model_path=clip_model_path)
+        return fmt.Llava15ChatHandler(clip_model_path=clip_model_path) 
 
     def download_model_if_needed(self, vision_mode=True, progress_callback=None, quality=None):
         """Scarica (se serve) e carica i modelli ARGUS del profilo scelto. Ritorna (ok, err_msg).
@@ -364,6 +527,34 @@ class AIEngine:
                 expected_mb = _MODEL_SIZE_HINTS_MB.get(src_name)
                 src_path = None
                 last_err = None
+                dst_path = os.path.join(dl_dir, argus_name)
+
+                # --- Strada principale: download multi-connessione (Range) ---
+                # Il throttling del CDN Xet e' per-connessione: 4 richieste Range parallele
+                # riportano la banda a valori normali su file da 2-5 GB. I .partN sopravvivono
+                # a una chiusura dell'app, quindi un riavvio RIPRENDE da dove era arrivato.
+                url = _hf_resolve_url(repo, src_name)
+                total_size, supports_range = _remote_file_info(url)
+                if total_size > 0 and supports_range:
+                    for attempt in range(1, 4):
+                        try:
+                            if progress_callback:
+                                suffix = f" (tentativo {attempt}/3)" if attempt > 1 else ""
+                                progress_callback(f"Scaricamento {argus_name}...{suffix}")
+                            _download_parallel(url, dst_path, argus_name, total_size, progress_callback)
+                            src_path = dst_path
+                            last_err = None
+                            break
+                        except Exception as e:
+                            last_err = e
+                            if attempt < 3:
+                                time.sleep(3 * attempt)
+                    if src_path:
+                        continue  # file pronto e gia' col nome ARGUS: prossimo modello
+                    if progress_callback:
+                        progress_callback(f"Download veloce non riuscito, passo alla modalita' classica...")
+
+                # --- Ripiego: hf_hub_download (piu' lento ma con la sua logica di resume) ---
                 for attempt in range(1, 6):
                     stop_event = threading.Event()
                     monitor = _start_progress_monitor(dl_dir, argus_name, expected_mb, progress_callback, stop_event)
@@ -383,7 +574,6 @@ class AIEngine:
                 if last_err is not None or src_path is None:
                     return False, f"Network Error: {str(last_err)}"
                 # Rinomina il file scaricato col nome ARGUS
-                dst_path = os.path.join(dl_dir, argus_name)
                 try:
                     if os.path.abspath(src_path) != os.path.abspath(dst_path):
                         if os.path.exists(dst_path): os.remove(dst_path)
@@ -842,20 +1032,33 @@ class AIEngine:
             except Exception as e:
                 return False, f"Errore esecuzione FFMPEG in PATH: {e}"
                 
-        # 3. Tentativo finale su Windows in posizioni comuni
+        # 3. Tentativo finale in posizioni comuni.
+        # NB macOS/Linux: le app avviate da Finder/launcher NON ereditano il PATH della
+        # shell (su macOS resta /usr/bin:/bin:/usr/sbin:/sbin), quindi shutil.which() non
+        # vede ffmpeg installato con Homebrew/MacPorts anche quando c'e'.
         if os.name == "nt":
             common_paths = [
                 r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
                 r"C:\ffmpeg\bin\ffmpeg.exe"
             ]
-            for p in common_paths:
-                if os.path.exists(p):
-                    try:
-                        res = subprocess.run([p, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-                        if res.returncode == 0:
-                            return True, p
-                    except Exception:
-                        pass
+        else:
+            common_paths = [
+                "/opt/homebrew/bin/ffmpeg",   # macOS Apple Silicon (Homebrew)
+                "/usr/local/bin/ffmpeg",      # macOS Intel (Homebrew) / build manuali
+                "/opt/local/bin/ffmpeg",      # macOS MacPorts
+                "/usr/bin/ffmpeg",            # Linux (apt/dnf/pacman)
+                "/snap/bin/ffmpeg",           # Linux snap
+                "/var/lib/flatpak/exports/bin/ffmpeg",
+                os.path.expanduser("~/bin/ffmpeg"),
+            ]
+        for p in common_paths:
+            if os.path.exists(p):
+                try:
+                    res = subprocess.run([p, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
+                    if res.returncode == 0:
+                        return True, p
+                except Exception:
+                    pass
                         
         return False, "FFMPEG non trovato nel sistema. Configuralo nelle Impostazioni."
 
