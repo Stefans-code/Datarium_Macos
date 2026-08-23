@@ -400,6 +400,17 @@ class AIEngine:
             return "Intel"
         return None
 
+    def _user_models_dir(self):
+        """Cartella modelli utente, sempre scrivibile (non la crea)."""
+        import platform
+        system = platform.system()
+        if system == "Windows":
+            base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
+            return os.path.join(base, "Datarium", "models")
+        if system == "Darwin":  # macOS
+            return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium", "models")
+        return os.path.join(os.path.expanduser("~"), ".datarium", "models")
+
     def get_models_dir(self, force_writable=False):
         """
         Ritorna la cartella dei modelli, provando prima accanto all'eseguibile (in sola lettura)
@@ -428,14 +439,8 @@ class AIEngine:
         # 3. Altrimenti (es. macOS, o Windows se vogliamo scaricare un modello mancante),
         # usiamo una cartella utente scrivibile per non incorrere in PermissionError.
         try:
-            if system == "Windows":
-                base = os.environ.get("LOCALAPPDATA", os.path.join(os.path.expanduser("~"), "AppData", "Local"))
-                path = os.path.join(base, "Datarium", "models")
-            elif system == "Darwin": # macOS
-                path = os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Datarium", "models")
-            else:
-                path = os.path.join(os.path.expanduser("~"), ".datarium", "models")
-                
+            path = self._user_models_dir()
+
             if force_writable:
                 os.makedirs(path, exist_ok=True)
             return path
@@ -445,17 +450,42 @@ class AIEngine:
                 os.makedirs(exe_dir_models, exist_ok=True)
             return exe_dir_models
 
+    def get_model_dirs(self):
+        """Tutte le cartelle in cui possono trovarsi i modelli, in ordine di preferenza:
+        accanto all'eseguibile (installer Windows) e cartella utente scrivibile (download
+        in-app). Serve perche' le due possono coesistere: se l'installer NON ha scaricato i
+        modelli, l'app li mette nella cartella utente e da li' vanno anche riletti."""
+        dirs = []
+        primary = self.get_models_dir()      # senza effetti collaterali: non crea nulla
+        if primary:
+            dirs.append(primary)
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.join(os.path.dirname(sys.executable), "models")
+            if exe_dir not in dirs:
+                dirs.append(exe_dir)
+            user_dir = self._user_models_dir()
+            if user_dir and user_dir not in dirs:
+                dirs.append(user_dir)
+        return dirs
+
+    def resolve_model_file(self, name):
+        """Percorso del modello `name` cercandolo in tutte le cartelle candidate, o None."""
+        for d in self.get_model_dirs():
+            try:
+                candidate = os.path.join(d, name)
+                if os.path.exists(candidate):
+                    return candidate
+            except Exception:
+                continue
+        return None
+
     def check_models_missing(self):
         """Manca qualcosa? False se almeno un profilo (slim/full) ha testo + visione + mmproj."""
         try:
-            d = self.get_models_dir()
-            if not d or not os.path.exists(d):
-                return True
             for prof in self.PROFILES.values():
-                t_ok = os.path.exists(os.path.join(d, prof["text"][2]))
-                v_ok = os.path.exists(os.path.join(d, prof["vision"][2]))
-                p_ok = os.path.exists(os.path.join(d, prof["mmproj"][2]))
-                if t_ok and v_ok and p_ok:
+                if (self.resolve_model_file(prof["text"][2])
+                        and self.resolve_model_file(prof["vision"][2])
+                        and self.resolve_model_file(prof["mmproj"][2])):
                     return False  # almeno un profilo completo presente
             return True
         except Exception:
@@ -465,14 +495,11 @@ class AIEngine:
         """Rileva quale profilo e' GIA' installato nei modelli: 'full', 'slim' o None.
         Serve a usare SEMPRE il profilo scelto/installato senza passare da slim a full."""
         try:
-            d = self.get_models_dir()
-            if not d or not os.path.exists(d):
-                return None
             for q in ("full", "slim"):
                 prof = self.PROFILES[q]
-                if (os.path.exists(os.path.join(d, prof["text"][2]))
-                        and os.path.exists(os.path.join(d, prof["vision"][2]))
-                        and os.path.exists(os.path.join(d, prof["mmproj"][2]))):
+                if (self.resolve_model_file(prof["text"][2])
+                        and self.resolve_model_file(prof["vision"][2])
+                        and self.resolve_model_file(prof["mmproj"][2])):
                     return q
         except Exception:
             pass
@@ -513,9 +540,8 @@ class AIEngine:
             # Xet e progress-bar gia' disabilitati a livello di modulo (prima dell'import)
 
             for repo, src_name, argus_name in tasks:
-                final_dir = self.get_models_dir()
-                if os.path.exists(os.path.join(final_dir, argus_name)):
-                    continue  # gia' presente col nome Argus
+                if self.resolve_model_file(argus_name):
+                    continue  # gia' presente col nome Argus (accanto all'exe o in cartella utente)
                 dl_dir = self.get_models_dir(force_writable=True)
                 if progress_callback: progress_callback(f"Scaricamento {argus_name}...")
                 # Retry con backoff: hf_hub_download RIPRENDE (resume) i file .incomplete,
@@ -590,9 +616,9 @@ class AIEngine:
 
                 n_threads = os.cpu_count() or 4
                 final_dir = self.get_models_dir()
-                t_path = os.path.join(final_dir, prof["text"][2])
-                v_path = os.path.join(final_dir, prof["vision"][2])
-                p_path = os.path.join(final_dir, prof["mmproj"][2])
+                t_path = self.resolve_model_file(prof["text"][2]) or os.path.join(final_dir, prof["text"][2])
+                v_path = self.resolve_model_file(prof["vision"][2]) or os.path.join(final_dir, prof["vision"][2])
+                p_path = self.resolve_model_file(prof["mmproj"][2]) or os.path.join(final_dir, prof["mmproj"][2])
 
                 hw = self.detect_hardware()
                 ngl = hw["n_gpu_layers"]
