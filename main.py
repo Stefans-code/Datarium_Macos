@@ -42,6 +42,24 @@ from license_manager import LicenseManager
 import cv2
 from face_memory import FaceMemoryManager
 
+# Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
+# aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
+APP_VERSION = "1.2.0"
+
+def _version_tuple(v):
+    """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
+    e' False come confronto lessicografico di stringhe (il carattere '1' < '2'), quindi un
+    aggiornamento reale da 1.2.x a 1.10.x smetteva di essere rilevato. Pezzi non numerici
+    (es. suffissi '-beta') vengono ignorati per sicurezza invece di far esplodere il parsing."""
+    parts = []
+    for p in str(v).strip().split('.'):
+        digits = ''.join(ch for ch in p if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts) if parts else (0,)
+
+def _is_newer_version(remote_version, current_version):
+    return _version_tuple(remote_version) > _version_tuple(current_version)
+
 ctk.set_appearance_mode("Dark")
 
 # Risolvi il percorso assoluto per evitare problemi in modalità frozen (PyInstaller)
@@ -206,7 +224,11 @@ class DatariumApp(ctk.CTk):
         self.ai = AIEngine()
         self.license = LicenseManager()
         self.face_mem = FaceMemoryManager()  # i dati volti vivono in LOCALAPPDATA/faces, non in models/
-        
+
+        # Check aggiornamenti automatico e silenzioso all'avvio (non blocca la UI: parte
+        # su un thread dopo che la finestra e' gia' visibile, e non disturba se offline).
+        self.after(3000, self.check_software_updates_silent)
+
         # State
         self.source_folder = ctk.StringVar(value="")
         self.control_folder = ctk.StringVar(value="")
@@ -786,7 +808,7 @@ class DatariumApp(ctk.CTk):
         upd_box = ctk.CTkFrame(page, corner_radius=10)
         upd_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(upd_box, text="Aggiornamenti Software", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
-        ctk.CTkLabel(upd_box, text="Versione corrente: v1.2.0", text_color="gray").pack(anchor="w", padx=20)
+        ctk.CTkLabel(upd_box, text=f"Versione corrente: v{APP_VERSION}", text_color="gray").pack(anchor="w", padx=20)
         self.btn_check_upd = ctk.CTkButton(upd_box, text="Verifica Aggiornamenti", command=self.check_software_updates)
         self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 15))
 
@@ -918,36 +940,62 @@ class DatariumApp(ctk.CTk):
             else:
                 self.lic_status_lbl.configure(text=f"Errore: {msg}", text_color="#ef4444")
 
-    def check_software_updates(self):
-        from tkinter import messagebox
+    def _fetch_remote_version_info(self):
+        """Interroga version.json. Ritorna il dict remoto o solleva un'eccezione."""
         import urllib.request
         import json
-        import webbrowser
-        self.btn_check_upd.configure(state="disabled", text="Verifica in corso...")
-        
-        def check_upd_bg():
-            current_version = "1.2.0"
-            try:
-                url = "https://nexflamma.net/version.json"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=5) as response:
-                    data = json.loads(response.read().decode())
-                    remote_version = data.get("version", "1.2.0")
-                    download_url = data.get("download_url", "")
-                    changelog = data.get("changelog", "Miglioramenti generali.")
+        url = "https://nexflamma.net/version.json"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return json.loads(response.read().decode())
 
-                    self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
-                    
-                    if remote_version > current_version:
-                        msg = f"Una nuova versione di Datarium è disponibile: v{remote_version}!\n\nChangelog:\n{changelog}\n\nVuoi scaricarla ora?"
-                        if messagebox.askyesno("Nuovo Aggiornamento Disponibile", msg):
-                            webbrowser.open(download_url)
-                    else:
-                        self.after(0, lambda: messagebox.showinfo("Aggiornamenti", f"Il software è aggiornato alla versione più recente (v{current_version})!"))
+    def _prompt_update_available(self, data):
+        from tkinter import messagebox
+        import webbrowser
+        remote_version = data.get("version", APP_VERSION)
+        download_url = data.get("download_url", "")
+        changelog = data.get("changelog", "Miglioramenti generali.")
+        sha256 = data.get("sha256", "")
+        msg = f"Una nuova versione di Datarium è disponibile: v{remote_version}!\n\nChangelog:\n{changelog}"
+        if sha256:
+            msg += f"\n\nSHA-256 dell'installer (verifica dopo il download):\n{sha256}"
+        msg += "\n\nVuoi scaricarla ora?"
+        if messagebox.askyesno("Nuovo Aggiornamento Disponibile", msg):
+            webbrowser.open(download_url)
+
+    def check_software_updates(self):
+        """Verifica manuale (bottone): mostra sempre un esito, anche 'sei aggiornato' o errore."""
+        from tkinter import messagebox
+        self.btn_check_upd.configure(state="disabled", text="Verifica in corso...")
+
+        def check_upd_bg():
+            try:
+                data = self._fetch_remote_version_info()
+                remote_version = data.get("version", APP_VERSION)
+                self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
+                if _is_newer_version(remote_version, APP_VERSION):
+                    self.after(0, lambda: self._prompt_update_available(data))
+                else:
+                    self.after(0, lambda: messagebox.showinfo("Aggiornamenti", f"Il software è aggiornato alla versione più recente (v{APP_VERSION})!"))
             except Exception as e:
                 err = str(e)
                 self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
                 self.after(0, lambda: messagebox.showerror("Errore", f"Impossibile verificare gli aggiornamenti: {err}"))
+
+        threading.Thread(target=check_upd_bg, daemon=True).start()
+
+    def check_software_updates_silent(self):
+        """Verifica automatica all'avvio: parla solo se c'e' davvero un aggiornamento.
+        Nessun popup di errore/‘sei aggiornato’ per non disturbare l'utente ad ogni avvio
+        (es. offline, DNS lento, server irraggiungibile)."""
+        def check_upd_bg():
+            try:
+                data = self._fetch_remote_version_info()
+                remote_version = data.get("version", APP_VERSION)
+                if _is_newer_version(remote_version, APP_VERSION):
+                    self.after(0, lambda: self._prompt_update_available(data))
+            except Exception:
+                pass
 
         threading.Thread(target=check_upd_bg, daemon=True).start()
 

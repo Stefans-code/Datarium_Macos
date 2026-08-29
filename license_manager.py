@@ -7,9 +7,24 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 class LicenseManager:
-    # Deve corrispondere a license_maker.py
-    LICENSE_SECRET = "vocius_offline_secure_key_2026_x99"
-    ALGORITHM = "HS256"
+    # SECURITY: verifica RS256 con SOLO la chiave PUBBLICA (asimmetrica).
+    # Prima si usava HS256 con un secret simmetrico hardcoded qui: siccome con HMAC la
+    # stessa chiave firma E verifica, chiunque estraesse quella stringa dall'eseguibile
+    # distribuito poteva firmarsi da solo licenze valide per qualsiasi HWID/scadenza,
+    # bypassando completamente Stripe/Supabase. Con RS256 questa e' la chiave PUBBLICA:
+    # puo' verificare una firma ma non puo' crearne una nuova, quindi e' sicura da
+    # distribuire dentro il binario. La chiave PRIVATA che firma vive solo nei secrets
+    # della Edge Function `sign-license` (mai su un pc cliente).
+    LICENSE_PUBLIC_KEY = """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAz9Wiff+MVqgDalOKbonM
+qmvjZgEQx3IaCyl0aBkZykNQVhvjpd+zS/pOPlP5cb8gqwpk72qW4MoUK/vErWgW
+jEAaEDJ4S7kEhw39OwE9pY0EMB50WuLuJXKHDFZoOT8gn8nt4Q4z+LJuEd5LnF22
+eS1+o7mVIuOSmThl5hfdZTk5cQiIoINMJnsGO3lIgkLqc6rdhgl6W67O4/vIDJg+
+mcNC+Kw8Srh5GkJ6qORapRSXXnoN6HPoYR3EwJI4WAkGOagorVcKImseUIXaJ7FA
+6FGqCIX6WI2cA8m4xlBgAJMG5qgsTb0Rqrc/jDPAoj0vKNWkEOuGoDICCjw+Gtxr
+6wIDAQAB
+-----END PUBLIC KEY-----"""
+    ALGORITHM = "RS256"
     TRIAL_DAYS = 30
 
     def __init__(self):
@@ -184,7 +199,7 @@ class LicenseManager:
                 return False, "Licenza mancante"
 
         try:
-            payload = jwt.decode(token, self.LICENSE_SECRET, algorithms=[self.ALGORITHM])
+            payload = jwt.decode(token, self.LICENSE_PUBLIC_KEY, algorithms=[self.ALGORITHM])
             
             # Controllo HWID
             if payload.get("hwid") != current_hwid:
