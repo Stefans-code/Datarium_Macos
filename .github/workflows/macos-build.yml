@@ -45,7 +45,10 @@ jobs:
         # e non dovrebbe servire OpenSSL di sistema, ma installarla mentre e' ancora visibile
         # evita qualunque ripiego su build da sorgente (motivo per cui era stata rimossa in
         # #62 — allora non serviva a nulla, ora invece serve per RS256).
-        ${{ matrix.prefix }} python -m pip install --only-binary=:all: cryptography --no-cache-dir
+        # Pinnata <49: da quella versione cryptography pubblica solo wheel arm64 per macOS
+        # (niente x86_64/universal2), quindi sotto Rosetta pip ripiegherebbe su una build da
+        # sorgente Rust (motivo del fallimento reale). <49 e' l'ultima serie con universal2.
+        ${{ matrix.prefix }} python -m pip install --only-binary=:all: "cryptography<49" --no-cache-dir
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           CMAKE_ARGS="-DGGML_METAL=on" FORCE_CMAKE=1 python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         else
