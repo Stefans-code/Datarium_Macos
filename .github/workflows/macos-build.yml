@@ -40,6 +40,12 @@ jobs:
     - name: Install dependencies
       run: |
         ${{ matrix.prefix }} python -m pip install --upgrade pip --no-cache-dir
+        # cryptography (needed by PyJWT for RS256 license verification) PRIMA di nascondere
+        # OpenSSL qui sotto: la wheel precompilata di cryptography per x86_64 esiste su PyPI
+        # e non dovrebbe servire OpenSSL di sistema, ma installarla mentre e' ancora visibile
+        # evita qualunque ripiego su build da sorgente (motivo per cui era stata rimossa in
+        # #62 — allora non serviva a nulla, ora invece serve per RS256).
+        ${{ matrix.prefix }} python -m pip install --only-binary=:all: cryptography --no-cache-dir
         if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
           CMAKE_ARGS="-DGGML_METAL=on" FORCE_CMAKE=1 python -m pip install llama-cpp-python==0.3.28 --no-cache-dir
         else
