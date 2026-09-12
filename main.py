@@ -811,7 +811,13 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(upd_box, text="Aggiornamenti Software", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         ctk.CTkLabel(upd_box, text=f"Versione corrente: v{APP_VERSION}", text_color="gray").pack(anchor="w", padx=20)
         self.btn_check_upd = ctk.CTkButton(upd_box, text="Verifica Aggiornamenti", command=self.check_software_updates)
-        self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 15))
+        self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 5))
+
+        self.upd_progress = ctk.CTkProgressBar(upd_box)
+        self.upd_progress.set(0)
+        self.upd_progress.pack(fill="x", padx=20, pady=(5, 2))
+        self.upd_status_lbl = ctk.CTkLabel(upd_box, text="", font=ctk.CTkFont(size=11), text_color="gray")
+        self.upd_status_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
         # Test velocità disco (diagnosi hardware vs software)
         bench_box = ctk.CTkFrame(page, corner_radius=10)
@@ -1229,19 +1235,139 @@ class DatariumApp(ctk.CTk):
         with urllib.request.urlopen(req, timeout=5) as response:
             return json.loads(response.read().decode())
 
+    def _pick_platform_update_info(self, data):
+        """
+        version.json può avere un blocco per piattaforma ("windows"/"mac"/"linux"
+        con download_url/sha256 propri) oltre ai campi top-level download_url/sha256
+        (retrocompatibilità con la versione precedente del file, un solo installer
+        per tutte le piattaforme). Se il blocco specifico manca, si ripiega sul
+        top-level.
+        """
+        import platform
+        key = {"Windows": "windows", "Darwin": "mac"}.get(platform.system(), "linux")
+        block = data.get(key) or {}
+        return {
+            "download_url": block.get("download_url") or data.get("download_url", ""),
+            "sha256": block.get("sha256") or data.get("sha256", ""),
+        }
+
     def _prompt_update_available(self, data):
         from tkinter import messagebox
-        import webbrowser
         remote_version = data.get("version", APP_VERSION)
-        download_url = data.get("download_url", "")
         changelog = data.get("changelog", "Miglioramenti generali.")
-        sha256 = data.get("sha256", "")
+        info = self._pick_platform_update_info(data)
         msg = f"Una nuova versione di Datarium è disponibile: v{remote_version}!\n\nChangelog:\n{changelog}"
-        if sha256:
-            msg += f"\n\nSHA-256 dell'installer (verifica dopo il download):\n{sha256}"
-        msg += "\n\nVuoi scaricarla ora?"
+        if not info["download_url"]:
+            msg += "\n\n(Nessun link di download disponibile per questa piattaforma.)"
+            messagebox.showinfo("Nuovo Aggiornamento Disponibile", msg)
+            return
+        msg += "\n\nVuoi scaricarla e installarla ora?"
         if messagebox.askyesno("Nuovo Aggiornamento Disponibile", msg):
-            webbrowser.open(download_url)
+            self.show_page("Settings")
+            self.start_self_update(info)
+
+    def start_self_update(self, info):
+        """
+        Scarica l'installer in background con progresso reale, verifica il SHA-256
+        (se fornito da version.json) e poi lo avvia: su Windows in modo silenzioso
+        (l'utente non deve più cliccare 'Avanti' più volte), chiudendo Datarium subito
+        dopo. Su macOS/Linux non esiste un install silenzioso sicuro da automatizzare
+        alla cieca (DMG da montare, AppImage da sostituire): li apriamo/mostriamo
+        appena scaricati e verificati, cosa comunque più efficiente di aprire solo
+        il browser e lasciare che l'utente trovi da solo il link.
+        """
+        from tkinter import messagebox
+        url = info["download_url"]
+        sha256_expected = info.get("sha256", "")
+
+        self.btn_check_upd.configure(state="disabled", text="Aggiornamento in corso...")
+        self.upd_progress.set(0)
+        self.upd_status_lbl.configure(text="Avvio download...")
+
+        def worker():
+            try:
+                local_path = self._download_update_file(url)
+                if sha256_expected:
+                    self.after(0, lambda: self.upd_status_lbl.configure(text="Verifica integrità (SHA-256)..."))
+                    actual = self.compute_hash(local_path, "SHA-256")
+                    if not actual or actual.lower() != sha256_expected.lower():
+                        try:
+                            os.remove(local_path)
+                        except Exception:
+                            pass
+                        raise RuntimeError(
+                            "Il file scaricato non corrisponde all'hash atteso: download corrotto o "
+                            "manomesso. Aggiornamento annullato per sicurezza."
+                        )
+                self.after(0, lambda: self._finish_self_update(local_path))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: messagebox.showerror("Aggiornamento fallito", err))
+                self.after(0, lambda: self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti"))
+                self.after(0, lambda: self.upd_status_lbl.configure(text=""))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_update_file(self, url):
+        """Scarica url a un file temporaneo con progresso; ritorna il percorso locale.
+        Usa urllib (stdlib), lo stesso approccio già in uso altrove nel codebase
+        (_fetch_remote_version_info, ai_engine.py) — 'requests' non è tra le
+        dipendenze installate, usarlo qui avrebbe fatto fallire il download."""
+        import urllib.request
+        import tempfile
+        name = os.path.basename(url.split("?")[0]) or "datarium_update.bin"
+        local_path = os.path.join(tempfile.gettempdir(), name)
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            total = int(resp.headers.get("Content-Length", 0)) or 0
+            done = 0
+            with open(local_path, "wb") as f:
+                while True:
+                    chunk = resp.read(512 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    frac = min(done / total, 1.0) if total else 0
+                    d_str, t_str = self.format_file_size(done), self.format_file_size(total) if total else "?"
+                    self.after(0, lambda v=frac: self.upd_progress.set(v))
+                    self.after(0, lambda d=d_str, t=t_str: self.upd_status_lbl.configure(text=f"Download: {d} / {t}"))
+        return local_path
+
+    def _finish_self_update(self, local_path):
+        from tkinter import messagebox
+        import platform
+        import subprocess
+        system = platform.system()
+        self.upd_progress.set(1)
+        self.upd_status_lbl.configure(text="Download completato e verificato.")
+
+        if system == "Windows":
+            if messagebox.askyesno(
+                "Aggiornamento pronto",
+                "Download verificato. Datarium si chiuderà e l'installazione della nuova "
+                "versione partirà automaticamente, senza altri click. Continuare?"
+            ):
+                subprocess.Popen([local_path, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"])
+                self.after(300, lambda: os._exit(0))
+                return
+        elif system == "Darwin":
+            messagebox.showinfo(
+                "Aggiornamento scaricato",
+                f"Il nuovo installer è stato verificato e scaricato in:\n{local_path}\n\n"
+                "Si aprirà ora: trascina Datarium nella cartella Applicazioni per completare "
+                "l'aggiornamento."
+            )
+            subprocess.Popen(["open", local_path])
+        else:
+            messagebox.showinfo(
+                "Aggiornamento scaricato",
+                f"Il nuovo AppImage è stato verificato e scaricato in:\n{local_path}\n\n"
+                "Sostituisci il file precedente con questo per completare l'aggiornamento."
+            )
+            subprocess.Popen(["xdg-open", os.path.dirname(local_path)])
+
+        self.btn_check_upd.configure(state="normal", text="Verifica Aggiornamenti")
 
     def check_software_updates(self):
         """Verifica manuale (bottone): mostra sempre un esito, anche 'sei aggiornato' o errore."""
