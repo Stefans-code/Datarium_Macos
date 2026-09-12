@@ -2967,8 +2967,9 @@ class DatariumApp(ctk.CTk):
 
                         status = "Verified" if copy_success else "Failed"
 
-                        # Estrazione metadati REALI del media (risoluzione, durata, codec, bitrate...)
-                        media_info = ReportGenerator.extract_media_info(it["path"])
+                        # Estrazione metadati REALI del media (risoluzione, durata, codec,
+                        # bitrate, timecode...): ffprobe se configurato, cv2 come ripiego.
+                        media_info = ReportGenerator.extract_media_info(it["path"], self.ffmpeg_path)
 
                         results.append({
                             "name": it["name"],
@@ -2989,7 +2990,8 @@ class DatariumApp(ctk.CTk):
                             "shot": media_info["shot"],
                             "frames": media_info["frames"],
                             "bitrate": media_info["bitrate"],
-                            "audio": media_info["audio"]
+                            "audio": media_info["audio"],
+                            "timecode": media_info.get("timecode", "N/A")
                         })
 
                     except Exception as e:
@@ -3327,7 +3329,7 @@ class DatariumApp(ctk.CTk):
                     n_ok += 1
                 mtime = os.path.getmtime(it["path"])
                 ctime = os.path.getctime(it["path"])
-                mi = ReportGenerator.extract_media_info(it["path"])
+                mi = ReportGenerator.extract_media_info(it["path"], self.ffmpeg_path)
                 results.append({
                     "name": it["name"], "path": it["path"], "size_bytes": sz,
                     "size_str": self.format_file_size(sz),
@@ -3337,6 +3339,7 @@ class DatariumApp(ctk.CTk):
                     "media_format": mi["media_format"], "codec": mi["codec"], "duration": mi["duration"],
                     "resolution": mi["resolution"], "camera": mi["camera"], "shot": album,
                     "frames": mi["frames"], "bitrate": mi["bitrate"], "audio": mi["audio"], "album": album,
+                    "timecode": mi.get("timecode", "N/A"),
                 })
             except Exception as e:
                 print(f"Ingest errore su {it['name']}: {e}")

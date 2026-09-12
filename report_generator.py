@@ -584,9 +584,135 @@ class ReportGenerator:
             return []
 
     @staticmethod
-    def extract_media_info(file_path):
-        """Estrae metadati REALI (risoluzione, durata, codec, bitrate, camera) da video e immagini.
-        Ritorna sempre un dizionario; i campi non disponibili valgono 'N/A' (mai dati fittizi)."""
+    def _resolve_ffprobe(ffmpeg_path):
+        """Deriva il percorso di ffprobe da quello di ffmpeg (di norma nella stessa cartella
+        della stessa distribuzione), con ripiego sul PATH di sistema. Nessuna esecuzione qui:
+        se il file non esiste il chiamante ricade su cv2 senza errori."""
+        import shutil
+        candidates = []
+        if ffmpeg_path:
+            base_dir = os.path.dirname(ffmpeg_path)
+            name = "ffprobe.exe" if ffmpeg_path.lower().endswith(".exe") else "ffprobe"
+            candidates.append(os.path.join(base_dir, name))
+        which_probe = shutil.which("ffprobe")
+        if which_probe:
+            candidates.append(which_probe)
+        for c in candidates:
+            if c and os.path.isfile(c):
+                return c
+        return None
+
+    @staticmethod
+    def _ffprobe_media_info(file_path, ffprobe_path):
+        """
+        Interroga ffprobe in JSON per un set di metadati molto più ampio di quanto
+        cv2.VideoCapture riesca a leggere: contenitori professionali (MXF, ProRes, BRAW
+        con IDT) e soprattutto il TIMECODE incorporato, che cv2 non espone mai.
+
+        Ritorna None se ffprobe non apre il file: e' il caso, tra gli altri, dei RAW
+        proprietari delle cineprese (es. RED .R3D) per cui NON esiste un demuxer libero
+        ne' in ffmpeg ne' altrove — solo l'SDK proprietario RED (a licenza, non incluso
+        in Datarium) sa leggerli. In quel caso resta 'N/A': onesto, non un dato inventato.
+        """
+        import subprocess
+        import json
+        try:
+            res = subprocess.run(
+                [ffprobe_path, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20
+            )
+            if res.returncode != 0 or not res.stdout:
+                return None
+            data = json.loads(res.stdout)
+        except Exception:
+            return None
+
+        fmt = data.get("format", {}) or {}
+        streams = data.get("streams", []) or []
+        v_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+        a_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
+        if not v_stream and not a_stream:
+            return None  # ffprobe ha "aperto" il file ma non ci ha trovato media utilizzabile
+
+        info = {
+            "media_format": "Video" if v_stream else "Audio",
+            "codec": "N/A", "duration": "N/A", "resolution": "N/A",
+            "camera": "N/A", "shot": "N/A", "frames": "N/A",
+            "bitrate": "N/A", "audio": "N/A", "timecode": "N/A",
+        }
+
+        duration_s = None
+        for src in (fmt, v_stream or {}):
+            d = src.get("duration")
+            if d:
+                try:
+                    duration_s = float(d)
+                    break
+                except (TypeError, ValueError):
+                    pass
+        if duration_s:
+            h = int(duration_s // 3600)
+            m = int((duration_s % 3600) // 60)
+            s = int(duration_s % 60)
+            info["duration"] = f"{h}:{m:02d}:{s:02d}"
+
+        if v_stream:
+            w, h_px = v_stream.get("width"), v_stream.get("height")
+            if w and h_px:
+                info["resolution"] = f"{w} x {h_px}"
+            if v_stream.get("codec_name"):
+                info["codec"] = v_stream["codec_name"].upper()
+
+            nb_frames = v_stream.get("nb_frames")
+            if nb_frames and str(nb_frames).isdigit():
+                info["frames"] = nb_frames
+            elif duration_s:
+                try:
+                    num, den = v_stream.get("r_frame_rate", "0/1").split("/")
+                    fps = float(num) / float(den) if float(den) else 0
+                    if fps:
+                        info["frames"] = str(int(duration_s * fps))
+                except Exception:
+                    pass
+
+            tc = (v_stream.get("tags") or {}).get("timecode")
+            if tc:
+                info["timecode"] = tc
+
+        if info["timecode"] == "N/A":
+            tc = (fmt.get("tags") or {}).get("timecode")
+            if tc:
+                info["timecode"] = tc
+
+        if a_stream and a_stream.get("codec_name"):
+            info["audio"] = a_stream["codec_name"].upper()
+
+        try:
+            bit_rate = fmt.get("bit_rate") or (v_stream or {}).get("bit_rate")
+            if bit_rate:
+                info["bitrate"] = f"{int(bit_rate) / 1_000_000:.1f} Mb/s"
+        except Exception:
+            pass
+
+        tags = fmt.get("tags") or {}
+        make = tags.get("com.apple.quicktime.make") or tags.get("make") or ""
+        model = tags.get("com.apple.quicktime.model") or tags.get("model") or ""
+        camera = (make + " " + model).strip()
+        if camera:
+            info["camera"] = camera
+
+        return info
+
+    @staticmethod
+    def extract_media_info(file_path, ffmpeg_path=None):
+        """Estrae metadati REALI (risoluzione, durata, codec, bitrate, camera, timecode) da
+        video e immagini. Ritorna sempre un dizionario; i campi non disponibili valgono
+        'N/A' (mai dati fittizi).
+
+        Per i video prova prima ffprobe (se ffmpeg e' configurato in Impostazioni): copre
+        molti piu' contenitori di cv2 e soprattutto legge il timecode incorporato, che cv2
+        non espone. cv2 resta il fallback quando ffmpeg non e' configurato o il formato non
+        e' apribile nemmeno da ffprobe (es. RED .R3D, vedi _ffprobe_media_info)."""
         ext = os.path.splitext(file_path)[1].lower()
         video_exts = ['.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v',
                       '.mpg', '.mpeg', '.m2ts', '.mts', '.braw', '.r3d', '.mxf', '.crm']
@@ -603,10 +729,16 @@ class ReportGenerator:
             "frames": "N/A",
             "bitrate": "N/A",
             "audio": "N/A",
+            "timecode": "N/A",
         }
 
         try:
             if ext in video_exts:
+                ffprobe_path = ReportGenerator._resolve_ffprobe(ffmpeg_path)
+                probed = ReportGenerator._ffprobe_media_info(file_path, ffprobe_path) if ffprobe_path else None
+                if probed:
+                    return probed
+
                 info["media_format"] = "Video"
                 import cv2
                 cap = cv2.VideoCapture(file_path)
@@ -770,9 +902,10 @@ class ReportGenerator:
             resolution = f.get("resolution", "N/A")
             duration = f.get("duration", "N/A")
             frames = f.get("frames", "N/A")
-            
+            timecode = f.get("timecode", "N/A")
+
             if media_fmt == "Video":
-                page.insert_text((25, y+10), cls.safe_text(f"Video: {resolution} {codec} | Dur: {duration} | Frames: {frames}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+                page.insert_text((25, y+10), cls.safe_text(f"Video: {resolution} {codec} | Dur: {duration} | Frames: {frames} | TC: {timecode}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
             else:
                 page.insert_text((25, y+10), cls.safe_text(f"Type: {media_fmt}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
             y += 15
