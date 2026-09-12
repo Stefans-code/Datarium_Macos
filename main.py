@@ -3395,12 +3395,14 @@ class DatariumApp(ctk.CTk):
                 pct = int(bytes_done / total_bytes * 100) if total_bytes else int((i - 1) / total * 100)
                 status_text = f"[{srclabel}] {pct}% · {i}/{total}: {it['name']}{eta_str}"
                 self.after(0, lambda t=status_text: self.ingest_status_lbl.configure(text=t, text_color=("gray10", "gray90")))
-                src_hashes = self.compute_hashes(it["path"], [algo, alt_algo])
-                src_hash = src_hashes.get(algo, "")
-                src_hash_alt = src_hashes.get(alt_algo, "")
                 album = self._ingest_album_for(it["path"], use_ai_eff)
 
-                all_ok = True
+                # Copia + checksum sorgente in UN'UNICA lettura del file, scritta
+                # simultaneamente su tutte le destinazioni (stesso fix applicato a
+                # Offload): prima si leggeva il sorgente 1 volta per l'hash + 1 volta
+                # per OGNI destinazione, il vero collo di bottiglia con più dischi di
+                # backup lenti in parallelo.
+                target_paths = []
                 for d in dests:
                     tdir = os.path.join(d, album)
                     os.makedirs(tdir, exist_ok=True)
@@ -3411,10 +3413,35 @@ class DatariumApp(ctk.CTk):
                         while os.path.exists(os.path.join(tdir, f"{b}_{k}{e}")):
                             k += 1
                         tpath = os.path.join(tdir, f"{b}_{k}{e}")
+                    target_paths.append(tpath)
+
+                src_hashes, write_ok = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo])
+                src_hash = src_hashes.get(algo, "")
+                src_hash_alt = src_hashes.get(alt_algo, "")
+
+                # Retry mirato SOLO sulle destinazioni che hanno fallito la scrittura
+                # (drive USB lenti/ballerini): non serve rileggere il sorgente per
+                # quelle già scritte correttamente al primo giro.
+                for tpath in target_paths:
+                    if write_ok.get(tpath):
+                        continue
                     try:
                         shutil.copy2(it["path"], tpath)
+                        write_ok[tpath] = True
                     except OSError:
-                        shutil.copy(it["path"], tpath)
+                        try:
+                            shutil.copy(it["path"], tpath)
+                            write_ok[tpath] = True
+                        except Exception as ce:
+                            print(f"Errore copia fallita per {it['name']}: {ce}")
+
+                # Verifica integrità: rilegge ogni destinazione per scoprire eventuali
+                # corruzioni introdotte dalla scrittura stessa.
+                all_ok = True
+                for tpath in target_paths:
+                    if not write_ok.get(tpath):
+                        all_ok = False
+                        continue
                     dh = self.compute_hash(tpath, algo)
                     if (not src_hash or src_hash.startswith("Error") or not dh or dh.startswith("Error") or dh != src_hash):
                         all_ok = False
