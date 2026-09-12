@@ -66,9 +66,13 @@ def _start_progress_monitor(dl_dir, argus_name, expected_mb, progress_callback, 
             cur_mb = cur_bytes / (1024 * 1024)
             if progress_callback:
                 if expected_mb:
+                    pct = min(100, (cur_mb / expected_mb) * 100) if expected_mb > 0 else 0
+                    remaining_mb = max(0, expected_mb - cur_mb)
+                    eta_s = int((remaining_mb * 1024) / speed_kbs) if speed_kbs > 0 else 0
+                    eta_str = f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s"
                     progress_callback(
                         f"Scaricamento {argus_name}... {cur_mb:.0f}/{expected_mb:.0f} MB "
-                        f"({speed_kbs:.0f} KB/s)"
+                        f"({speed_kbs:.0f} KB/s) - {pct:.0f}% - ETA {eta_str}"
                     )
                 else:
                     progress_callback(f"Scaricamento {argus_name}... {cur_mb:.0f} MB ({speed_kbs:.0f} KB/s)")
@@ -204,9 +208,13 @@ def _download_parallel(url, dest_path, label, total_size, progress_callback, con
             now = time.time()
             speed = max(0, (cur - last_bytes) / max(now - last_t, 0.001) / 1024)
             if progress_callback:
+                pct = (cur / total_size * 100) if total_size else 0
+                remaining_bytes = max(0, total_size - cur)
+                eta_s = int(remaining_bytes / (speed * 1024)) if speed > 0 else 0
+                eta_str = f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s"
                 progress_callback("Scaricamento " + label + "... " + str(int(cur / (1024 * 1024))) + "/"
                                   + str(int(total_mb)) + " MB (" + str(int(speed)) + " KB/s, "
-                                  + str(n) + " connessioni)")
+                                  + str(n) + " connessioni) - " + f"{pct:.0f}%" + " - ETA " + eta_str)
             last_bytes, last_t = cur, now
     except BaseException:
         stop_event.set()   # interruzione dell'app: i .partN restano per il resume
