@@ -2937,11 +2937,17 @@ class DatariumApp(ctk.CTk):
                                         print(f"Errore copia fallita per {it['name']}: {ce}")
 
                         # Verifica integrità: rilegge ogni destinazione per scoprire eventuali
-                        # corruzioni introdotte dalla scrittura stessa.
+                        # corruzioni introdotte dalla scrittura stessa. Il checksum "prima" e'
+                        # src_hash (calcolato leggendo il sorgente durante la copia), il checksum
+                        # "dopo" e' dest_hash (rileggendo la destinazione a scrittura conclusa):
+                        # un'incongruenza tra i due va segnalata in modo esplicito, non solo
+                        # marcata "Failed" in una riga di tabella che l'utente puo' non notare.
                         copy_success = True
+                        fail_reason = None  # "scrittura" | "checksum"
                         for target_path in target_paths:
                             if not write_ok.get(target_path):
                                 copy_success = False
+                                fail_reason = fail_reason or "scrittura"
                                 continue
                             self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
                             dest_hash = self.compute_hash(target_path, algo)
@@ -2950,6 +2956,7 @@ class DatariumApp(ctk.CTk):
                                 not dest_hash or dest_hash.startswith("Error") or
                                 dest_hash != src_hash):
                                 copy_success = False
+                                fail_reason = "checksum"  # priorita' massima: e' l'esito piu' grave
 
                         # Proxy video (ffmpeg) sulla prima destinazione (best-effort)
                         if make_proxy:
@@ -2973,6 +2980,7 @@ class DatariumApp(ctk.CTk):
                             "hash": src_hash,
                             "hash_alt": src_hash_alt,
                             "status": status,
+                            "fail_reason": fail_reason,
                             "media_format": media_info["media_format"],
                             "codec": media_info["codec"],
                             "duration": media_info["duration"],
@@ -2991,7 +2999,8 @@ class DatariumApp(ctk.CTk):
                             "size_bytes": 0,
                             "size_str": "0 B",
                             "hash": "ERROR",
-                            "status": "Failed"
+                            "status": "Failed",
+                            "fail_reason": "errore"
                         })
 
                     processed_files += 1
@@ -3027,22 +3036,57 @@ class DatariumApp(ctk.CTk):
                     except Exception:
                         pass
 
+                checksum_mismatches = [r for r in results if r.get("fail_reason") == "checksum"]
+                write_failures = [r for r in results if r.get("fail_reason") in ("scrittura", "errore")]
+
                 def render_results_ui():
-                    self.offload_status_lbl.configure(text="✓ Offload completato con successo!", text_color="#10b981")
+                    if checksum_mismatches:
+                        self.offload_status_lbl.configure(
+                            text=f"⚠ Incongruenza di checksum su {len(checksum_mismatches)} file: il contenuto copiato "
+                                 f"NON corrisponde al sorgente. Controlla il report prima di considerare il backup valido.",
+                            text_color="#ef4444"
+                        )
+                    elif write_failures:
+                        self.offload_status_lbl.configure(
+                            text=f"⚠ Offload completato con {len(write_failures)} errori di scrittura. Controlla il report.",
+                            text_color="#f59e0b"
+                        )
+                    else:
+                        self.offload_status_lbl.configure(text="✓ Offload completato con successo, checksum verificato su ogni file.", text_color="#10b981")
                     self.btn_open_report.configure(state="normal")
 
                     for res in results:
                         row = ctk.CTkFrame(self.offload_results_scroll, fg_color="transparent")
                         row.pack(fill="x", pady=2)
 
-                        lbl_icon = ctk.CTkLabel(row, text="✓" if res["status"] == "Verified" else "❌", text_color="#10b981" if res["status"] == "Verified" else "#ef4444", font=ctk.CTkFont(size=14, weight="bold"))
+                        icon = "✓" if res["status"] == "Verified" else ("⚠" if res.get("fail_reason") == "checksum" else "❌")
+                        icon_color = "#10b981" if res["status"] == "Verified" else "#ef4444"
+                        lbl_icon = ctk.CTkLabel(row, text=icon, text_color=icon_color, font=ctk.CTkFont(size=14, weight="bold"))
                         lbl_icon.pack(side="left", padx=10)
 
                         lbl_name = ctk.CTkLabel(row, text=res["name"], font=ctk.CTkFont(size=12, weight="bold"), anchor="w")
                         lbl_name.pack(side="left", fill="x", expand=True, padx=5)
 
+                        if res.get("fail_reason"):
+                            reason_txt = {"checksum": "checksum non corrispondente", "scrittura": "errore di scrittura", "errore": "errore"}.get(res["fail_reason"], "")
+                            ctk.CTkLabel(row, text=reason_txt, font=ctk.CTkFont(size=11), text_color="#ef4444").pack(side="right", padx=15)
+
                         lbl_sz = ctk.CTkLabel(row, text=res["size_str"], font=ctk.CTkFont(size=11), text_color="gray")
                         lbl_sz.pack(side="right", padx=15)
+
+                    # Un'incongruenza di checksum in un tool di backup e' un problema di integrita'
+                    # dei dati, non un errore qualunque: merita un popup esplicito, non solo una
+                    # riga colorata in una lista scrollabile che si puo' non notare.
+                    if checksum_mismatches:
+                        from tkinter import messagebox
+                        names = "\n".join(f"• {r['name']}" for r in checksum_mismatches[:15])
+                        more = f"\n... e altri {len(checksum_mismatches) - 15}" if len(checksum_mismatches) > 15 else ""
+                        messagebox.showwarning(
+                            "Incongruenza di checksum rilevata",
+                            f"{len(checksum_mismatches)} file copiati non corrispondono al checksum del sorgente:\n\n"
+                            f"{names}{more}\n\n"
+                            "Il backup di questi file NON è affidabile: ricopiali o verifica il disco di destinazione."
+                        )
 
                 self.after(0, render_results_ui)
             finally:
