@@ -380,33 +380,48 @@ class DatariumApp(ctk.CTk):
         self.logo_lbl = ctk.CTkLabel(self.sidebar, text="DATARIUM", font=ctk.CTkFont(size=24, weight="bold"))
         self.logo_lbl.grid(row=0, column=0, padx=20, pady=(30, 40))
 
-        self.btn_home = ctk.CTkButton(self.sidebar, text="🏠 Home", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Home"))
+        # Voci di navigazione: niente emoji (solo testo), con uno stato attivo
+        # visibile (sfondo tonale blu) che prima non esisteva -- l'utente non aveva
+        # modo di vedere a colpo d'occhio in che pagina si trovava, solo l'hover al
+        # passaggio del mouse.
+        self.NAV_INACTIVE = {"fg_color": "transparent", "text_color": ("gray10", "gray90")}
+        self.NAV_ACTIVE = {"fg_color": ("#dbeafe", "#1e3a5f"), "text_color": ("#1d4ed8", "#7dd3fc")}
+        self._nav_buttons = {}
+
+        self.btn_home = ctk.CTkButton(self.sidebar, text="Home", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Home"), **self.NAV_INACTIVE)
         self.btn_home.grid(row=1, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Home"] = self.btn_home
 
-        self.btn_organizer = ctk.CTkButton(self.sidebar, text="📁 Organizer", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=self.go_to_organizer)
+        self.btn_organizer = ctk.CTkButton(self.sidebar, text="Organizer", hover_color=("gray70", "gray30"), anchor="w", command=self.go_to_organizer, **self.NAV_INACTIVE)
         self.btn_organizer.grid(row=2, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Organizer"] = self.btn_organizer
 
-        self.btn_autotag = ctk.CTkButton(self.sidebar, text="\U0001f3f7 Auto Tag", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"))
+        self.btn_autotag = ctk.CTkButton(self.sidebar, text="Auto Tag", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"), **self.NAV_INACTIVE)
         self.btn_autotag.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["AutoTag"] = self.btn_autotag
 
-        self.btn_hash = ctk.CTkButton(self.sidebar, text="🔑 Hash Check", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("HashHome"))
+        self.btn_hash = ctk.CTkButton(self.sidebar, text="Hash Check", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("HashHome"), **self.NAV_INACTIVE)
         self.btn_hash.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Hash"] = self.btn_hash
 
-        self.btn_offload = ctk.CTkButton(self.sidebar, text="⚡ Offload", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"))
+        self.btn_offload = ctk.CTkButton(self.sidebar, text="Offload", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"), **self.NAV_INACTIVE)
         self.btn_offload.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Offload"] = self.btn_offload
 
-        self.btn_ingest = ctk.CTkButton(self.sidebar, text="🚀 Ingest", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("IngestHome"))
+        self.btn_ingest = ctk.CTkButton(self.sidebar, text="Ingest", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("IngestHome"), **self.NAV_INACTIVE)
         self.btn_ingest.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Ingest"] = self.btn_ingest
 
         # Bottom Buttons
         self.sidebar.grid_rowconfigure(7, weight=1)
-        
-        self.btn_settings = ctk.CTkButton(self.sidebar, text="\u2699 Impostazioni", fg_color="transparent", text_color=("gray10", "gray90"), hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"))
-        self.btn_settings.grid(row=8, column=0, padx=20, pady=10, sticky="ew")
 
-        self.appearance_mode_segmented = ctk.CTkSegmentedButton(self.sidebar, values=["🌙 Dark", "☀️ Light"], command=self.change_appearance_mode)
+        self.btn_settings = ctk.CTkButton(self.sidebar, text="Impostazioni", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"), **self.NAV_INACTIVE)
+        self.btn_settings.grid(row=8, column=0, padx=20, pady=10, sticky="ew")
+        self._nav_buttons["Settings"] = self.btn_settings
+
+        self.appearance_mode_segmented = ctk.CTkSegmentedButton(self.sidebar, values=["Scuro", "Chiaro"], command=self.change_appearance_mode)
         self.appearance_mode_segmented.grid(row=9, column=0, padx=20, pady=(10, 30), sticky="ew")
-        self.appearance_mode_segmented.set("🌙 Dark")
+        self.appearance_mode_segmented.set("Scuro")
 
     def setup_main_content(self):
         self.content_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -428,7 +443,7 @@ class DatariumApp(ctk.CTk):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["OrganizerHome"] = page
         
-        ctk.CTkLabel(page, text="📁 Organizer AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(page, text="Organizer AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
         
         box = ctk.CTkFrame(page, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
         box.pack(fill="both", expand=True, padx=5, pady=5)
@@ -486,12 +501,18 @@ class DatariumApp(ctk.CTk):
     def update_setup_status(self, text):
         if self.setup_status_lbl.winfo_exists():
             self.after(0, lambda: self.setup_status_lbl.configure(text=text))
-            # Proviamo a indovinare il progresso se il testo contiene indizi (es. %)
-            if "%" in text:
-                try: 
-                    pct = int(text.split('%')[0].split('|')[-1].strip()) / 100
+            # Il testo del downloader (vedi ai_engine.py) include "NN%" quando si conosce
+            # la dimensione attesa: un regex sul numero prima del simbolo e' molto più
+            # robusto del vecchio split su '%'/'|', che si rompeva a ogni cambio di formato
+            # del messaggio (e infatti restava sempre fermo a 0: il testo reale non
+            # conteneva mai un '%' prima di questa correzione).
+            match = re.search(r'(\d+(?:\.\d+)?)\s*%', text)
+            if match:
+                try:
+                    pct = float(match.group(1)) / 100
                     self.after(0, lambda: self.setup_progress.set(pct))
-                except Exception: pass
+                except Exception:
+                    pass
 
     def init_home_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -502,7 +523,7 @@ class DatariumApp(ctk.CTk):
         header.pack(fill="x", pady=(0, 20))
         header.pack_propagate(False)
 
-        ctk.CTkLabel(header, text="✨ Benvenuto in Datarium", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", padx=30, pady=(25, 2))
+        ctk.CTkLabel(header, text="Benvenuto in Datarium", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", padx=30, pady=(25, 2))
         ctk.CTkLabel(header, text="Il tuo assistente intelligente per l'organizzazione di file, immagini e video basato sull'AI.", font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", padx=30)
 
         # Quick access grid or container
@@ -1315,9 +1336,11 @@ class DatariumApp(ctk.CTk):
         dipendenze installate, usarlo qui avrebbe fatto fallire il download."""
         import urllib.request
         import tempfile
+        import time
         name = os.path.basename(url.split("?")[0]) or "datarium_update.bin"
         local_path = os.path.join(tempfile.gettempdir(), name)
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        start_time = time.time()
         with urllib.request.urlopen(req, timeout=30) as resp:
             total = int(resp.headers.get("Content-Length", 0)) or 0
             done = 0
@@ -1330,8 +1353,16 @@ class DatariumApp(ctk.CTk):
                     done += len(chunk)
                     frac = min(done / total, 1.0) if total else 0
                     d_str, t_str = self.format_file_size(done), self.format_file_size(total) if total else "?"
+                    elapsed = time.time() - start_time
+                    eta_str = ""
+                    if total and elapsed > 0.2:
+                        speed = done / elapsed
+                        pct = int(frac * 100)
+                        remaining_s = int(max(0, total - done) / speed) if speed > 0 else 0
+                        eta_txt = f"{remaining_s // 60}m {remaining_s % 60}s" if remaining_s >= 60 else f"{remaining_s}s"
+                        eta_str = f" · {pct}% · {self.format_file_size(int(speed))}/s · ETA {eta_txt}"
                     self.after(0, lambda v=frac: self.upd_progress.set(v))
-                    self.after(0, lambda d=d_str, t=t_str: self.upd_status_lbl.configure(text=f"Download: {d} / {t}"))
+                    self.after(0, lambda d=d_str, t=t_str, e=eta_str: self.upd_status_lbl.configure(text=f"Download: {d} / {t}{e}"))
         return local_path
 
     def _finish_self_update(self, local_path):
@@ -1427,12 +1458,30 @@ class DatariumApp(ctk.CTk):
             
         for p in self.pages.values(): p.pack_forget()
         self.pages[name].pack(fill="both", expand=True)
+        self._update_nav_active(name)
+
+    # Pagine reali -> voce di sidebar corrispondente (i flussi multi-step, es. Organizer
+    # o Hash, restano evidenziati sulla loro voce anche nelle sotto-pagine).
+    _NAV_PAGE_MAP = {
+        "Home": "Home",
+        "OrganizerHome": "Organizer", "Options": "Organizer", "Preview": "Organizer",
+        "AutoTag": "AutoTag",
+        "HashHome": "Hash", "HashOptions": "Hash", "HashResults": "Hash",
+        "OffloadHome": "Offload", "OffloadResults": "Offload",
+        "IngestHome": "Ingest",
+        "Settings": "Settings",
+    }
+
+    def _update_nav_active(self, page_name):
+        active_key = self._NAV_PAGE_MAP.get(page_name)
+        for key, btn in self._nav_buttons.items():
+            try:
+                btn.configure(**(self.NAV_ACTIVE if key == active_key else self.NAV_INACTIVE))
+            except Exception:
+                pass
 
     def change_appearance_mode(self, mode_str):
-        if "Dark" in mode_str:
-            mode = "Dark"
-        else:
-            mode = "Light"
+        mode = "Dark" if mode_str == "Scuro" else "Light"
         ctk.set_appearance_mode(mode)
 
     def set_sidebar_state(self, state="normal"):
@@ -1486,19 +1535,31 @@ class DatariumApp(ctk.CTk):
             self.after(0, lambda: self.status_lbl.configure(text=text))
 
     def set_progress(self, val):
+        import time
         if self.progress_bar.winfo_exists():
             pct = int(val * 100)
             self.after(0, lambda: self.progress_bar.set(val))
-            # Aggiorna testo stato con percentuale se non è già presente
+            # Aggiorna testo stato con percentuale e, quando si può stimare, il tempo
+            # rimanente (elapsed/val proietta il tempo totale sulla frazione già fatta:
+            # non serve tracciare i byte, la frazione stessa arriva già "pesata" dai
+            # passi della pipeline AI).
             current = self.status_lbl.cget("text")
             base = current.split(" (")[0]
-            self.after(0, lambda: self.status_lbl.configure(text=f"{base} ({pct}%)"))
+            suffix = f" ({pct}%)"
+            if 0 < val < 1 and getattr(self, "_organize_start_time", None):
+                elapsed = time.time() - self._organize_start_time
+                remaining_s = int(elapsed * (1 - val) / val)
+                eta_str = f"{remaining_s // 60}m {remaining_s % 60}s" if remaining_s >= 60 else f"{remaining_s}s"
+                suffix = f" ({pct}% · ETA {eta_str})"
+            self.after(0, lambda s=suffix: self.status_lbl.configure(text=f"{base}{s}"))
 
     def process_files_bg(self):
+        import time
         try:
             for w in self.scroll_frame.winfo_children(): w.destroy()
             src = self.source_folder.get()
             if not src: return
+            self._organize_start_time = time.time()
 
             self.set_progress(0)
             text_items = []
@@ -2241,12 +2302,22 @@ class DatariumApp(ctk.CTk):
 
         threading.Thread(target=self._run_hash_verification_bg, args=(files_to_hash, sd_list, algo), daemon=True).start()
 
-    def _update_hash_progress(self, idx, total, name):
-        """Aggiorna barra e stato del calcolo hash (chiamato dal thread UI)."""
+    def _update_hash_progress(self, idx, total, name, bytes_done=None, total_bytes=None, elapsed=None):
+        """Aggiorna barra e stato del calcolo hash (chiamato dal thread UI). Con
+        bytes_done/total_bytes/elapsed calcola anche velocità e tempo rimanente reali
+        (come in Offload), invece di mostrare solo 'i/totale: nomefile' senza indicazione
+        di quanto manca davvero."""
         if hasattr(self, 'hash_progress_bar') and self.hash_progress_bar.winfo_exists():
             self.hash_progress_bar.set((idx + 1) / max(1, total))
         if hasattr(self, 'hash_status_lbl') and self.hash_status_lbl.winfo_exists():
-            self.hash_status_lbl.configure(text=f"Calcolo hash {idx + 1}/{total}: {name}")
+            suffix = ""
+            if bytes_done is not None and total_bytes and elapsed is not None and elapsed > 0.05:
+                speed = bytes_done / elapsed
+                remaining_s = int(max(0, total_bytes - bytes_done) / speed) if speed > 0 else 0
+                eta_str = f"{remaining_s // 60}m {remaining_s % 60}s" if remaining_s >= 60 else f"{remaining_s}s"
+                pct = min(100, int(bytes_done / total_bytes * 100))
+                suffix = f" · {pct}% · {self.format_file_size(int(speed))}/s · ETA {eta_str}"
+            self.hash_status_lbl.configure(text=f"Calcolo hash {idx + 1}/{total}: {name}{suffix}")
 
     def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
         try:
@@ -2277,15 +2348,26 @@ class DatariumApp(ctk.CTk):
                 self.after(0, self._render_hash_results, results)
                 return
 
+            import time
+            sizes = []
+            for p, _is_source in tasks:
+                try:
+                    sizes.append(os.path.getsize(p))
+                except Exception:
+                    sizes.append(0)
+            total_bytes = sum(sizes)
+            bytes_done = 0
+            start_time = time.time()
+
             # 2. Calcola gli hash aggiornando barra e stato a ogni file
             for idx, (p, is_source) in enumerate(tasks):
                 name = os.path.basename(p)
-                self.after(0, lambda n=name, i=idx: self._update_hash_progress(i, total, n))
+                elapsed = time.time() - start_time
+                self.after(0, lambda n=name, i=idx, bd=bytes_done, tb=total_bytes, e=elapsed:
+                           self._update_hash_progress(i, total, n, bd, tb, e))
                 hash_val = self.compute_hash(p, algo)
-                try:
-                    sz = os.path.getsize(p)
-                except Exception:
-                    sz = 0
+                sz = sizes[idx]
+                bytes_done += sz
                 ext = os.path.splitext(p)[1].upper().replace('.', '')
                 results.append({
                     "name": name,
@@ -2396,7 +2478,7 @@ class DatariumApp(ctk.CTk):
         v_home = ctk.CTkFrame(self.autotag_master_frame, fg_color="transparent")
         self.autotag_views["Home"] = v_home
 
-        ctk.CTkLabel(v_home, text="🏷️ Auto Tagging intelligente", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(v_home, text="Auto Tagging intelligente", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
         
         recent_box = ctk.CTkFrame(v_home, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
         recent_box.pack(fill="both", expand=True, padx=5, pady=5)
@@ -2412,7 +2494,7 @@ class DatariumApp(ctk.CTk):
         v_config = ctk.CTkFrame(self.autotag_master_frame, fg_color="transparent")
         self.autotag_views["Config"] = v_config
 
-        ctk.CTkLabel(v_config, text="⚙️ Configura Nuovo Album", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(v_config, text="Configura Nuovo Album", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
 
         cfg_box = ctk.CTkFrame(v_config, width=700, height=520, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
         cfg_box.pack(pady=5)
@@ -2456,7 +2538,7 @@ class DatariumApp(ctk.CTk):
         v_results = ctk.CTkFrame(self.autotag_master_frame, fg_color="transparent")
         self.autotag_views["Album"] = v_results
 
-        ctk.CTkLabel(v_results, text="🖼️ I tuoi Album Intelligenti", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(v_results, text="I tuoi Album Intelligenti", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
         
         self.autotag_album_scroll = ctk.CTkScrollableFrame(v_results, fg_color=("gray95", "gray10"))
         self.autotag_album_scroll.pack(fill="both", expand=True, padx=5, pady=5)
@@ -2666,7 +2748,7 @@ class DatariumApp(ctk.CTk):
         v_home = ctk.CTkFrame(self.offload_master_frame, fg_color="transparent")
         self.offload_views["OffloadHome"] = v_home
 
-        ctk.CTkLabel(v_home, text="⚡ Offload & Backup Sicuro SSD", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(v_home, text="Offload & Backup Sicuro SSD", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
 
         cfg_box = ctk.CTkScrollableFrame(v_home, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
         cfg_box.pack(fill="both", expand=True, padx=5, pady=5)
@@ -2736,7 +2818,7 @@ class DatariumApp(ctk.CTk):
         v_results = ctk.CTkFrame(self.offload_master_frame, fg_color="transparent")
         self.offload_views["OffloadResults"] = v_results
 
-        ctk.CTkLabel(v_results, text="⚡ Stato Offload SSD", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
+        ctk.CTkLabel(v_results, text="Stato Offload SSD", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 20))
 
         self.offload_status_lbl = ctk.CTkLabel(v_results, text="Inizializzazione...", font=ctk.CTkFont(size=16, weight="bold"))
         self.offload_status_lbl.pack(pady=10)
@@ -3102,7 +3184,7 @@ class DatariumApp(ctk.CTk):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["IngestHome"] = page
 
-        ctk.CTkLabel(page, text="🚀 Ingest AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(page, text="Ingest AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 4))
         ctk.CTkLabel(page, text="Copia → verifica → tag AI → report, in coda. Attiva la sorveglianza per avviare l'ingest da solo quando colleghi una scheda.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=780, justify="left").pack(anchor="w", pady=(0, 12))
 
         cfg = ctk.CTkFrame(page, corner_radius=12, border_width=1, border_color=("gray85", "gray15"))
@@ -3286,6 +3368,16 @@ class DatariumApp(ctk.CTk):
         if total == 0:
             return (0, 0, None)
 
+        import time
+        total_bytes = 0
+        for it in files:
+            try:
+                total_bytes += os.path.getsize(it["path"])
+            except Exception:
+                pass
+        bytes_done = 0
+        start_time = time.time()
+
         results = []
         n_ok = 0
         srclabel = os.path.basename(src.rstrip("/\\")) or src
@@ -3293,7 +3385,16 @@ class DatariumApp(ctk.CTk):
             album = "Varie"
             try:
                 sz = os.path.getsize(it["path"])
-                self.after(0, lambda n=it["name"]: self.ingest_status_lbl.configure(text=f"[{srclabel}] {n}", text_color=("gray10", "gray90")))
+                elapsed = time.time() - start_time
+                speed = bytes_done / elapsed if elapsed > 0.05 else 0
+                eta_str = ""
+                if speed > 0:
+                    remaining_s = int(max(0, total_bytes - bytes_done) / speed)
+                    eta_str = f" · {self.format_file_size(int(speed))}/s · ETA " + (
+                        f"{remaining_s // 60}m {remaining_s % 60}s" if remaining_s >= 60 else f"{remaining_s}s")
+                pct = int(bytes_done / total_bytes * 100) if total_bytes else int((i - 1) / total * 100)
+                status_text = f"[{srclabel}] {pct}% · {i}/{total}: {it['name']}{eta_str}"
+                self.after(0, lambda t=status_text: self.ingest_status_lbl.configure(text=t, text_color=("gray10", "gray90")))
                 src_hashes = self.compute_hashes(it["path"], [algo, alt_algo])
                 src_hash = src_hashes.get(algo, "")
                 src_hash_alt = src_hashes.get(alt_algo, "")
@@ -3327,6 +3428,7 @@ class DatariumApp(ctk.CTk):
                 status = "Verified" if all_ok else "Failed"
                 if all_ok:
                     n_ok += 1
+                bytes_done += sz
                 mtime = os.path.getmtime(it["path"])
                 ctime = os.path.getctime(it["path"])
                 mi = ReportGenerator.extract_media_info(it["path"], self.ffmpeg_path)
