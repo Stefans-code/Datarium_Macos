@@ -37,6 +37,7 @@ import threading
 import shutil
 import pathlib
 from tkinter import filedialog
+import disk_benchmark
 from ai_engine import AIEngine
 from license_manager import LicenseManager
 import cv2
@@ -811,6 +812,285 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(upd_box, text=f"Versione corrente: v{APP_VERSION}", text_color="gray").pack(anchor="w", padx=20)
         self.btn_check_upd = ctk.CTkButton(upd_box, text="Verifica Aggiornamenti", command=self.check_software_updates)
         self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 15))
+
+        # Test velocità disco (diagnosi hardware vs software)
+        bench_box = ctk.CTkFrame(page, corner_radius=10)
+        bench_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(bench_box, text="Test velocità disco", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        ctk.CTkLabel(
+            bench_box,
+            text="Copia dati reali tra due cartelle e misura i MB/s, per capire se un rallentamento\n"
+                 "dipende dai dischi/hub o dal software.",
+            justify="left", text_color="gray"
+        ).pack(anchor="w", padx=20, pady=(0, 10))
+
+        bench_row = ctk.CTkFrame(bench_box, fg_color="transparent")
+        bench_row.pack(fill="x", padx=20, pady=(0, 5))
+        self.bench_source_entry = ctk.CTkEntry(bench_row, width=300, placeholder_text="Cartella sorgente (es. su HDD)")
+        self.bench_source_entry.pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bench_row, text="Scegli", width=80, fg_color="transparent", border_width=1,
+                      text_color=("gray10", "gray90"), command=self.pick_bench_source).pack(side="left")
+
+        bench_row2 = ctk.CTkFrame(bench_box, fg_color="transparent")
+        bench_row2.pack(fill="x", padx=20, pady=(0, 10))
+        self.bench_dest_entry = ctk.CTkEntry(bench_row2, width=300, placeholder_text="Cartella destinazione (es. su SSD)")
+        self.bench_dest_entry.pack(side="left", padx=(0, 10))
+        ctk.CTkButton(bench_row2, text="Scegli", width=80, fg_color="transparent", border_width=1,
+                      text_color=("gray10", "gray90"), command=self.pick_bench_dest).pack(side="left")
+
+        bench_row3 = ctk.CTkFrame(bench_box, fg_color="transparent")
+        bench_row3.pack(fill="x", padx=20, pady=(0, 5))
+        ctk.CTkLabel(bench_row3, text="Limite dati (GB):").pack(side="left", padx=(0, 10))
+        self.bench_size_entry = ctk.CTkEntry(bench_row3, width=70)
+        self.bench_size_entry.insert(0, "20")
+        self.bench_size_entry.pack(side="left", padx=(0, 20))
+        self.btn_run_bench = ctk.CTkButton(bench_row3, text="Avvia test", fg_color="#10b981", hover_color="#059669", command=self.run_disk_benchmark)
+        self.btn_run_bench.pack(side="left")
+
+        self.bench_progress = ctk.CTkProgressBar(bench_box)
+        self.bench_progress.set(0)
+        self.bench_progress.pack(fill="x", padx=20, pady=(14, 2))
+
+        self.bench_eta_lbl = ctk.CTkLabel(bench_box, text="", font=ctk.CTkFont(size=11), text_color="gray")
+        self.bench_eta_lbl.pack(anchor="w", padx=20, pady=(0, 8))
+
+        # Grafico a barre nativo (niente testo a muro): una barra per la lettura pura
+        # e una per la copia end-to-end, con una linea tratteggiata sulla soglia oltre
+        # la quale il rallentamento è compatibile con l'hardware, non col software.
+        import tkinter as tk_native
+        self.bench_chart_canvas = tk_native.Canvas(bench_box, height=95, highlightthickness=0, bd=0)
+        self.bench_chart_canvas.pack(fill="x", padx=20, pady=(0, 5))
+        self._bench_last_result = None
+        self.bench_chart_canvas.bind("<Configure>", lambda e: self._redraw_bench_chart())
+
+        self.bench_result_lbl = ctk.CTkLabel(bench_box, text="Nessun test eseguito.", font=ctk.CTkFont(weight="bold"), text_color="gray")
+        self.bench_result_lbl.pack(anchor="w", padx=20, pady=(0, 15))
+
+        # Disinstallazione / reset dati
+        uninstall_box = ctk.CTkFrame(page, corner_radius=10)
+        uninstall_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(uninstall_box, text="Disinstallazione", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        ctk.CTkLabel(
+            uninstall_box,
+            text=f"I dati personali (licenza, modelli AI, cache volti, configurazione) sono in:\n{self.get_config_path().rsplit(os.sep, 1)[0]}",
+            justify="left", text_color="gray"
+        ).pack(anchor="w", padx=20, pady=(0, 10))
+        ctk.CTkButton(
+            uninstall_box, text="Disinstalla Datarium completamente...",
+            fg_color="#ef4444", hover_color="#b91c1c", command=self.full_uninstall
+        ).pack(anchor="w", padx=20, pady=(0, 15))
+
+    def _bench_canvas_bg(self):
+        mode = 0 if ctk.get_appearance_mode() == "Light" else 1
+        try:
+            fg = ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
+            return fg[mode] if isinstance(fg, (list, tuple)) else fg
+        except Exception:
+            return "#dbdbdb" if mode == 0 else "#2b2b2b"
+
+    def _bench_text_color(self):
+        return "#111827" if ctk.get_appearance_mode() == "Light" else "#e5e7eb"
+
+    def _redraw_bench_chart(self):
+        if not hasattr(self, "bench_chart_canvas") or not self.bench_chart_canvas.winfo_exists():
+            return
+        read_mbps, copy_mbps = self._bench_last_result if self._bench_last_result else (0, None)
+        self._draw_bench_chart(read_mbps, copy_mbps)
+
+    def _draw_bench_chart(self, read_mbps, copy_mbps=None):
+        c = self.bench_chart_canvas
+        c.delete("all")
+        c.configure(bg=self._bench_canvas_bg())
+        w = c.winfo_width()
+        if w < 50:
+            return
+
+        text_color = self._bench_text_color()
+        threshold = disk_benchmark.SLOW_HARDWARE_THRESHOLD_MBPS
+        max_scale = max(read_mbps, copy_mbps or 0, threshold) * 1.3 or 1
+        margin_left, margin_right = 60, 75
+        track_w = max(w - margin_left - margin_right, 10)
+
+        def bar(y, label, value, color, bar_h=26):
+            bw = (min(value, max_scale) / max_scale) * track_w
+            c.create_text(margin_left - 8, y + bar_h / 2, anchor="e", text=label, fill=text_color, font=("Segoe UI", 10))
+            c.create_rectangle(margin_left, y, margin_left + track_w, y + bar_h, outline=text_color, width=1)
+            if bw > 0:
+                c.create_rectangle(margin_left, y, margin_left + bw, y + bar_h, fill=color, outline="")
+            c.create_text(margin_left + track_w + 8, y + bar_h / 2, anchor="w", text=f"{value:.0f} MB/s",
+                          fill=text_color, font=("Segoe UI", 10, "bold"))
+
+        green, orange = "#10b981", "#f59e0b"
+        bar(6, "Lettura", read_mbps, green if read_mbps >= threshold else orange)
+        bottom = 6 + 26
+        if copy_mbps is not None:
+            bar(6 + 26 + 12, "Copia", copy_mbps, green if copy_mbps >= threshold else orange)
+            bottom = 6 + 26 + 12 + 26
+
+        threshold_x = margin_left + (min(threshold, max_scale) / max_scale) * track_w
+        c.create_line(threshold_x, 2, threshold_x, bottom, dash=(3, 2), fill="#ef4444")
+        c.create_text(threshold_x, bottom + 10, text=f"soglia bottleneck ({threshold:.0f} MB/s)", fill="#ef4444", font=("Segoe UI", 9))
+
+    def pick_bench_source(self):
+        d = filedialog.askdirectory(title="Scegli la cartella sorgente da leggere (es. i tuoi dati su HDD)")
+        if d:
+            self.bench_source_entry.delete(0, "end")
+            self.bench_source_entry.insert(0, d)
+
+    def pick_bench_dest(self):
+        d = filedialog.askdirectory(title="Scegli la cartella destinazione dove scrivere (es. un SSD)")
+        if d:
+            self.bench_dest_entry.delete(0, "end")
+            self.bench_dest_entry.insert(0, d)
+
+    def run_disk_benchmark(self):
+        from tkinter import messagebox
+        import time
+        source = self.bench_source_entry.get().strip()
+        dest = self.bench_dest_entry.get().strip()
+        if not source or not os.path.isdir(source):
+            messagebox.showerror("Test Velocità Disco", "Scegli una cartella sorgente valida.")
+            return
+        try:
+            size_limit = float(self.bench_size_entry.get().strip() or "20")
+        except ValueError:
+            size_limit = 20
+
+        self.btn_run_bench.configure(state="disabled", text="Test in corso...")
+        self.bench_progress.set(0)
+        self.bench_eta_lbl.configure(text="")
+        self.bench_result_lbl.configure(text="Lettura in corso dalla sorgente...", text_color="gray")
+
+        def make_progress_updater():
+            # Un cronometro per fase (lettura, poi copia), cosi' la stima del tempo
+            # rimanente riparte pulita a ogni fase invece di trascinare la velocita' media
+            # della fase precedente.
+            state = {"start": time.time()}
+
+            def reset():
+                state["start"] = time.time()
+
+            def update_progress(done, total):
+                elapsed = max(0.001, time.time() - state["start"])
+                speed_bps = done / elapsed
+                remaining_bytes = max(0, total - done)
+                eta_s = int(remaining_bytes / speed_bps) if speed_bps > 0 else 0
+                speed_str = self.format_file_size(int(speed_bps)) + "/s"
+                eta_str = (f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s")
+                frac = min(done / total, 1.0) if total else 0
+                self.after(0, lambda: self.bench_progress.set(frac))
+                self.after(0, lambda: self.bench_eta_lbl.configure(
+                    text=f"{self.format_file_size(done)} / {self.format_file_size(total)} · {speed_str} · tempo rimanente {eta_str}"
+                ))
+
+            return update_progress, reset
+
+        def worker():
+            try:
+                update_progress, reset_timer = make_progress_updater()
+                read_res = disk_benchmark.run_read_benchmark(source, size_limit_gb=size_limit, progress_callback=update_progress)
+                copy_res = None
+                if dest and os.path.isdir(dest):
+                    self.after(0, lambda: self.bench_result_lbl.configure(text="Copia end-to-end verso la destinazione in corso..."))
+                    self.after(0, lambda: self.bench_progress.set(0))
+                    reset_timer()
+                    copy_res = disk_benchmark.run_copy_benchmark(source, dest, size_limit_gb=size_limit, progress_callback=update_progress)
+
+                copy_mbps = copy_res['mbps'] if copy_res else None
+                verdict_mbps = min(read_res['mbps'], copy_mbps) if copy_mbps is not None else read_res['mbps']
+                verdict_text = disk_benchmark.verdict(verdict_mbps)
+                verdict_color = "#f59e0b" if verdict_mbps < disk_benchmark.SLOW_HARDWARE_THRESHOLD_MBPS else "#10b981"
+
+                self._bench_last_result = (read_res['mbps'], copy_mbps)
+                self.after(0, self._redraw_bench_chart)
+                self.after(0, lambda: self.bench_result_lbl.configure(text=verdict_text, text_color=verdict_color))
+            except Exception as e:
+                self.after(0, lambda: self.bench_result_lbl.configure(text=f"Errore durante il test: {e}", text_color="#ef4444"))
+            finally:
+                self.after(0, lambda: self.btn_run_bench.configure(state="normal", text="🧪 Avvia Test"))
+                self.after(0, lambda: self.bench_progress.set(1))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def full_uninstall(self):
+        """
+        Rimuove tutti i dati personali di Datarium (licenza, modelli AI, cache volti,
+        configurazione) dalla cartella dati dell'app e, su Windows, avvia anche il
+        disinstallatore ufficiale (Inno Setup) per rimuovere i file di programma.
+        Su macOS/Linux non esiste un disinstallatore: dopo la pulizia dei dati si
+        chiede all'utente di rimuovere manualmente l'app/AppImage (niente auto-delete
+        del bundle in esecuzione: mai testato su queste piattaforme, troppo rischioso
+        da automatizzare alla cieca). Azione distruttiva e irreversibile: richiede
+        doppia conferma.
+        """
+        from tkinter import messagebox
+        import platform
+        data_dir = os.path.dirname(self.get_config_path())
+
+        if not messagebox.askyesno(
+            "Disinstalla Datarium",
+            "Questa operazione elimina in modo IRREVERSIBILE:\n"
+            "• la licenza attivata\n"
+            "• i modelli AI scaricati (diversi GB)\n"
+            "• la cache di riconoscimento volti\n"
+            "• le impostazioni e le regole personalizzate\n\n"
+            f"Cartella dati: {data_dir}\n\n"
+            "Vuoi continuare?",
+            icon="warning",
+        ):
+            return
+
+        if not messagebox.askyesno("Conferma finale", "Sei assolutamente sicuro? L'operazione non può essere annullata."):
+            return
+
+        try:
+            if os.path.isdir(data_dir):
+                shutil.rmtree(data_dir, ignore_errors=True)
+        except Exception as e:
+            messagebox.showerror("Disinstalla Datarium", f"Errore durante la rimozione dei dati: {e}")
+            return
+
+        system = platform.system()
+        if system == "Windows":
+            # Prova a lanciare il disinstallatore ufficiale (creato da Inno Setup) per
+            # rimuovere anche i file di programma; se non lo trova, si ferma qui: i dati
+            # personali sono comunque già stati rimossi.
+            uninstaller = None
+            if getattr(sys, 'frozen', False):
+                app_dir = os.path.dirname(sys.executable)
+                candidate = os.path.join(app_dir, "unins000.exe")
+                if os.path.isfile(candidate):
+                    uninstaller = candidate
+
+            if uninstaller:
+                messagebox.showinfo(
+                    "Disinstalla Datarium",
+                    "Dati personali rimossi. Ora verrà avviato il disinstallatore di Windows "
+                    "per rimuovere anche i file di programma. Datarium si chiuderà."
+                )
+                import subprocess
+                subprocess.Popen([uninstaller])
+                self.after(300, lambda: os._exit(0))
+                return
+            messagebox.showinfo(
+                "Disinstalla Datarium",
+                "Dati personali rimossi con successo.\n"
+                "Per rimuovere anche i file di programma, usa 'App installate' di Windows "
+                "oppure 'Disinstalla Datarium' dal menu Start."
+            )
+        elif system == "Darwin":
+            messagebox.showinfo(
+                "Disinstalla Datarium",
+                "Dati personali rimossi con successo.\n"
+                "Per completare la disinstallazione, trascina Datarium dalla cartella "
+                "Applicazioni al Cestino."
+            )
+        else:
+            messagebox.showinfo(
+                "Disinstalla Datarium",
+                "Dati personali rimossi con successo.\n"
+                "Per completare la disinstallazione, elimina il file AppImage di Datarium."
+            )
 
     def pick_ffmpeg_path(self):
         file_path = filedialog.askopenfilename(title="Seleziona eseguibile ffmpeg", filetypes=[("Eseguibile ffmpeg", "ffmpeg.exe ffmpeg")])
@@ -1676,6 +1956,74 @@ class DatariumApp(ctk.CTk):
         except Exception as e:
             return {a: f"Error: {e}" for a in algos}
 
+    def copy_write_and_hash(self, src_path, dest_paths, algos, chunk_size=1024 * 1024):
+        """
+        Legge src_path UNA SOLA VOLTA, scrivendola contemporaneamente su tutte le
+        dest_paths e calcolando gli hash richiesti sugli stessi byte letti.
+
+        Prima la pipeline di Offload leggeva il sorgente 1 volta per l'hash e poi
+        di nuovo 1 volta per OGNI destinazione (shutil.copy2): con 3 dischi di backup
+        erano 4 letture identiche dello stesso file. Su hardware lento (es. un hub USB
+        con più HDD in parallelo) questo triplica/quadruplica il tempo reale di copia
+        anche se il software "fa" la stessa cosa. Con questa funzione il sorgente si
+        legge una volta sola, qualunque sia il numero di destinazioni.
+
+        La verifica di integrità (rilettura della destinazione) resta un passaggio
+        separato: serve a scoprire corruzioni introdotte dalla scrittura stessa
+        (dischi/cavi USB ballerini), quindi va tenuta.
+
+        Ritorna (hashes: {algo: hexdigest}, write_ok: {dest_path: bool}).
+        """
+        import hashlib
+        hashers = {}
+        for algo in algos:
+            if algo == "MD5":
+                hashers[algo] = hashlib.md5()
+            elif algo == "SHA-1":
+                hashers[algo] = hashlib.sha1()
+            elif algo == "xxHash64":
+                import xxhash
+                hashers[algo] = xxhash.xxh64()
+            else:
+                hashers[algo] = hashlib.sha256()
+
+        write_ok = {}
+        handles = {}
+        for d in dest_paths:
+            try:
+                handles[d] = open(d, "wb")
+                write_ok[d] = True
+            except Exception:
+                write_ok[d] = False
+
+        try:
+            with open(src_path, "rb") as fsrc:
+                while chunk := fsrc.read(chunk_size):
+                    for h in hashers.values():
+                        h.update(chunk)
+                    for d, fh in handles.items():
+                        if write_ok[d]:
+                            try:
+                                fh.write(chunk)
+                            except Exception:
+                                write_ok[d] = False
+        finally:
+            for fh in handles.values():
+                try:
+                    fh.close()
+                except Exception:
+                    pass
+
+        for d in dest_paths:
+            if write_ok.get(d):
+                try:
+                    shutil.copystat(src_path, d)
+                except Exception:
+                    pass
+
+        hashes = {a: getattr(h, "hexdigest")() for a, h in hashers.items()}
+        return hashes, write_ok
+
     def check_content_equal(self, f1, f2):
         try:
             with open(f1, "rb") as a, open(f2, "rb") as b:
@@ -2423,10 +2771,20 @@ class DatariumApp(ctk.CTk):
                         sz = os.path.getsize(it["path"])
                         sz_str = self.format_file_size(sz)
 
-                        # Calcolo checksum sorgente: entrambi gli hash in una sola lettura del file
-                        self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Calcolo checksum: {name}..."))
+                        # Copia + checksum sorgente in UN'UNICA lettura del file, scritta
+                        # simultaneamente su tutte le destinazioni (vedi copy_write_and_hash):
+                        # prima erano 1 lettura per l'hash + 1 rilettura per ogni destinazione,
+                        # il vero collo di bottiglia con più dischi lenti in parallelo.
                         alt_algo = "SHA-256" if algo == "xxHash64" else "MD5"
-                        src_hashes = self.compute_hashes(it["path"], [algo, alt_algo])
+                        self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Copia e checksum: {name}..."))
+
+                        target_paths = []
+                        for d in dests:
+                            target_path = os.path.join(d, it["rel"])
+                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+                            target_paths.append(target_path)
+
+                        src_hashes, write_ok = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo])
                         src_hash = src_hashes[algo]
                         src_hash_alt = src_hashes[alt_algo]
 
@@ -2435,41 +2793,35 @@ class DatariumApp(ctk.CTk):
                         created_str = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
                         modified_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
 
-                        # Copy to all active destinations and verify
-                        copy_success = True
-                        for d in dests:
-                            target_path = os.path.join(d, it["rel"])
-                            os.makedirs(os.path.dirname(target_path), exist_ok=True)
-
-                            self.after(0, lambda name=it["name"], dest=os.path.basename(d): self.offload_status_lbl.configure(text=f"Copia {name} in {dest}..."))
-                            # Retry copia (drive USB lenti/ballerini): fino a 3 tentativi
-                            copied_ok = False
+                        # Retry mirato SOLO sulle destinazioni che hanno fallito la scrittura
+                        # (drive USB lenti/ballerini): non serve rileggere il sorgente per
+                        # quelle già scritte correttamente al primo giro.
+                        for target_path in target_paths:
+                            if write_ok.get(target_path):
+                                continue
                             for _attempt in range(1, 4):
                                 try:
                                     shutil.copy2(it["path"], target_path)
-                                    copied_ok = True
+                                    write_ok[target_path] = True
                                     break
-                                except OSError:
-                                    try:
-                                        shutil.copy(it["path"], target_path)
-                                        copied_ok = True
-                                        break
-                                    except Exception as ce:
-                                        if _attempt < 3:
-                                            time.sleep(1.5 * _attempt)
-                                        else:
-                                            print(f"Errore copia fallita per {it['name']}: {ce}")
-                            if not copied_ok:
+                                except Exception as ce:
+                                    if _attempt < 3:
+                                        time.sleep(1.5 * _attempt)
+                                    else:
+                                        print(f"Errore copia fallita per {it['name']}: {ce}")
+
+                        # Verifica integrità: rilegge ogni destinazione per scoprire eventuali
+                        # corruzioni introdotte dalla scrittura stessa.
+                        copy_success = True
+                        for target_path in target_paths:
+                            if not write_ok.get(target_path):
                                 copy_success = False
                                 continue
-
-                            # Verification
                             self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
                             dest_hash = self.compute_hash(target_path, algo)
-                            
-                            # Se l'hash ha ritornato errore o non coincide, la copia fallisce la verifica
-                            if (not src_hash or src_hash.startswith("Error") or 
-                                not dest_hash or dest_hash.startswith("Error") or 
+
+                            if (not src_hash or src_hash.startswith("Error") or
+                                not dest_hash or dest_hash.startswith("Error") or
                                 dest_hash != src_hash):
                                 copy_success = False
 

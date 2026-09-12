@@ -33,6 +33,9 @@ STAGE = os.path.join(ROOT, "build_src")
 
 # Moduli core compilati in binario (protetti). main.py -> datarium_app (logica completa).
 CORE_MODULES = ["ai_engine.py", "license_manager.py", "face_memory.py", "report_generator.py"]
+# Moduli importati da main.py ma senza logica da proteggere: restano .py normali
+# nel bundle (PyInstaller li include comunque grazie agli --hidden-import).
+PLAIN_MODULES = ["disk_benchmark.py"]
 APP_SRC = "main.py"
 APP_DST = "datarium_app.py"
 
@@ -113,6 +116,12 @@ def main():
         shutil.copy2(os.path.join(ROOT, m), os.path.join(STAGE, m))
     # main.py -> datarium_app.py (diventa modulo compilato)
     shutil.copy2(os.path.join(ROOT, APP_SRC), os.path.join(STAGE, APP_DST))
+    # Moduli plain (non cythonizzati, nessuna logica sensibile): vanno copiati
+    # comunque nello staging, perche' una volta che main.py e' compilato in .pyd/.so
+    # PyInstaller non puo' piu' scoprirne gli import staticamente (per questo
+    # servono anche gli --hidden-import qui sotto).
+    for m in PLAIN_MODULES:
+        shutil.copy2(os.path.join(ROOT, m), os.path.join(STAGE, m))
     # Risorse
     if os.path.exists(os.path.join(ROOT, "icon.ico")):
         shutil.copy2(os.path.join(ROOT, "icon.ico"), os.path.join(STAGE, "icon.ico"))
@@ -164,6 +173,7 @@ def main():
         "--hidden-import=face_memory",
         "--hidden-import=report_generator",
         "--hidden-import=datarium_app",
+        "--hidden-import=disk_benchmark",
         "--hidden-import=PIL",
         "--hidden-import=fitz",
         "--hidden-import=docx",
