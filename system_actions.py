@@ -134,6 +134,26 @@ def shutdown_computer(delay_seconds=60):
         return False, str(e), None
 
 
+def https_context():
+    """
+    Contesto SSL basato sulla CA bundle di certifi, non su quella di sistema.
+
+    Nei build PyInstaller su macOS il Python "imbustato" spesso non trova un
+    certificate store di sistema valido (manca il passo "Install Certificates.command"
+    che i build python.org normali eseguono all'installazione): ogni
+    urllib.request.urlopen su https fallisce con
+    "SSL: CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate"
+    anche se il sito ha un certificato perfettamente valido. certifi porta con sé
+    una CA bundle propria, indipendente dal sistema, che risolve il problema.
+    """
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def cancel_shutdown(handle=None):
     """Annulla uno spegnimento programmato con shutdown_computer(). Su Windows/Linux
     usa il comando di sistema; su macOS termina il processo `handle` (l'AppleScript

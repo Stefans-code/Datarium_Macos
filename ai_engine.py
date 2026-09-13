@@ -106,10 +106,11 @@ def _hf_resolve_url(repo, filename):
 def _remote_file_info(url, timeout=30):
     """Ritorna (dimensione_byte, supporta_range). Non solleva: (0, False) se non si sa."""
     import urllib.request
+    import system_actions
     try:
         req = urllib.request.Request(url, headers={"User-Agent": _DL_UA})
         req.get_method = lambda: "HEAD"
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=system_actions.https_context()) as resp:
             size = int(resp.headers.get("Content-Length") or 0)
             accepts = (resp.headers.get("Accept-Ranges") or "").lower()
             # HF espone la dimensione reale del file LFS anche quando Content-Length manca
@@ -128,6 +129,8 @@ def _part_path(dest_path, idx):
 def _download_range(url, part_file, start, end, stop_event, errors, idx):
     """Scarica [start, end] (inclusi) in part_file, riprendendo da quanto gia' presente."""
     import urllib.request
+    import system_actions
+    ssl_ctx = system_actions.https_context()
     for attempt in range(1, 7):
         if stop_event.is_set():
             return
@@ -144,7 +147,7 @@ def _download_range(url, part_file, start, end, stop_event, errors, idx):
         headers = {"User-Agent": _DL_UA, "Range": "bytes=" + str(start + have) + "-" + str(end)}
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=_DL_SOCKET_TIMEOUT) as resp:
+            with urllib.request.urlopen(req, timeout=_DL_SOCKET_TIMEOUT, context=ssl_ctx) as resp:
                 with open(part_file, "ab") as fh:
                     while not stop_event.is_set():
                         chunk = resp.read(_DL_CHUNK)

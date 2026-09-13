@@ -45,7 +45,7 @@ from face_memory import FaceMemoryManager
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -1253,9 +1253,10 @@ class DatariumApp(ctk.CTk):
         """Interroga version.json. Ritorna il dict remoto o solleva un'eccezione."""
         import urllib.request
         import json
+        import system_actions
         url = "https://nexflamma.net/version.json"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=5, context=system_actions.https_context()) as response:
             return json.loads(response.read().decode())
 
     def _pick_platform_update_info(self, data):
@@ -1344,11 +1345,12 @@ class DatariumApp(ctk.CTk):
         import urllib.request
         import tempfile
         import time
+        import system_actions
         name = os.path.basename(url.split("?")[0]) or "datarium_update.bin"
         local_path = os.path.join(tempfile.gettempdir(), name)
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         start_time = time.time()
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=system_actions.https_context()) as resp:
             total = int(resp.headers.get("Content-Length", 0)) or 0
             done = 0
             with open(local_path, "wb") as f:
