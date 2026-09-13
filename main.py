@@ -33,6 +33,7 @@ if getattr(sys, 'frozen', False):
 
 import customtkinter as ctk
 import re
+import platform
 import threading
 import shutil
 import pathlib
@@ -63,14 +64,34 @@ def _is_newer_version(remote_version, current_version):
 
 ctk.set_appearance_mode("Dark")
 
-# Risolvi il percorso assoluto per evitare problemi in modalità frozen (PyInstaller)
-if getattr(sys, 'frozen', False):
-    if hasattr(sys, '_MEIPASS'):
-        theme_path = os.path.join(sys._MEIPASS, "assets", "material_theme.json")
-    else:
-        theme_path = os.path.join(os.path.dirname(sys.executable), "assets", "material_theme.json")
-else:
-    theme_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "material_theme.json")
+
+def _resource_dir():
+    """
+    Cartella base delle risorse bundlate (assets/, icon.ico...), corretta per ogni
+    piattaforma e modalità (sviluppo vs frozen).
+
+    Su macOS un bundle .app mette le risorse aggiunte con --add-data in
+    Contents/Resources/, un percorso DIVERSO da sys._MEIPASS (che punta dentro
+    Contents/MacOS/): usare solo _MEIPASS lì fa fallire in silenzio ogni
+    caricamento di risorsa (tema colori, icone) — l'app parte comunque, ma con
+    l'aspetto di default, senza nessun errore visibile. Su Windows/Linux invece
+    _MEIPASS combacia con dove PyInstaller mette davvero i dati.
+    """
+    if getattr(sys, 'frozen', False):
+        if platform.system() == "Darwin":
+            exe_path = os.path.abspath(sys.executable).replace("\\", "/")
+            if "/Contents/MacOS/" in exe_path:
+                contents_dir = os.path.dirname(os.path.dirname(sys.executable))  # .../Contents
+                resources_dir = os.path.join(contents_dir, "Resources")
+                if os.path.isdir(resources_dir):
+                    return resources_dir
+        if hasattr(sys, '_MEIPASS'):
+            return sys._MEIPASS
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+theme_path = os.path.join(_resource_dir(), "assets", "material_theme.json")
 
 if os.path.exists(theme_path):
     ctk.set_default_color_theme(theme_path)
@@ -212,11 +233,8 @@ class DatariumApp(ctk.CTk):
         # Carica l'icona della finestra
         try:
             # Tenta di trovare l'icona nell'eseguibile o nella cartella locale
-            if getattr(sys, 'frozen', False):
-                self.icon_path = os.path.join(sys._MEIPASS, "icon.ico")
-            else:
-                self.icon_path = "icon.ico"
-                
+            self.icon_path = os.path.join(_resource_dir(), "icon.ico")
+
             if os.path.exists(self.icon_path):
                 self.iconbitmap(self.icon_path)
         except Exception: pass
@@ -539,7 +557,7 @@ class DatariumApp(ctk.CTk):
         cards_container.columnconfigure(3, weight=1)
         
         from PIL import Image
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = _resource_dir()
         folder_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "folder.png")), size=(64, 64))
         key_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "key.png")), size=(64, 64))
         tag_icon = ctk.CTkImage(light_image=Image.open(os.path.join(base_dir, "assets", "tag.png")), size=(64, 64))
