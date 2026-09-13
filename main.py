@@ -281,6 +281,8 @@ class DatariumApp(ctk.CTk):
         self.offload_meta_vars = {key: ctk.StringVar(value="") for key, _ in self.offload_meta_fields}
         self.offload_notes_text = None
         self.offload_make_proxy = ctk.BooleanVar(value=False)
+        self.offload_eject_source = ctk.BooleanVar(value=False)
+        self.offload_shutdown_after = ctk.BooleanVar(value=False)
 
         # Ingest Feature State (Fase 0-2: coda, trigger auto, multi-destinazione, proxy)
         self.ingest_destinations = []
@@ -1286,6 +1288,11 @@ class DatariumApp(ctk.CTk):
         if messagebox.askyesno("Nuovo Aggiornamento Disponibile", msg):
             self.show_page("Settings")
             self.start_self_update(info)
+        else:
+            # Non ripresentare lo stesso popup ad ogni ricontrollo periodico se
+            # l'utente ha già detto no a QUESTA versione; una versione più nuova
+            # farà comunque scattare un nuovo avviso.
+            self._update_dismissed_version = remote_version
 
     def start_self_update(self, info):
         """
@@ -1421,18 +1428,29 @@ class DatariumApp(ctk.CTk):
 
         threading.Thread(target=check_upd_bg, daemon=True).start()
 
-    def check_software_updates_silent(self):
-        """Verifica automatica all'avvio: parla solo se c'e' davvero un aggiornamento.
-        Nessun popup di errore/‘sei aggiornato’ per non disturbare l'utente ad ogni avvio
-        (es. offline, DNS lento, server irraggiungibile)."""
+    def check_software_updates_silent(self, reschedule=True):
+        """Verifica automatica: parla solo se c'e' davvero un aggiornamento. Nessun
+        popup di errore/'sei aggiornato' per non disturbare l'utente (es. offline,
+        DNS lento, server irraggiungibile).
+
+        Si riprogrammano ogni ~2 ore per tutta la durata della sessione, non solo
+        all'avvio: un utente che lascia Datarium aperto per ore (es. durante un
+        Offload lungo) e non lo riavvia mai non vedrebbe altrimenti nessun
+        aggiornamento pubblicato nel frattempo, con un solo controllo all'avvio."""
         def check_upd_bg():
             try:
                 data = self._fetch_remote_version_info()
                 remote_version = data.get("version", APP_VERSION)
-                if _is_newer_version(remote_version, APP_VERSION):
+                if (_is_newer_version(remote_version, APP_VERSION)
+                        and remote_version != getattr(self, "_update_dismissed_version", None)):
                     self.after(0, lambda: self._prompt_update_available(data))
             except Exception:
                 pass
+            finally:
+                if reschedule:
+                    # self.after() non e' thread-safe se chiamato da un thread diverso
+                    # da quello Tk: passiamo dal thread principale con self.after(0, ...).
+                    self.after(0, lambda: self.after(2 * 60 * 60 * 1000, self.check_software_updates_silent))
 
         threading.Thread(target=check_upd_bg, daemon=True).start()
 
@@ -2811,6 +2829,13 @@ class DatariumApp(ctk.CTk):
         # Opzione proxy video (ffmpeg)
         ctk.CTkCheckBox(cfg_box, text="Genera proxy video (ffmpeg) durante l'offload", variable=self.offload_make_proxy).pack(anchor="w", padx=30, pady=(14, 0))
 
+        # Opzioni di fine lavoro: espulsione sorgente e spegnimento PC. Il sistema resta
+        # comunque sveglio per TUTTA la copia (vedi SleepInhibitor in offload_bg) a
+        # prescindere da queste due, altrimenti bloccare lo schermo (es. Touch ID su Mac)
+        # durante una copia lunga la interrompe a metà.
+        ctk.CTkCheckBox(cfg_box, text="Espelli la sorgente al termine (es. SD card della camera)", variable=self.offload_eject_source).pack(anchor="w", padx=30, pady=(10, 0))
+        ctk.CTkCheckBox(cfg_box, text="Spegni il PC al termine (annullabile, 60s di margine)", variable=self.offload_shutdown_after).pack(anchor="w", padx=30, pady=(6, 0))
+
         # Action Button
         ctk.CTkButton(cfg_box, text="⚡ Avvia Offload & Genera Report", fg_color="#10b981", hover_color="#059669", height=50, width=320, font=ctk.CTkFont(weight="bold", size=15), corner_radius=10, command=self.run_offload_process).pack(pady=30)
 
@@ -2926,7 +2951,17 @@ class DatariumApp(ctk.CTk):
         self.offload_status_lbl.configure(text="Avvio copia ed elaborazione...", text_color="white")
         self.offload_progress_bar.set(0)
 
+        eject_source = self.offload_eject_source.get()
+        shutdown_after = self.offload_shutdown_after.get()
+
         def offload_bg():
+            import system_actions
+            # Impedisce al sistema di sospendersi/bloccare lo schermo per tutta la
+            # durata della copia: su Mac, bloccare lo schermo (es. con Touch ID)
+            # durante Offload interrompeva il job a metà. Ripristinato nel `finally`
+            # qui sotto, qualunque cosa succeda.
+            sleep_guard = system_actions.SleepInhibitor()
+            sleep_guard.__enter__()
             try:
                 import time
                 import os
@@ -3173,11 +3208,56 @@ class DatariumApp(ctk.CTk):
                         )
 
                 self.after(0, render_results_ui)
+
+                # Espulsione sorgente e spegnimento PC: solo a fine job, e lo spegnimento
+                # solo se non ci sono incongruenze di checksum (l'utente potrebbe voler
+                # vedere/gestire il problema prima che il PC si spenga).
+                if eject_source:
+                    ok_ej, msg_ej = system_actions.eject_volume(src)
+                    self.after(0, lambda ok=ok_ej, m=msg_ej: self.offload_status_lbl.configure(
+                        text=(self.offload_status_lbl.cget("text") + ("\nSorgente espulsa." if ok else f"\nEspulsione sorgente fallita: {m}"))
+                    ))
+
+                if shutdown_after and not checksum_mismatches:
+                    ok_sd, msg_sd, sd_handle = system_actions.shutdown_computer(60)
+                    if ok_sd:
+                        self._pending_shutdown_handle = sd_handle
+                        self.after(0, self._show_shutdown_countdown)
+                elif shutdown_after and checksum_mismatches:
+                    from tkinter import messagebox
+                    self.after(0, lambda: messagebox.showwarning(
+                        "Spegnimento annullato",
+                        "Sono state rilevate incongruenze di checksum: lo spegnimento automatico è stato "
+                        "annullato per darti modo di controllare il report prima di spegnere il PC."
+                    ))
             finally:
+                sleep_guard.__exit__(None, None, None)
                 self.is_scanning = False
                 self.after(0, lambda: self.set_sidebar_state("normal"))
 
         threading.Thread(target=offload_bg, daemon=True).start()
+
+    def _show_shutdown_countdown(self):
+        """Popup non bloccante con pulsante per annullare lo spegnimento automatico
+        programmato a fine Offload (margine di 60s prima che avvenga davvero)."""
+        from tkinter import messagebox
+        win = ctk.CTkToplevel(self)
+        win.title("Spegnimento programmato")
+        win.geometry("380x150")
+        win.attributes("-topmost", True)
+        ctk.CTkLabel(win, text="Offload completato.\nIl PC si spegnerà tra 60 secondi.",
+                     font=ctk.CTkFont(weight="bold")).pack(pady=(20, 10))
+
+        def do_cancel():
+            import system_actions
+            system_actions.cancel_shutdown(getattr(self, "_pending_shutdown_handle", None))
+            win.destroy()
+
+        ctk.CTkButton(win, text="Annulla spegnimento", fg_color="#ef4444", hover_color="#b91c1c",
+                      command=do_cancel).pack(pady=10)
+        # Se l'utente non annulla, la finestra si chiude da sola quando lo spegnimento
+        # e' ormai imminente/avvenuto: niente resta appeso in giro.
+        win.after(60000, lambda: win.destroy() if win.winfo_exists() else None)
 
     # ==================== INGEST (Fase 1-2: coda, trigger auto, multi-dest, proxy) ====================
     def init_ingest_pages(self):
