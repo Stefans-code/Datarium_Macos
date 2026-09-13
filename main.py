@@ -46,7 +46,7 @@ from face_memory import FaceMemoryManager
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.2.7"
+APP_VERSION = "1.2.8"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -2151,7 +2151,12 @@ class DatariumApp(ctk.CTk):
                 h = hashlib.sha256()
                 
             with open(file_path, "rb") as f:
-                while chunk := f.read(8192):
+                if hasattr(os, "posix_fadvise"):
+                    try:
+                        os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+                    except Exception:
+                        pass
+                while chunk := f.read(4 * 1024 * 1024):
                     h.update(chunk)
             return getattr(h, "hexdigest")()
         except Exception as e:
@@ -2181,10 +2186,16 @@ class DatariumApp(ctk.CTk):
         except Exception as e:
             return {a: f"Error: {e}" for a in algos}
 
-    def copy_write_and_hash(self, src_path, dest_paths, algos, chunk_size=1024 * 1024):
+    def copy_write_and_hash(self, src_path, dest_paths, algos, chunk_size=4 * 1024 * 1024, prefetched_chunks=None):
         """
         Legge src_path UNA SOLA VOLTA, scrivendola contemporaneamente su tutte le
         dest_paths e calcolando gli hash richiesti sugli stessi byte letti.
+
+        Se prefetched_chunks è già valorizzato (lista di bytes), il sorgente NON
+        viene riletto da disco: si usano i byte già letti in anticipo da
+        _prefetch_next_source() durante la verifica del file precedente (dischi
+        diversi = lettura sorgente e verifica destinazione avvengono in parallelo
+        senza contendersi lo stesso disco). Vedi offload_bg/_ingest_run_one.
 
         Prima la pipeline di Offload leggeva il sorgente 1 volta per l'hash e poi
         di nuovo 1 volta per OGNI destinazione (shutil.copy2): con 3 dischi di backup
@@ -2193,24 +2204,50 @@ class DatariumApp(ctk.CTk):
         anche se il software "fa" la stessa cosa. Con questa funzione il sorgente si
         legge una volta sola, qualunque sia il numero di destinazioni.
 
+        Le scritture sulle destinazioni avvengono ognuna nel proprio thread dedicato,
+        con una coda di buffering per disco: se una destinazione è più lenta delle
+        altre (disco/hub USB più lento) non blocca più le scritture sulle destinazioni
+        veloci, che prima erano costrette ad aspettare il turno nello stesso ciclo
+        sequenziale. Il thread di lettura scrive lo stesso chunk (bytes immutabile,
+        condivisibile senza copie) in ogni coda; se una coda si riempie (destinazione
+        molto più lenta delle altre) la lettura rallenta solo quel poco che serve a
+        non far esplodere la memoria, ma non aspetta un turno round-robin come prima.
+
         La verifica di integrità (rilettura della destinazione) resta un passaggio
         separato: serve a scoprire corruzioni introdotte dalla scrittura stessa
-        (dischi/cavi USB ballerini), quindi va tenuta.
+        (dischi/cavi USB ballerini), quindi va tenuta. Per renderla veloce anche su
+        file enormi, non rilegge più l'intero file: usa chunk_hashes (calcolati qui,
+        un hash per ogni blocco di chunk_size byte, sul primo algoritmo di `algos`)
+        per fare una verifica "a campione" con _verify_sampled_destinations() — vedi
+        quel metodo per il trade-off esatto (copertura ridotta, non più il 100% dei byte).
 
-        Ritorna (hashes: {algo: hexdigest}, write_ok: {dest_path: bool}).
+        Ritorna (hashes: {algo: hexdigest}, write_ok: {dest_path: bool}, chunk_hashes: [str]).
         """
         import hashlib
-        hashers = {}
-        for algo in algos:
+        import queue
+        import threading
+
+        def _new_hasher(algo):
             if algo == "MD5":
-                hashers[algo] = hashlib.md5()
+                return hashlib.md5()
             elif algo == "SHA-1":
-                hashers[algo] = hashlib.sha1()
+                return hashlib.sha1()
             elif algo == "xxHash64":
                 import xxhash
-                hashers[algo] = xxhash.xxh64()
+                return xxhash.xxh64()
             else:
-                hashers[algo] = hashlib.sha256()
+                return hashlib.sha256()
+
+        hashers = {}
+        for algo in algos:
+            hashers[algo] = _new_hasher(algo)
+
+        # Hash del PRIMO algoritmo, uno per ogni blocco letto, nello stesso ordine
+        # in cui vengono scritti: serve alla verifica a campione più avanti per
+        # confrontare un blocco riletto dalla destinazione senza dover ricalcolare
+        # l'hash dell'intero file.
+        chunk_algo = algos[0]
+        chunk_hashes = []
 
         write_ok = {}
         handles = {}
@@ -2221,18 +2258,73 @@ class DatariumApp(ctk.CTk):
             except Exception:
                 write_ok[d] = False
 
+        # Una coda + un thread scrittore per ogni destinazione scrivibile.
+        # maxsize=8 chunk (32MB col default a 4MB/chunk) assorbe le differenze di
+        # velocità momentanee tra dischi senza far crescere la memoria senza limite
+        # se una destinazione resta stabilmente più lenta delle altre.
+        queues = {}
+        threads = {}
+
+        def _writer(dest_path, fh, q):
+            while True:
+                item = q.get()
+                if item is None:
+                    break
+                try:
+                    fh.write(item)
+                except Exception:
+                    write_ok[dest_path] = False
+
+        for d, fh in handles.items():
+            if write_ok[d]:
+                # Hint "lettura/scrittura sequenziale" al kernel su Mac/Linux (no-op
+                # sicuro su Windows, dove posix_fadvise non esiste): permette al
+                # sistema di fare readahead/writeback più aggressivo sapendo che il
+                # file viene percorso dall'inizio alla fine, senza salti casuali.
+                if hasattr(os, "posix_fadvise"):
+                    try:
+                        os.posix_fadvise(fh.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+                    except Exception:
+                        pass
+                q = queue.Queue(maxsize=8)
+                queues[d] = q
+                t = threading.Thread(target=_writer, args=(d, fh, q), daemon=True)
+                t.start()
+                threads[d] = t
+
+        def _hash_chunk(chunk):
+            h = _new_hasher(chunk_algo)
+            h.update(chunk)
+            return h.hexdigest()
+
         try:
-            with open(src_path, "rb") as fsrc:
-                while chunk := fsrc.read(chunk_size):
+            if prefetched_chunks is not None:
+                for chunk in prefetched_chunks:
                     for h in hashers.values():
                         h.update(chunk)
-                    for d, fh in handles.items():
-                        if write_ok[d]:
-                            try:
-                                fh.write(chunk)
-                            except Exception:
-                                write_ok[d] = False
+                    chunk_hashes.append(_hash_chunk(chunk))
+                    for d, q in queues.items():
+                        if write_ok.get(d):
+                            q.put(chunk)
+            else:
+                with open(src_path, "rb") as fsrc:
+                    if hasattr(os, "posix_fadvise"):
+                        try:
+                            os.posix_fadvise(fsrc.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+                        except Exception:
+                            pass
+                    while chunk := fsrc.read(chunk_size):
+                        for h in hashers.values():
+                            h.update(chunk)
+                        chunk_hashes.append(_hash_chunk(chunk))
+                        for d, q in queues.items():
+                            if write_ok.get(d):
+                                q.put(chunk)
         finally:
+            for d, q in queues.items():
+                q.put(None)
+            for t in threads.values():
+                t.join()
             for fh in handles.values():
                 try:
                     fh.close()
@@ -2247,7 +2339,104 @@ class DatariumApp(ctk.CTk):
                     pass
 
         hashes = {a: getattr(h, "hexdigest")() for a, h in hashers.items()}
-        return hashes, write_ok
+        return hashes, write_ok, chunk_hashes
+
+    def _verify_sampled_destinations(self, target_paths, chunk_hashes, chunk_size, algo, expected_size, max_samples=10):
+        """
+        Verifica "a campione": invece di rileggere l'INTERO file da ogni destinazione
+        (come prima), rilegge solo una manciata di blocchi (max_samples, sempre incluso
+        il primo e l'ultimo) e li confronta con l'hash calcolato per quel blocco durante
+        la scrittura (chunk_hashes, da copy_write_and_hash). Più un controllo economico
+        della dimensione totale del file, che da solo intercetta scritture troncate
+        (disco pieno, cavo staccato a metà).
+
+        TRADE-OFF ESPLICITO accettato per la velocità: questo NON è più equivalente a
+        rileggere il 100% dei byte come prima. Su un file con centinaia di blocchi,
+        campionandone una decina la probabilità di NON accorgersi di una corruzione
+        isolata in un punto non campionato è concreta (non più ~0% come con la rilettura
+        completa). Intercetta comunque con alta affidabilità i fallimenti "grossi"
+        (scrittura troncata, blocco iniziale/finale corrotto, disco disconnesso).
+
+        Ritorna {target_path: bool}.
+        """
+        import hashlib
+        import concurrent.futures
+
+        def _hasher(a):
+            if a == "MD5":
+                return hashlib.md5()
+            elif a == "SHA-1":
+                return hashlib.sha1()
+            elif a == "xxHash64":
+                import xxhash
+                return xxhash.xxh64()
+            else:
+                return hashlib.sha256()
+
+        n_chunks = len(chunk_hashes)
+        if n_chunks == 0:
+            sample_indices = []
+        elif n_chunks <= max_samples:
+            sample_indices = list(range(n_chunks))
+        else:
+            # sempre il primo e l'ultimo, il resto distribuito uniformemente nel file
+            step = (n_chunks - 1) / (max_samples - 1)
+            sample_indices = sorted(set(round(i * step) for i in range(max_samples)))
+
+        def _check_one(target_path):
+            try:
+                if os.path.getsize(target_path) != expected_size:
+                    return False
+                with open(target_path, "rb") as f:
+                    for idx in sample_indices:
+                        f.seek(idx * chunk_size)
+                        block = f.read(chunk_size)
+                        h = _hasher(algo)
+                        h.update(block)
+                        if h.hexdigest() != chunk_hashes[idx]:
+                            return False
+                return True
+            except Exception:
+                return False
+
+        if not target_paths:
+            return {}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(target_paths)) as pool:
+            return dict(zip(target_paths, pool.map(_check_one, target_paths)))
+
+    # Soglia oltre la quale NON si pre-legge il file successivo in memoria: file
+    # RAW/ProRes molto grandi (decine di GB) rischierebbero di saturare la RAM.
+    # Sotto la soglia il guadagno è reale (nessuna doppia lettura del sorgente),
+    # sopra si torna al comportamento normale (nessuna regressione, solo nessun bonus).
+    PREFETCH_MAX_BYTES = 1024 * 1024 * 1024  # 1 GB
+
+    def _prefetch_next_source(self, path, chunk_size=4 * 1024 * 1024):
+        """
+        Legge path per intero in memoria (lista di chunk), pensato per essere
+        chiamato in un thread separato MENTRE il file precedente è in fase di
+        verifica (rilettura delle destinazioni): sorgente e destinazioni sono
+        quasi sempre dischi fisicamente diversi (es. scheda SD della camera ->
+        HDD di backup), quindi questa lettura non contende banda con la verifica
+        in corso. Se il file supera PREFETCH_MAX_BYTES o si verifica un errore,
+        ritorna None: il chiamante farà una normale lettura da disco più avanti,
+        senza alcuna regressione.
+        """
+        try:
+            size = os.path.getsize(path)
+            if size > self.PREFETCH_MAX_BYTES:
+                return None
+            chunks = []
+            with open(path, "rb") as f:
+                if hasattr(os, "posix_fadvise"):
+                    try:
+                        os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
+                    except Exception:
+                        pass
+                while chunk := f.read(chunk_size):
+                    chunks.append(chunk)
+            return chunks
+        except Exception:
+            return None
 
     def check_content_equal(self, f1, f2):
         try:
@@ -2987,6 +3176,8 @@ class DatariumApp(ctk.CTk):
                 import os
                 import shutil
                 import datetime
+                import concurrent.futures
+                import threading
                 from report_generator import ReportGenerator
 
                 files_to_copy = []
@@ -3029,7 +3220,26 @@ class DatariumApp(ctk.CTk):
                 start_time = time.time()
                 results = []
 
-                for it in files_to_copy:
+                # Pre-lettura del file successivo in memoria MENTRE il file corrente è
+                # in fase di verifica (vedi _prefetch_next_source): sorgente e destinazioni
+                # sono quasi sempre dischi fisici diversi, quindi le due operazioni non si
+                # contendono banda. Se fallisce o il file è troppo grande, nessun problema:
+                # copy_write_and_hash farà semplicemente una normale lettura da disco.
+                prefetch_state = {"path": None, "thread": None, "chunks": None}
+
+                def _kick_prefetch(path):
+                    def _do():
+                        prefetch_state["chunks"] = self._prefetch_next_source(path)
+                    prefetch_state["path"] = path
+                    prefetch_state["chunks"] = None
+                    t = threading.Thread(target=_do, daemon=True)
+                    t.start()
+                    prefetch_state["thread"] = t
+
+                if files_to_copy:
+                    _kick_prefetch(files_to_copy[0]["path"])
+
+                for _idx, it in enumerate(files_to_copy):
                     try:
                         sz = os.path.getsize(it["path"])
                         sz_str = self.format_file_size(sz)
@@ -3047,9 +3257,19 @@ class DatariumApp(ctk.CTk):
                             os.makedirs(os.path.dirname(target_path), exist_ok=True)
                             target_paths.append(target_path)
 
-                        src_hashes, write_ok = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo])
+                        prefetched = None
+                        if prefetch_state["path"] == it["path"] and prefetch_state["thread"] is not None:
+                            prefetch_state["thread"].join()
+                            prefetched = prefetch_state["chunks"]
+
+                        src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo], prefetched_chunks=prefetched)
                         src_hash = src_hashes[algo]
                         src_hash_alt = src_hashes[alt_algo]
+
+                        # Avvia subito la pre-lettura del PROSSIMO file: da qui in poi (retry
+                        # + verifica) il disco sorgente è libero, tanto vale iniziare a leggerlo.
+                        if _idx + 1 < len(files_to_copy):
+                            _kick_prefetch(files_to_copy[_idx + 1]["path"])
 
                         mtime = os.path.getmtime(it["path"])
                         ctime = os.path.getctime(it["path"])
@@ -3081,19 +3301,27 @@ class DatariumApp(ctk.CTk):
                         # marcata "Failed" in una riga di tabella che l'utente puo' non notare.
                         copy_success = True
                         fail_reason = None  # "scrittura" | "checksum"
-                        for target_path in target_paths:
-                            if not write_ok.get(target_path):
-                                copy_success = False
-                                fail_reason = fail_reason or "scrittura"
-                                continue
-                            self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
-                            dest_hash = self.compute_hash(target_path, algo)
+                        verify_targets = [tp for tp in target_paths if write_ok.get(tp)]
+                        if any(not write_ok.get(tp) for tp in target_paths):
+                            copy_success = False
+                            fail_reason = "scrittura"
 
-                            if (not src_hash or src_hash.startswith("Error") or
-                                not dest_hash or dest_hash.startswith("Error") or
-                                dest_hash != src_hash):
-                                copy_success = False
-                                fail_reason = "checksum"  # priorita' massima: e' l'esito piu' grave
+                        if verify_targets:
+                            self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
+                            # Verifica A CAMPIONE in parallelo su ogni destinazione (vedi
+                            # _verify_sampled_destinations): rilegge solo una manciata di
+                            # blocchi invece dell'intero file, molto più veloce della
+                            # rilettura completa di prima, con una copertura ridotta ma
+                            # comunque efficace sui fallimenti più comuni (scrittura
+                            # troncata, blocco corrotto). Trade-off scelto esplicitamente
+                            # per la velocità.
+                            verify_ok = self._verify_sampled_destinations(
+                                verify_targets, chunk_hashes, 4 * 1024 * 1024, algo, sz)
+
+                            for target_path, ok in verify_ok.items():
+                                if not src_hash or src_hash.startswith("Error") or not ok:
+                                    copy_success = False
+                                    fail_reason = "checksum"  # priorita' massima: e' l'esito piu' grave
 
                         # Proxy video (ffmpeg) sulla prima destinazione (best-effort)
                         if make_proxy:
@@ -3441,6 +3669,7 @@ class DatariumApp(ctk.CTk):
         import os
         import shutil
         import datetime
+        import concurrent.futures
         from report_generator import ReportGenerator
         src = job["src"]
         dests = list(self.ingest_destinations)
@@ -3481,6 +3710,27 @@ class DatariumApp(ctk.CTk):
         results = []
         n_ok = 0
         srclabel = os.path.basename(src.rstrip("/\\")) or src
+
+        # Stessa pre-lettura in background usata in Offload: legge il PROSSIMO file
+        # sorgente in memoria mentre quello corrente è in fase di verifica (dischi
+        # fisicamente diversi = nessuna contesa). Il percorso sorgente del prossimo
+        # file è già noto a prescindere dalla classificazione AI (che riguarda solo
+        # la destinazione), quindi si può avviare subito.
+        import threading
+        prefetch_state = {"path": None, "thread": None, "chunks": None}
+
+        def _kick_prefetch(path):
+            def _do():
+                prefetch_state["chunks"] = self._prefetch_next_source(path)
+            prefetch_state["path"] = path
+            prefetch_state["chunks"] = None
+            t = threading.Thread(target=_do, daemon=True)
+            t.start()
+            prefetch_state["thread"] = t
+
+        if files:
+            _kick_prefetch(files[0]["path"])
+
         for i, it in enumerate(files, 1):
             album = "Varie"
             try:
@@ -3515,9 +3765,19 @@ class DatariumApp(ctk.CTk):
                         tpath = os.path.join(tdir, f"{b}_{k}{e}")
                     target_paths.append(tpath)
 
-                src_hashes, write_ok = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo])
+                prefetched = None
+                if prefetch_state["path"] == it["path"] and prefetch_state["thread"] is not None:
+                    prefetch_state["thread"].join()
+                    prefetched = prefetch_state["chunks"]
+
+                src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo], prefetched_chunks=prefetched)
                 src_hash = src_hashes.get(algo, "")
                 src_hash_alt = src_hashes.get(alt_algo, "")
+
+                # Avvia la pre-lettura del prossimo file: da qui in poi (retry + verifica)
+                # il disco sorgente è libero.
+                if i < total:
+                    _kick_prefetch(files[i]["path"])
 
                 # Retry mirato SOLO sulle destinazioni che hanno fallito la scrittura
                 # (drive USB lenti/ballerini): non serve rileggere il sorgente per
@@ -3535,16 +3795,21 @@ class DatariumApp(ctk.CTk):
                         except Exception as ce:
                             print(f"Errore copia fallita per {it['name']}: {ce}")
 
-                # Verifica integrità: rilegge ogni destinazione per scoprire eventuali
-                # corruzioni introdotte dalla scrittura stessa.
+                # Verifica integrità A CAMPIONE (vedi _verify_sampled_destinations): rilegge
+                # solo una manciata di blocchi per destinazione invece dell'intero file,
+                # in parallelo su ogni destinazione. Stesso trade-off scelto in Offload:
+                # copertura ridotta rispetto alla rilettura completa, ma molto più veloce.
                 all_ok = True
-                for tpath in target_paths:
-                    if not write_ok.get(tpath):
-                        all_ok = False
-                        continue
-                    dh = self.compute_hash(tpath, algo)
-                    if (not src_hash or src_hash.startswith("Error") or not dh or dh.startswith("Error") or dh != src_hash):
-                        all_ok = False
+                verify_targets = [tp for tp in target_paths if write_ok.get(tp)]
+                if any(not write_ok.get(tp) for tp in target_paths):
+                    all_ok = False
+
+                if verify_targets:
+                    verify_ok = self._verify_sampled_destinations(
+                        verify_targets, chunk_hashes, 4 * 1024 * 1024, algo, sz)
+                    for tpath, ok in verify_ok.items():
+                        if not src_hash or src_hash.startswith("Error") or not ok:
+                            all_ok = False
 
                 if make_proxy:
                     try:
