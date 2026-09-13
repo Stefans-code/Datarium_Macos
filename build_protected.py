@@ -130,7 +130,16 @@ def main():
 
     print("=== [2/4] Compilazione moduli con Cython (binari nativi) ===")
     to_compile = CORE_MODULES + [APP_DST]
-    run([py, "-m", "Cython.Build.Cythonize", "-i", "-3"] + to_compile, cwd=STAGE)
+    cythonize_cmd = [py, "-m", "Cython.Build.Cythonize", "-i", "-3"]
+    if platform.system() == "Windows":
+        # Su Windows Cythonize compila i moduli in processi worker separati (pool
+        # paralleli): questi worker non ereditano sempre correttamente il PATH esteso
+        # da vcvars64.bat (serve a trovare rc.exe), causando "LINK : fatal error
+        # LNK1158: impossibile eseguire 'rc.exe'" in modo intermittente. -j1 forza la
+        # compilazione sequenziale in-process, più lenta ma senza questo problema.
+        # Mac/Linux (gcc/clang, nessun rc.exe) restano paralleli come prima.
+        cythonize_cmd.append("-j1")
+    run(cythonize_cmd + to_compile, cwd=STAGE)
 
     # Rimuove i .py e .c sorgente: nel bundle resteranno solo i binari compilati
     for m in to_compile:
