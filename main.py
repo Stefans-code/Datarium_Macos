@@ -46,7 +46,7 @@ from face_memory import FaceMemoryManager
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.2.9"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -2186,7 +2186,7 @@ class DatariumApp(ctk.CTk):
         except Exception as e:
             return {a: f"Error: {e}" for a in algos}
 
-    def copy_write_and_hash(self, src_path, dest_paths, algos, chunk_size=4 * 1024 * 1024, prefetched_chunks=None):
+    def copy_write_and_hash(self, src_path, dest_paths, algos, chunk_size=4 * 1024 * 1024, prefetched_chunks=None, progress_callback=None):
         """
         Legge src_path UNA SOLA VOLTA, scrivendola contemporaneamente su tutte le
         dest_paths e calcolando gli hash richiesti sugli stessi byte letti.
@@ -2220,6 +2220,12 @@ class DatariumApp(ctk.CTk):
         un hash per ogni blocco di chunk_size byte, sul primo algoritmo di `algos`)
         per fare una verifica "a campione" con _verify_sampled_destinations() — vedi
         quel metodo per il trade-off esatto (copertura ridotta, non più il 100% dei byte).
+
+        Se `progress_callback` è passato, viene richiamato con i byte letti dal
+        sorgente finora (cumulativi su questo file) dopo ogni chunk: serve a far
+        avanzare la percentuale/ETA anche DURANTE la copia di un singolo file
+        grande, invece di aggiornarli solo a file completato (che su file da
+        decine di GB lasciava la barra ferma per minuti).
 
         Ritorna (hashes: {algo: hexdigest}, write_ok: {dest_path: bool}, chunk_hashes: [str]).
         """
@@ -2297,6 +2303,7 @@ class DatariumApp(ctk.CTk):
             h.update(chunk)
             return h.hexdigest()
 
+        bytes_read = 0
         try:
             if prefetched_chunks is not None:
                 for chunk in prefetched_chunks:
@@ -2306,6 +2313,9 @@ class DatariumApp(ctk.CTk):
                     for d, q in queues.items():
                         if write_ok.get(d):
                             q.put(chunk)
+                    bytes_read += len(chunk)
+                    if progress_callback is not None:
+                        progress_callback(bytes_read)
             else:
                 with open(src_path, "rb") as fsrc:
                     if hasattr(os, "posix_fadvise"):
@@ -2320,6 +2330,9 @@ class DatariumApp(ctk.CTk):
                         for d, q in queues.items():
                             if write_ok.get(d):
                                 q.put(chunk)
+                        bytes_read += len(chunk)
+                        if progress_callback is not None:
+                            progress_callback(bytes_read)
         finally:
             for d, q in queues.items():
                 q.put(None)
@@ -3061,6 +3074,13 @@ class DatariumApp(ctk.CTk):
         self.offload_progress_bar.pack(fill="x", padx=10, pady=10)
         self.offload_progress_bar.set(0)
 
+        # Log live: una riga per ogni file all'avvio/fine copia, in modo che l'utente
+        # veda sempre "sta succedendo qualcosa" (soprattutto con pochi file enormi,
+        # dove la sola label di stato può restare ferma a lungo tra un file e l'altro).
+        self.offload_log_text = ctk.CTkTextbox(v_results, height=140, font=ctk.CTkFont(family="Consolas", size=11))
+        self.offload_log_text.pack(fill="x", padx=5, pady=(0, 5))
+        self.offload_log_text.configure(state="disabled")
+
         self.offload_results_scroll = ctk.CTkScrollableFrame(v_results, fg_color=("gray95", "gray10"))
         self.offload_results_scroll.pack(fill="both", expand=True, padx=5, pady=5)
 
@@ -3074,6 +3094,16 @@ class DatariumApp(ctk.CTk):
 
         # Start on Home
         self.show_offload_subpage("OffloadHome")
+
+    def _offload_log(self, line):
+        """Aggiunge una riga al log live della pagina Offload (thread-safe: va
+        chiamato da self.after). Autoscroll in fondo."""
+        if not self.offload_log_text.winfo_exists():
+            return
+        self.offload_log_text.configure(state="normal")
+        self.offload_log_text.insert("end", line + "\n")
+        self.offload_log_text.see("end")
+        self.offload_log_text.configure(state="disabled")
 
     def show_offload_subpage(self, name):
         if name == "OffloadHome":
@@ -3159,6 +3189,9 @@ class DatariumApp(ctk.CTk):
 
         self.offload_status_lbl.configure(text="Avvio copia ed elaborazione...", text_color="white")
         self.offload_progress_bar.set(0)
+        self.offload_log_text.configure(state="normal")
+        self.offload_log_text.delete("1.0", "end")
+        self.offload_log_text.configure(state="disabled")
 
         eject_source = self.offload_eject_source.get()
         shutdown_after = self.offload_shutdown_after.get()
@@ -3250,6 +3283,7 @@ class DatariumApp(ctk.CTk):
                         # il vero collo di bottiglia con più dischi lenti in parallelo.
                         alt_algo = "SHA-256" if algo == "xxHash64" else "MD5"
                         self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Copia e checksum: {name}..."))
+                        self.after(0, lambda name=it["name"], s=sz_str, n=_idx + 1, t=total_files: self._offload_log(f"▶ [{n}/{t}] {name} ({s})"))
 
                         target_paths = []
                         for d in dests:
@@ -3262,7 +3296,33 @@ class DatariumApp(ctk.CTk):
                             prefetch_state["thread"].join()
                             prefetched = prefetch_state["chunks"]
 
-                        src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo], prefetched_chunks=prefetched)
+                        # Percentuale/velocità/ETA aggiornate DURANTE la copia del singolo file
+                        # (non solo a file completato): su pochi file enormi (tipico di un
+                        # Offload da camera/SD card) la barra restava ferma per minuti tra un
+                        # aggiornamento e l'altro. Throttle a ~4 volte/secondo per non intasare
+                        # la coda eventi della UI su file da decine di GB.
+                        bytes_before_file = copied_bytes
+                        _throttle = {"t": 0.0}
+
+                        def _on_file_progress(n, _bf=bytes_before_file, _sz=sz):
+                            now = time.time()
+                            if now - _throttle["t"] < 0.25 and n < _sz:
+                                return
+                            _throttle["t"] = now
+                            done = _bf + n
+                            elapsed = max(0.001, now - start_time)
+                            speed = done / elapsed
+                            remaining = max(0, total_bytes - done)
+                            eta_s = int(remaining / speed) if speed > 0 else 0
+                            pct = int(done / total_bytes * 100) if total_bytes else 0
+                            speed_str = self.format_file_size(int(speed)) + "/s"
+                            eta_str = (f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s")
+                            self.after(0, lambda v=done / total_bytes if total_bytes else 0, p=pct, s=speed_str, e=eta_str: (
+                                self.offload_progress_bar.set(v),
+                                self.offload_status_lbl.configure(text=f"{p}% · {s} · ETA {e}", text_color=("gray10", "white"))
+                            ))
+
+                        src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo], prefetched_chunks=prefetched, progress_callback=_on_file_progress)
                         src_hash = src_hashes[algo]
                         src_hash_alt = src_hashes[alt_algo]
 
@@ -3330,6 +3390,10 @@ class DatariumApp(ctk.CTk):
                             except Exception:
                                 pass
 
+                        _log_icon = "✓" if copy_success else "✗"
+                        _log_reason = f" ({fail_reason})" if fail_reason else ""
+                        self.after(0, lambda ic=_log_icon, r=_log_reason: self._offload_log(f"  {ic} completato{r}"))
+
                         status = "Verified" if copy_success else "Failed"
 
                         # Estrazione metadati REALI del media (risoluzione, durata, codec,
@@ -3369,6 +3433,7 @@ class DatariumApp(ctk.CTk):
                             "status": "Failed",
                             "fail_reason": "errore"
                         })
+                        self.after(0, lambda err=str(e): self._offload_log(f"  ✗ errore: {err}"))
 
                     processed_files += 1
                     try:

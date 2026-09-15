@@ -14,6 +14,7 @@ Offload né bloccare l'interfaccia, solo essere segnalato con (ok, messaggio).
 import os
 import platform
 import subprocess
+import time
 
 
 class SleepInhibitor:
@@ -71,22 +72,65 @@ def eject_volume(path):
     system = platform.system()
     try:
         if system == "Darwin":
-            res = subprocess.run(["diskutil", "eject", path], capture_output=True, text=True, timeout=15)
-            return res.returncode == 0, (res.stdout or res.stderr).strip()
+            # Se `path` è una sottocartella del volume (es. l'utente ha scelto come
+            # sorgente una cartella dentro la SD card, non la card stessa), diskutil
+            # può non risolverla correttamente: risaliamo ai genitori fino al vero
+            # mount point prima di espellere.
+            mount_path = os.path.abspath(path)
+            while not os.path.ismount(mount_path) and os.path.dirname(mount_path) != mount_path:
+                mount_path = os.path.dirname(mount_path)
+            res = subprocess.run(["diskutil", "eject", mount_path], capture_output=True, text=True, timeout=15)
+            if res.returncode == 0:
+                return True, (res.stdout or res.stderr).strip()
+            # Il volume può risultare "busy" per una frazione di secondo subito dopo
+            # l'ultima scrittura/chiusura file: un secondo tentativo breve copre la
+            # maggior parte di questi falsi negativi, senza mai forzare (-force).
+            time.sleep(1.0)
+            res2 = subprocess.run(["diskutil", "eject", mount_path], capture_output=True, text=True, timeout=15)
+            return res2.returncode == 0, (res2.stdout or res2.stderr).strip()
 
         elif system == "Windows":
-            # Non c'è un "eject" nativo a riga di comando: usiamo l'automazione
-            # Shell (stesso verbo "Eject" del tasto destro -> Espelli in Esplora File).
+            # Non c'è un "eject" nativo a riga di comando: primo tentativo con
+            # l'automazione Shell (stesso verbo "Eject" del tasto destro -> Espelli
+            # in Esplora File). Il COM però NON segnala errore se il verbo non esiste
+            # per quel tipo di unità: molti HDD USB esterni sono visti da Windows come
+            # "Fixed" (non "Removable") e semplicemente non hanno il verbo "Eject",
+            # quindi la chiamata "riesce" senza scollegare nulla. Per questo verifichiamo
+            # DAVVERO se l'unità è sparita, invece di fidarci del solo returncode.
             drive = os.path.splitdrive(os.path.abspath(path))[0]
             if not drive:
                 return False, "Impossibile determinare l'unità da espellere."
+            drive_root = drive + "\\"
+
+            def _still_present():
+                return os.path.exists(drive_root)
+
             ps_cmd = (
                 "$sh = New-Object -ComObject Shell.Application; "
-                f"$sh.Namespace(17).ParseName('{drive}\\').InvokeVerb('Eject')"
+                f"$item = $sh.Namespace(17).ParseName('{drive_root}'); "
+                "if ($item) { $item.InvokeVerb('Eject') }"
             )
-            res = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
-                                  capture_output=True, text=True, timeout=15)
-            return res.returncode == 0, (res.stdout or res.stderr).strip() or "Comando di espulsione inviato."
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                            capture_output=True, text=True, timeout=15)
+            time.sleep(1.5)
+            if not _still_present():
+                return True, "Sorgente espulsa."
+
+            # Fallback: smonta il volume via WMI (Win32_Volume.Dismount). Copre il caso,
+            # molto comune con gli HDD USB esterni, in cui il verbo "Eject" non esiste:
+            # qui non si "espelle" fisicamente il disco (niente notifica "sicuro da
+            # rimuovere"), ma si smonta il file system, il che è comunque sufficiente e
+            # sicuro per lo scollegamento.
+            ps_cmd2 = (
+                f"$vol = Get-WmiObject -Class Win32_Volume -Filter \"DriveLetter='{drive}'\"; "
+                "if ($vol) { $vol.Dismount($false, $false) }"
+            )
+            res2 = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd2],
+                                   capture_output=True, text=True, timeout=15)
+            time.sleep(1.0)
+            if not _still_present():
+                return True, "Sorgente smontata."
+            return False, (res2.stdout or res2.stderr).strip() or "Espulsione non riuscita: l'unità risulta ancora presente."
 
         else:
             # Linux: risali dal path al device montato, poi smontalo con udisksctl
