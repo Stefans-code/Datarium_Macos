@@ -302,6 +302,17 @@ class DatariumApp(ctk.CTk):
         self.offload_eject_source = ctk.BooleanVar(value=False)
         self.offload_shutdown_after = ctk.BooleanVar(value=False)
 
+        # Naming destinazione configurabile (come ShotPut Pro: sottocartella generata a partire
+        # da uno schema, invece di mirror-are sempre e solo il path relativo della sorgente).
+        # Default "Nessuna" = comportamento identico a prima, nessuna regressione per chi non la tocca.
+        self.offload_naming_scheme = ctk.StringVar(value="Nessuna (mirror sorgente)")
+        self.offload_naming_prefix = ctk.StringVar(value="")
+
+        # Preset: gruppi salvati di {destinazioni, algoritmo, naming, prefix} riutilizzabili,
+        # persistiti in config.json insieme alle altre impostazioni dell'app.
+        self.offload_presets = {}
+        self.offload_selected_preset = ctk.StringVar(value="")
+
         # Ingest Feature State (Fase 0-2: coda, trigger auto, multi-destinazione, proxy)
         self.ingest_destinations = []
         self.ingest_organize_ai = ctk.BooleanVar(value=True)
@@ -347,6 +358,9 @@ class DatariumApp(ctk.CTk):
         os.makedirs(path, exist_ok=True)
         return os.path.join(path, "config.json")
 
+    def get_job_history_path(self):
+        return os.path.join(os.path.dirname(self.get_config_path()), "job_history.json")
+
     def load_settings(self):
         import json
         config_path = self.get_config_path()
@@ -356,7 +370,9 @@ class DatariumApp(ctk.CTk):
         self.proxy_gen_enabled = False
         self.proxy_resolution = "540p (960x540)"
         self.proxy_format = "MP4 (.mp4)"
-        
+        self.offload_presets = {}
+        self.job_history_max = 50
+
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
@@ -367,6 +383,8 @@ class DatariumApp(ctk.CTk):
                     self.proxy_gen_enabled = data.get("proxy_gen_enabled", False)
                     self.proxy_resolution = data.get("proxy_resolution", "540p (960x540)")
                     self.proxy_format = data.get("proxy_format", "MP4 (.mp4)")
+                    self.offload_presets = data.get("offload_presets", {})
+                    self.job_history_max = data.get("job_history_max", 50)
             except Exception as e:
                 print(f"Errore caricamento impostazioni: {e}")
                 
@@ -379,7 +397,9 @@ class DatariumApp(ctk.CTk):
             "scan_sidecars_enabled": self.scan_sidecars_var.get(),
             "proxy_gen_enabled": self.proxy_gen_var.get(),
             "proxy_resolution": self.proxy_resolution_var.get(),
-            "proxy_format": self.proxy_format_var.get()
+            "proxy_format": self.proxy_format_var.get(),
+            "offload_presets": self.offload_presets,
+            "job_history_max": self.job_history_max
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -1597,8 +1617,8 @@ class DatariumApp(ctk.CTk):
             for w in self.scroll_frame.winfo_children(): w.destroy()
             src = self.source_folder.get()
             if not src: return
-            self._organize_start_time = time.time()
 
+            self._organize_start_time = time.time()
             self.set_progress(0)
             text_items = []
             vision_items = []
@@ -1625,7 +1645,10 @@ class DatariumApp(ctk.CTk):
                         '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm', '.mcw'
                     ]:
                         if not self.doc_filters.get("Video", ctk.BooleanVar(value=True)).get(): skip = True
-                        else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Video"})
+                        # Nei video (type="Video") l'AI vision analizza un frame estratto col
+                        # proxy ffmpeg: vanno processati nella stessa fase "visione" delle
+                        # immagini (dopo che il modello e' caricato), non prima come i testi.
+                        else: vision_items.append({"old": f, "path": os.path.join(root, f), "type": "Video"})
                     elif ext in ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.xls', '.pptx', '.csv']:
                         if not self.doc_filters.get("Documenti", ctk.BooleanVar(value=True)).get(): skip = True
                         else: text_items.append({"old": f, "path": os.path.join(root, f), "type": "Doc"})
@@ -1665,7 +1688,9 @@ class DatariumApp(ctk.CTk):
             self.update_status("⚡ Analisi rapida documenti...")
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-                future_to_item = {executor.submit(self.ai.extract_context, it['path'], self.scan_sidecars_var.get()): it for it in valid_items if it['type'] != "Image"}
+                # Image e Video vengono analizzati dopo (fase 3), quando il modello vision e'
+                # gia' caricato: i video usano un frame estratto via ffmpeg, non solo i metadata.
+                future_to_item = {executor.submit(self.ai.extract_context, it['path'], self.scan_sidecars_var.get()): it for it in valid_items if it['type'] not in ("Image", "Video")}
                 for future in concurrent.futures.as_completed(future_to_item):
                     if self.stop_ai: break
                     item = future_to_item[future]
@@ -1674,7 +1699,7 @@ class DatariumApp(ctk.CTk):
 
             # 2. CARICAMENTO AI (Testo o Visione)
             if self.check_ai.get():
-                vision_needed = [it for it in valid_items if it['type'] == "Image"]
+                vision_needed = [it for it in valid_items if it['type'] in ("Image", "Video")]
                 if not self.is_ai_loaded or (vision_needed and not self.ai.is_vision):
                     self.update_status("🧠 Caricamento Modello AI...")
                     success, err = self.ai.download_model_if_needed(vision_mode=bool(vision_needed), progress_callback=self.update_status)
@@ -1682,14 +1707,15 @@ class DatariumApp(ctk.CTk):
                         self.is_ai_loaded = True
 
             # 3. ANALISI VISIONE SEQUENZIALE (Per non saturare la RAM)
-            vision_needed = [it for it in valid_items if it['type'] == "Image"]
+            vision_needed = [it for it in valid_items if it['type'] in ("Image", "Video")]
             for idx, item in enumerate(vision_needed):
                 if self.stop_ai: return
                 self.update_status(f"👁️ Visione {idx+1}/{len(vision_needed)}: {item['old']}")
                 item['context'] = self.ai.extract_context(item['path'], self.scan_sidecars_var.get())
-                
+
                 # Se la checkbox "Identifica persone nelle foto" è attiva, esegui il riconoscimento facciale con memoria
-                if self.organizer_identify_people.get():
+                # (solo sulle immagini: il rilevamento volti lavora su un file immagine, un video non è leggibile da cv2.imread)
+                if self.organizer_identify_people.get() and item['type'] == "Image":
                     self.update_status(f"👤 Analisi volti: {item['old']}")
                     try:
                         faces, cv_img = self.face_mem.detect_faces(item['path'])
@@ -2233,6 +2259,15 @@ class DatariumApp(ctk.CTk):
         import queue
         import threading
 
+        class _NullHasher:
+            """Hasher 'nullo' per la modalita' 'Solo Dimensione': non calcola alcun checksum
+            (nessun costo CPU), la verifica si affida solo al confronto delle dimensioni gia'
+            fatto in _verify_sampled_destinations quando chunk_hashes e' vuoto/omogeneo."""
+            def update(self, chunk):
+                pass
+            def hexdigest(self):
+                return "N/A (solo dimensione)"
+
         def _new_hasher(algo):
             if algo == "MD5":
                 return hashlib.md5()
@@ -2241,6 +2276,8 @@ class DatariumApp(ctk.CTk):
             elif algo == "xxHash64":
                 import xxhash
                 return xxhash.xxh64()
+            elif algo == "Solo Dimensione":
+                return _NullHasher()
             else:
                 return hashlib.sha256()
 
@@ -2851,8 +2888,9 @@ class DatariumApp(ctk.CTk):
                 albums = {}
                 for path in valid_files:
                     try:
-                        ext = os.path.splitext(path)[1].lower()
-                        context = self.ai.extract_context(path) if ext not in ['.mp4', '.mov'] else "Multimediale"
+                        # Il modello vision e' gia' caricato sopra: extract_context ora descrive
+                        # anche i video (frame estratto via ffmpeg), niente piu' placeholder fisso.
+                        context = self.ai.extract_context(path)
                         album_name = self.ai.get_album_name(context) if context else "Varie"
                         # Clean filename characters
                         for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
@@ -3018,12 +3056,37 @@ class DatariumApp(ctk.CTk):
 
         # Settings
         ctk.CTkLabel(g, text="Algoritmo Verifica:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=3, column=0, sticky="w", pady=12)
-        self.opt_off_algo = ctk.CTkOptionMenu(g, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5"], height=35)
+        self.opt_off_algo = ctk.CTkOptionMenu(g, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5", "Solo Dimensione"], height=35)
         self.opt_off_algo.grid(row=3, column=1, columnspan=2, padx=(15, 0), sticky="w")
 
         ctk.CTkLabel(g, text="ID Report:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=4, column=0, sticky="w", pady=12)
         self.ent_off_id = ctk.CTkEntry(g, textvariable=self.offload_report_id, font=ctk.CTkFont(size=12), height=35)
         self.ent_off_id.grid(row=4, column=1, columnspan=2, padx=(15, 0), sticky="w", ipadx=100)
+
+        # Naming destinazione configurabile: schema per generare una sottocartella nella
+        # destinazione invece di mirror-are sempre e solo il path relativo della sorgente
+        # (gap rispetto a ShotPut Pro individuato confrontando le due app).
+        ctk.CTkLabel(g, text="Sottocartella Destinazione:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=5, column=0, sticky="w", pady=12)
+        naming_row = ctk.CTkFrame(g, fg_color="transparent")
+        naming_row.grid(row=5, column=1, columnspan=2, padx=(15, 0), sticky="ew")
+        self.opt_off_naming = ctk.CTkOptionMenu(
+            naming_row, variable=self.offload_naming_scheme,
+            values=["Nessuna (mirror sorgente)", "Data odierna", "Nome sorgente", "Numerazione automatica", "Personalizzato"],
+            height=35, width=210, command=lambda _v: self._update_naming_prefix_visibility()
+        )
+        self.opt_off_naming.pack(side="left")
+        self.ent_off_naming_prefix = ctk.CTkEntry(naming_row, textvariable=self.offload_naming_prefix, placeholder_text="Prefisso (es. Offload)", height=35, width=180)
+        self.ent_off_naming_prefix.pack(side="left", padx=(10, 0))
+        self._update_naming_prefix_visibility()
+
+        # Preset: salva/richiama al volo destinazioni + algoritmo + naming scelti.
+        ctk.CTkLabel(g, text="Preset:", font=ctk.CTkFont(weight="bold", size=13)).grid(row=6, column=0, sticky="w", pady=12)
+        preset_row = ctk.CTkFrame(g, fg_color="transparent")
+        preset_row.grid(row=6, column=1, columnspan=2, padx=(15, 0), sticky="ew")
+        self.opt_off_preset = ctk.CTkOptionMenu(preset_row, variable=self.offload_selected_preset, values=["-"], height=35, width=210, command=self._apply_offload_preset)
+        self.opt_off_preset.pack(side="left")
+        ctk.CTkButton(preset_row, text="💾 Salva come preset", width=170, height=35, command=self._save_offload_preset).pack(side="left", padx=(10, 0))
+        self._refresh_offload_presets_ui()
 
         # --- Sezione Metadati Produzione (stile Silverstack) ---
         meta_header = ctk.CTkFrame(cfg_box, fg_color="transparent")
@@ -3156,12 +3219,97 @@ class DatariumApp(ctk.CTk):
             import webbrowser
             webbrowser.open(pathlib.Path(self.generated_report_path).absolute().as_uri())
 
+    def _update_naming_prefix_visibility(self):
+        """Il campo prefisso serve solo per lo schema 'Personalizzato': disabilitato (non
+        rimosso, per non alterare la griglia) negli altri casi cosi' l'utente capisce subito
+        che non ha effetto con lo schema attualmente selezionato."""
+        if not hasattr(self, "ent_off_naming_prefix"):
+            return
+        scheme = self.offload_naming_scheme.get()
+        self.ent_off_naming_prefix.configure(state="normal" if scheme == "Personalizzato" else "disabled")
+
+    def _compute_offload_subfolder(self, src, dests, scheme, prefix):
+        """Calcola la sottocartella di destinazione secondo lo schema scelto (gap rispetto a
+        ShotPut Pro: naming destinazione configurabile invece del solo mirror del path sorgente).
+        Ritorna "" per 'Nessuna' (comportamento identico a prima, nessuna regressione)."""
+        import re
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+
+        if scheme == "Data odierna":
+            return today
+        elif scheme == "Nome sorgente":
+            name = os.path.basename(os.path.normpath(src)) or "Sorgente"
+            return re.sub(r'[<>:"/\\|?*]', "_", name)
+        elif scheme == "Numerazione automatica":
+            # Cerca in TUTTE le destinazioni il numero piu' alto gia' usato (Offload_001, ...)
+            # cosi' due destinazioni non finiscono mai con numeri diversi per lo stesso job.
+            max_n = 0
+            for d in dests:
+                try:
+                    for entry in os.listdir(d):
+                        m = re.match(r"^Offload_(\d+)$", entry)
+                        if m:
+                            max_n = max(max_n, int(m.group(1)))
+                except Exception:
+                    pass
+            return f"Offload_{max_n + 1:03d}"
+        elif scheme == "Personalizzato":
+            base = prefix.strip() or "Offload"
+            base = re.sub(r'[<>:"/\\|?*]', "_", base)
+            return f"{base}_{today}"
+        else:  # "Nessuna (mirror sorgente)" o valore sconosciuto
+            return ""
+
+    def _refresh_offload_presets_ui(self):
+        if not hasattr(self, "opt_off_preset"):
+            return
+        names = list(self.offload_presets.keys())
+        self.opt_off_preset.configure(values=names if names else ["-"])
+        if self.offload_selected_preset.get() not in names:
+            self.offload_selected_preset.set(names[0] if names else "-")
+
+    def _save_offload_preset(self):
+        """Salva destinazioni + algoritmo + naming correnti come preset riutilizzabile,
+        persistito in config.json (stesso file delle altre impostazioni dell'app)."""
+        from tkinter import simpledialog, messagebox
+        name = simpledialog.askstring("Salva Preset", "Nome del preset:")
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self.offload_presets[name] = {
+            "destinations": [d for d in self.offload_destinations if d.strip()],
+            "algo": self.offload_algo.get(),
+            "naming_scheme": self.offload_naming_scheme.get(),
+            "naming_prefix": self.offload_naming_prefix.get(),
+            "make_proxy": self.offload_make_proxy.get(),
+        }
+        self.save_settings()
+        self._refresh_offload_presets_ui()
+        self.offload_selected_preset.set(name)
+        messagebox.showinfo("Preset salvato", f"Preset \"{name}\" salvato con successo.")
+
+    def _apply_offload_preset(self, name):
+        """Richiama un preset salvato: sostituisce destinazioni/algoritmo/naming correnti."""
+        preset = self.offload_presets.get(name)
+        if not preset:
+            return
+        self.offload_destinations = list(preset.get("destinations", []))
+        self.render_offload_destinations_ui()
+        self.offload_algo.set(preset.get("algo", "xxHash64"))
+        self.offload_naming_scheme.set(preset.get("naming_scheme", "Nessuna (mirror sorgente)"))
+        self.offload_naming_prefix.set(preset.get("naming_prefix", ""))
+        self.offload_make_proxy.set(preset.get("make_proxy", False))
+        self._update_naming_prefix_visibility()
+
     def run_offload_process(self):
         src = self.offload_source_folder.get()
         dests = [d for d in self.offload_destinations if d.strip()]
         algo = self.offload_algo.get()
         report_id = self.offload_report_id.get()
         make_proxy = self.offload_make_proxy.get()
+        naming_scheme = self.offload_naming_scheme.get()
+        naming_prefix = self.offload_naming_prefix.get()
+        dest_subfolder = self._compute_offload_subfolder(src, dests, naming_scheme, naming_prefix) if dests else ""
 
         # Raccogli i metadati di produzione (solo i campi compilati) per il report MHL
         production_meta = {}
@@ -3251,6 +3399,7 @@ class DatariumApp(ctk.CTk):
                 processed_files = 0
                 copied_bytes = 0
                 start_time = time.time()
+                job_start_dt = datetime.datetime.now()
                 results = []
 
                 # Pre-lettura del file successivo in memoria MENTRE il file corrente è
@@ -3281,13 +3430,15 @@ class DatariumApp(ctk.CTk):
                         # simultaneamente su tutte le destinazioni (vedi copy_write_and_hash):
                         # prima erano 1 lettura per l'hash + 1 rilettura per ogni destinazione,
                         # il vero collo di bottiglia con più dischi lenti in parallelo.
-                        alt_algo = "SHA-256" if algo == "xxHash64" else "MD5"
+                        alt_algo = None if algo == "Solo Dimensione" else ("SHA-256" if algo == "xxHash64" else "MD5")
+                        algos_list = [algo] if alt_algo is None else [algo, alt_algo]
                         self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Copia e checksum: {name}..."))
                         self.after(0, lambda name=it["name"], s=sz_str, n=_idx + 1, t=total_files: self._offload_log(f"▶ [{n}/{t}] {name} ({s})"))
 
                         target_paths = []
                         for d in dests:
-                            target_path = os.path.join(d, it["rel"])
+                            base_dir = os.path.join(d, dest_subfolder) if dest_subfolder else d
+                            target_path = os.path.join(base_dir, it["rel"])
                             os.makedirs(os.path.dirname(target_path), exist_ok=True)
                             target_paths.append(target_path)
 
@@ -3322,9 +3473,9 @@ class DatariumApp(ctk.CTk):
                                 self.offload_status_lbl.configure(text=f"{p}% · {s} · ETA {e}", text_color=("gray10", "white"))
                             ))
 
-                        src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo], prefetched_chunks=prefetched, progress_callback=_on_file_progress)
+                        src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, algos_list, prefetched_chunks=prefetched, progress_callback=_on_file_progress)
                         src_hash = src_hashes[algo]
-                        src_hash_alt = src_hashes[alt_algo]
+                        src_hash_alt = src_hashes[alt_algo] if alt_algo else "N/A"
 
                         # Avvia subito la pre-lettura del PROSSIMO file: da qui in poi (retry
                         # + verifica) il disco sorgente è libero, tanto vale iniziare a leggerlo.
@@ -3361,10 +3512,17 @@ class DatariumApp(ctk.CTk):
                         # marcata "Failed" in una riga di tabella che l'utente puo' non notare.
                         copy_success = True
                         fail_reason = None  # "scrittura" | "checksum"
+                        # Stato per-destinazione (non solo un esito unico per il file): ShotPut Pro
+                        # mostra nel report "Destination N: Status Verified" per ogni copia, non solo
+                        # un singolo Verified/Failed complessivo. dest_status mappa dest_path -> label.
+                        dest_status = {tp: "Verified" for tp in target_paths}
                         verify_targets = [tp for tp in target_paths if write_ok.get(tp)]
                         if any(not write_ok.get(tp) for tp in target_paths):
                             copy_success = False
                             fail_reason = "scrittura"
+                            for tp in target_paths:
+                                if not write_ok.get(tp):
+                                    dest_status[tp] = "Failed (scrittura)"
 
                         if verify_targets:
                             self.after(0, lambda name=it["name"]: self.offload_status_lbl.configure(text=f"Verifica integrità: {name}..."))
@@ -3382,6 +3540,7 @@ class DatariumApp(ctk.CTk):
                                 if not src_hash or src_hash.startswith("Error") or not ok:
                                     copy_success = False
                                     fail_reason = "checksum"  # priorita' massima: e' l'esito piu' grave
+                                    dest_status[target_path] = "Failed (checksum)"
 
                         # Proxy video (ffmpeg) sulla prima destinazione (best-effort)
                         if make_proxy:
@@ -3403,12 +3562,14 @@ class DatariumApp(ctk.CTk):
                         results.append({
                             "name": it["name"],
                             "path": it["path"],
+                            "rel": os.path.join(dest_subfolder, it["rel"]) if dest_subfolder else it["rel"],
                             "size_bytes": sz,
                             "size_str": sz_str,
                             "created": created_str,
                             "modified": modified_str,
                             "hash": src_hash,
                             "hash_alt": src_hash_alt,
+                            "dest_status": {d: dest_status.get(tp, "Unknown") for d, tp in zip(dests, target_paths)},
                             "status": status,
                             "fail_reason": fail_reason,
                             "media_format": media_info["media_format"],
@@ -3427,6 +3588,7 @@ class DatariumApp(ctk.CTk):
                         results.append({
                             "name": it["name"],
                             "path": it["path"],
+                            "rel": os.path.join(dest_subfolder, it["rel"]) if dest_subfolder else it["rel"],
                             "size_bytes": 0,
                             "size_str": "0 B",
                             "hash": "ERROR",
@@ -3454,11 +3616,32 @@ class DatariumApp(ctk.CTk):
 
                 # Generate and save report
                 self.after(0, lambda: self.offload_status_lbl.configure(text="Generazione Report..."))
+                job_finish_dt = datetime.datetime.now()
+                elapsed_s = int(time.time() - start_time)
+                elapsed_str = f"{elapsed_s // 60}m {elapsed_s % 60}s" if elapsed_s >= 60 else f"{elapsed_s}s"
+                timing = {"start": job_start_dt, "finish": job_finish_dt, "elapsed_str": elapsed_str}
                 first_dst = dests[0]
                 report_dir = os.path.join(first_dst, "MHL_Reports")
-                report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, dests, production_meta)
+                report_path = ReportGenerator.save_report(report_dir, report_id, src, results, algo, dests, production_meta, timing)
                 self.generated_report_path = report_path
-                
+
+                # Export TXT/CSV accanto al PDF: stesso contenuto in formato testuale/tabellare,
+                # per chi deve importarli in un foglio di calcolo o in uno script invece di
+                # aprire un PDF (prima Datarium generava solo PDF, ShotPut Pro offre anche questi).
+                try:
+                    ReportGenerator.save_txt_report(report_dir, report_id, results, algo, dests, timing)
+                    ReportGenerator.save_csv_report(report_dir, report_id, results, algo)
+                except Exception as e:
+                    print(f"Errore export TXT/CSV: {e}")
+
+                # File .mhl VERI (uno per destinazione, standard ASC MediaHashList), non solo
+                # un PDF che si chiama "MHL": permette a un altro tool DIT (Silverstack, YoYotta,
+                # Pomfort) di leggere e validare i checksum senza passare da Datarium.
+                try:
+                    ReportGenerator.save_mhl_files(dests, report_id, results, algo)
+                except Exception as e:
+                    print(f"Errore generazione .mhl: {e}")
+
                 # Copiamo il report in tutte le altre destinazioni per sicurezza
                 for other_dst in dests[1:]:
                     try:
@@ -3470,6 +3653,35 @@ class DatariumApp(ctk.CTk):
 
                 checksum_mismatches = [r for r in results if r.get("fail_reason") == "checksum"]
                 write_failures = [r for r in results if r.get("fail_reason") in ("scrittura", "errore")]
+
+                if checksum_mismatches or write_failures:
+                    self.send_local_notification(
+                        "Datarium - Offload con errori",
+                        f"{len(checksum_mismatches) + len(write_failures)} file su {len(results)} non verificati. Controlla il report."
+                    )
+                else:
+                    self.send_local_notification(
+                        "Datarium - Offload Completato",
+                        f"{len(results)} file copiati e verificati con successo su {len(dests)} destinazione/i."
+                    )
+
+                # Cronologia job persistente su disco (indipendente dalla sessione, con
+                # retention configurabile): gap rispetto a ShotPut Pro, che tiene uno storico
+                # dei job anche dopo la chiusura dell'app.
+                try:
+                    n_ok_results = sum(1 for r in results if r.get("status") == "Verified")
+                    ReportGenerator.record_job_history(self.get_job_history_path(), {
+                        "job_type": "offload",
+                        "report_id": report_id,
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "status": "Failed" if (checksum_mismatches or write_failures) else "Verified",
+                        "n_files": len(results),
+                        "n_ok": n_ok_results,
+                        "destinations": dests,
+                        "report_path": report_path,
+                    }, max_entries=self.job_history_max)
+                except Exception as e:
+                    print(f"Errore registrazione cronologia job: {e}")
 
                 def render_results_ui():
                     if checksum_mismatches:
@@ -3594,7 +3806,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkCheckBox(optrow, text="Report PDF", variable=self.ingest_make_report).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=3)
         ctk.CTkCheckBox(optrow, text="Proxy video (ffmpeg)", variable=self.ingest_make_proxy).grid(row=0, column=2, sticky="w", pady=3)
         ctk.CTkLabel(optrow, text="Verifica:").grid(row=1, column=0, sticky="w", pady=3)
-        ctk.CTkOptionMenu(optrow, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5"], width=130).grid(row=1, column=1, sticky="w", pady=3)
+        ctk.CTkOptionMenu(optrow, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5", "Solo Dimensione"], width=130).grid(row=1, column=1, sticky="w", pady=3)
 
         ctrl = ctk.CTkFrame(cfg, fg_color="transparent")
         ctrl.pack(fill="x", padx=16, pady=(4, 12))
@@ -3715,6 +3927,21 @@ class DatariumApp(ctk.CTk):
                     else:
                         job["status"] = "done" if n_ok == total else "failed"
                         job["detail"] = f"{n_ok}/{total} verificati"
+                        try:
+                            import datetime as _dt
+                            from report_generator import ReportGenerator
+                            ReportGenerator.record_job_history(self.get_job_history_path(), {
+                                "job_type": "ingest",
+                                "report_id": os.path.basename(job["src"].rstrip("/\\")),
+                                "timestamp": _dt.datetime.now().isoformat(),
+                                "status": "Verified" if n_ok == total else "Failed",
+                                "n_files": total,
+                                "n_ok": n_ok,
+                                "destinations": list(self.ingest_destinations),
+                                "report_path": rep,
+                            }, max_entries=self.job_history_max)
+                        except Exception as e:
+                            print(f"Errore registrazione cronologia job ingest: {e}")
                     if rep:
                         self.ingest_report_path = rep
                         self.after(0, lambda: self.btn_ingest_open_report.configure(state="normal"))
@@ -3729,6 +3956,13 @@ class DatariumApp(ctk.CTk):
             else:
                 self.after(0, lambda: self.ingest_status_lbl.configure(text="Coda completata." if self.ingest_queue else "Coda vuota.", text_color=("gray10", "gray90")))
                 self.after(0, lambda: self.ingest_progress_bar.set(0))
+                if self.ingest_queue:
+                    n_done = sum(1 for j in self.ingest_queue if j["status"] == "done")
+                    n_failed = sum(1 for j in self.ingest_queue if j["status"] == "failed")
+                    if n_failed:
+                        self.send_local_notification("Datarium - Ingest con errori", f"{n_done} completati, {n_failed} con errori su {len(self.ingest_queue)} job.")
+                    else:
+                        self.send_local_notification("Datarium - Ingest Completato", f"{n_done} job completati e verificati con successo.")
 
     def _ingest_run_one(self, job):
         import os
@@ -3742,7 +3976,8 @@ class DatariumApp(ctk.CTk):
         use_ai = self.ingest_organize_ai.get()
         make_report = self.ingest_make_report.get()
         make_proxy = self.ingest_make_proxy.get()
-        alt_algo = "SHA-256" if algo == "xxHash64" else "MD5"
+        alt_algo = None if algo == "Solo Dimensione" else ("SHA-256" if algo == "xxHash64" else "MD5")
+        algos_list = [algo] if alt_algo is None else [algo, alt_algo]
 
         if use_ai and not self.is_ai_loaded:
             self.after(0, lambda: self.ingest_status_lbl.configure(text="🧠 Caricamento modello AI..."))
@@ -3771,6 +4006,7 @@ class DatariumApp(ctk.CTk):
                 pass
         bytes_done = 0
         start_time = time.time()
+        job_start_dt = datetime.datetime.now()
 
         results = []
         n_ok = 0
@@ -3835,9 +4071,9 @@ class DatariumApp(ctk.CTk):
                     prefetch_state["thread"].join()
                     prefetched = prefetch_state["chunks"]
 
-                src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, [algo, alt_algo], prefetched_chunks=prefetched)
+                src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, algos_list, prefetched_chunks=prefetched)
                 src_hash = src_hashes.get(algo, "")
-                src_hash_alt = src_hashes.get(alt_algo, "")
+                src_hash_alt = src_hashes.get(alt_algo, "") if alt_algo else "N/A"
 
                 # Avvia la pre-lettura del prossimo file: da qui in poi (retry + verifica)
                 # il disco sorgente è libero.
@@ -3865,9 +4101,13 @@ class DatariumApp(ctk.CTk):
                 # in parallelo su ogni destinazione. Stesso trade-off scelto in Offload:
                 # copertura ridotta rispetto alla rilettura completa, ma molto più veloce.
                 all_ok = True
+                dest_status = {tp: "Verified" for tp in target_paths}
                 verify_targets = [tp for tp in target_paths if write_ok.get(tp)]
                 if any(not write_ok.get(tp) for tp in target_paths):
                     all_ok = False
+                    for tp in target_paths:
+                        if not write_ok.get(tp):
+                            dest_status[tp] = "Failed (scrittura)"
 
                 if verify_targets:
                     verify_ok = self._verify_sampled_destinations(
@@ -3875,6 +4115,7 @@ class DatariumApp(ctk.CTk):
                     for tpath, ok in verify_ok.items():
                         if not src_hash or src_hash.startswith("Error") or not ok:
                             all_ok = False
+                            dest_status[tpath] = "Failed (checksum)"
 
                 if make_proxy:
                     try:
@@ -3889,8 +4130,9 @@ class DatariumApp(ctk.CTk):
                 mtime = os.path.getmtime(it["path"])
                 ctime = os.path.getctime(it["path"])
                 mi = ReportGenerator.extract_media_info(it["path"], self.ffmpeg_path)
+                rel = os.path.join(album, os.path.basename(target_paths[0])) if target_paths else it["name"]
                 results.append({
-                    "name": it["name"], "path": it["path"], "size_bytes": sz,
+                    "name": it["name"], "path": it["path"], "rel": rel, "size_bytes": sz,
                     "size_str": self.format_file_size(sz),
                     "created": datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S"),
                     "modified": datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
@@ -3899,6 +4141,7 @@ class DatariumApp(ctk.CTk):
                     "resolution": mi["resolution"], "camera": mi["camera"], "shot": album,
                     "frames": mi["frames"], "bitrate": mi["bitrate"], "audio": mi["audio"], "album": album,
                     "timecode": mi.get("timecode", "N/A"),
+                    "dest_status": {d: dest_status.get(tp, "Unknown") for d, tp in zip(dests, target_paths)},
                 })
             except Exception as e:
                 print(f"Ingest errore su {it['name']}: {e}")
@@ -3909,7 +4152,17 @@ class DatariumApp(ctk.CTk):
         if make_report:
             try:
                 rid = "ING" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                report_path = ReportGenerator.save_report(os.path.join(dests[0], "Ingest_Reports"), rid, src, results, algo, dests, None)
+                elapsed_s = int(time.time() - start_time)
+                elapsed_str = f"{elapsed_s // 60}m {elapsed_s % 60}s" if elapsed_s >= 60 else f"{elapsed_s}s"
+                timing = {"start": job_start_dt, "finish": datetime.datetime.now(), "elapsed_str": elapsed_str}
+                ingest_report_dir = os.path.join(dests[0], "Ingest_Reports")
+                report_path = ReportGenerator.save_report(ingest_report_dir, rid, src, results, algo, dests, None, timing)
+                try:
+                    ReportGenerator.save_txt_report(ingest_report_dir, rid, results, algo, dests, timing)
+                    ReportGenerator.save_csv_report(ingest_report_dir, rid, results, algo)
+                    ReportGenerator.save_mhl_files(dests, rid, results, algo)
+                except Exception as e:
+                    print(f"Errore export TXT/CSV/MHL ingest: {e}")
             except Exception as e:
                 print(f"Report ingest errore: {e}")
         return (n_ok, total, report_path)

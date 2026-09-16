@@ -804,9 +804,12 @@ class ReportGenerator:
         return info
 
     @classmethod
-    def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs, production_meta=None):
+    def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs, production_meta=None, timing=None):
         """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF.
-        production_meta: dizionario opzionale {etichetta: valore} di metadati produzione (stile Silverstack)."""
+        production_meta: dizionario opzionale {etichetta: valore} di metadati produzione (stile Silverstack).
+        timing: dizionario opzionale {"start": datetime, "finish": datetime, "elapsed_str": str} con la
+        durata del job, cosi' il report mostra quando e' iniziato/finito l'Offload (non solo quando e'
+        stato generato il PDF)."""
         os.makedirs(output_dir, exist_ok=True)
         report_path = os.path.join(output_dir, f"{report_id}_MHL_Report.pdf")
         
@@ -851,12 +854,19 @@ class ReportGenerator:
             total_size_str = f"{total_size_bytes / (1024 * 1024 * 1024):.2f} GB"
             
         dests_str = "\n".join(f"  - {d}" for d in dest_dirs)
-        page.insert_textbox(fitz.Rect(300, 100, page_width - 20, 200), 
-                             cls.safe_text(f"Riepilogo Offload:\n- File Totali: {len(files_list)}\n- Dimensione Totale: {total_size_str}\n- Algoritmo: {algo}\n- Destinazioni:\n{dests_str}"), 
+        video_count = sum(1 for f in files_list if f.get("media_format") == "Video")
+        timing_lines = ""
+        if timing:
+            start_str = timing.get("start").strftime("%d/%m/%Y %H:%M:%S") if timing.get("start") else "N/D"
+            finish_str = timing.get("finish").strftime("%d/%m/%Y %H:%M:%S") if timing.get("finish") else "N/D"
+            elapsed_str = timing.get("elapsed_str", "N/D")
+            timing_lines = f"\n- Inizio: {start_str}\n- Fine: {finish_str}\n- Durata: {elapsed_str}"
+        page.insert_textbox(fitz.Rect(300, 100, page_width - 20, 244),
+                             cls.safe_text(f"Riepilogo Offload:\n- File Totali: {len(files_list)}\n- File Video: {video_count}\n- Dimensione Totale: {total_size_str}\n- Algoritmo: {algo}{timing_lines}\n- Destinazioni:\n{dests_str}"),
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
-        
+
         # Sezione Metadati Produzione (stile Silverstack), se forniti
-        y = 210
+        y = 254
         if production_meta:
             page.draw_rect(fitz.Rect(20, y, page_width - 20, y + 18), color=None, fill=(0.85, 0.87, 0.92))
             page.insert_text((25, y + 13), "METADATI PRODUZIONE", fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
@@ -891,10 +901,11 @@ class ReportGenerator:
             # Metadata rows (sulla sinistra)
             size_txt = f.get("size_str", "N/A")
             created_txt = f.get("created", "N/A")
+            modified_txt = f.get("modified", "N/A")
             hash_algo = "xxHash 64" if algo == "xxHash64" else algo
             hash_val = f.get("hash", "N/A")
-            
-            page.insert_text((25, y+10), cls.safe_text(f"Size: {size_txt}   Created: {created_txt}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+
+            page.insert_text((25, y+10), cls.safe_text(f"Size: {size_txt}   Created: {created_txt}   Modified: {modified_txt}"), fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
             y += 15
             
             media_fmt = f.get("media_format", "Unknown")
@@ -912,6 +923,16 @@ class ReportGenerator:
             
             page.insert_text((25, y+10), cls.safe_text(f"{hash_algo}: {hash_val}"), fontsize=8, fontname=font_name, color=(0.4, 0.4, 0.4))
             y += 15
+
+            # Stato per-SINGOLA destinazione (stile ShotPut Pro: "Destination N: ... Status: Verified"),
+            # non solo un esito complessivo per il file: utile quando una copia su 3 destinazioni fallisce
+            # solo su una e le altre due sono comunque valide.
+            dest_status = f.get("dest_status")
+            if dest_status:
+                for i, (d, st) in enumerate(dest_status.items(), 1):
+                    st_color = (0.06, 0.6, 0.4) if st == "Verified" else (0.8, 0.2, 0.2)
+                    page.insert_text((25, y + 10), cls.safe_text(f"Destination {i}: {d}  —  Status: {st}"), fontsize=7.5, fontname=font_name, color=st_color)
+                    y += 12
             
             # Thumbnails row (sulla destra)
             max_y_for_entry = y
@@ -952,6 +973,174 @@ class ReportGenerator:
             doc.save(report_path)
         doc.close()
         return report_path
+
+    # Nomi dei tag XML per ciascun algoritmo, secondo la convenzione dello standard
+    # ASC MHL (usato da Silverstack/YoYotta/Pomfort Offload Manager): un tool che
+    # legge un file .mhl cerca uno di questi tag per riga, non un campo generico
+    # "hash". Necessario per l'interoperabilita' reale con quei tool, non solo per
+    # un file "che si chiama mhl" ma dal contenuto arbitrario.
+    _MHL_TAGS = {"MD5": "md5", "SHA-1": "sha1", "SHA-256": "sha256", "xxHash64": "xxhash64"}
+
+    @classmethod
+    def save_mhl_files(cls, dest_dirs, report_id, files_list, algo, creator_tool="Datarium"):
+        """Scrive un file .mhl (XML, standard ASC MediaHashList v1) alla RADICE di ogni
+        destinazione, cosi' un altro tool DIT (Silverstack, YoYotta, Pomfort) che scansiona
+        quella cartella lo trova e lo legge automaticamente, senza bisogno di aprire Datarium.
+
+        Prima Datarium generava solo un PDF chiamato "..._MHL_Report.pdf": il nome richiamava
+        lo standard MHL ma il contenuto non era un file .mhl valido, quindi non interoperabile.
+
+        Un file .mhl per destinazione (non uno globale) perche' i path devono essere relativi
+        alla radice DI QUELLA destinazione: e' cosi' che i tool DIT si aspettano di trovarlo.
+
+        Ritorna la lista dei path .mhl scritti (uno per destinazione, quelli riusciti)."""
+        import xml.etree.ElementTree as ET
+        import datetime as _dt
+
+        hash_tag = cls._MHL_TAGS.get(algo, algo.lower().replace("-", ""))
+        written = []
+        for dest_dir in dest_dirs:
+            try:
+                root = ET.Element("hashlist", version="1.1")
+                creator = ET.SubElement(root, "creatorinfo")
+                ET.SubElement(creator, "name").text = report_id
+                ET.SubElement(creator, "hostname").text = platform.node()
+                ET.SubElement(creator, "tool").text = creator_tool
+                ET.SubElement(creator, "startdate").text = _dt.datetime.now().isoformat()
+
+                for f in files_list:
+                    if f.get("status") != "Verified" or not f.get("hash") or f.get("hash") == "ERROR":
+                        continue
+                    rel = f.get("rel") or f.get("name")
+                    entry = ET.SubElement(root, "hash")
+                    ET.SubElement(entry, "file").text = rel.replace(os.sep, "/")
+                    ET.SubElement(entry, "size").text = str(f.get("size_bytes", 0))
+                    if f.get("modified"):
+                        ET.SubElement(entry, "lastmodificationdate").text = f["modified"]
+                    ET.SubElement(entry, hash_tag).text = f["hash"]
+
+                tree = ET.ElementTree(root)
+                ET.indent(tree, space="  ")
+                mhl_path = os.path.join(dest_dir, f"{report_id}.mhl")
+                tree.write(mhl_path, encoding="utf-8", xml_declaration=True)
+                written.append(mhl_path)
+            except Exception as e:
+                print(f"Errore generazione .mhl per {dest_dir}: {e}")
+        return written
+
+    @classmethod
+    def save_txt_report(cls, output_dir, report_id, files_list, algo, dest_dirs, timing=None):
+        """Esporta un report testuale semplice (stile ShotPut Pro), alternativa leggibile
+        senza visualizzatore PDF: utile per script/automazioni o semplice archiviazione."""
+        os.makedirs(output_dir, exist_ok=True)
+        txt_path = os.path.join(output_dir, f"{report_id}_Report.txt")
+        total_size_bytes = sum(f.get("size_bytes", 0) for f in files_list)
+        video_count = sum(1 for f in files_list if f.get("media_format") == "Video")
+        failed = [f for f in files_list if f.get("status") != "Verified"]
+        lines = [
+            f"DATARIUM - OFFLOAD REPORT",
+            f"ID: {report_id}",
+            f"Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+            f"Stato: {'FAILED' if failed else 'VERIFIED'}",
+            f"Algoritmo: {algo}",
+            f"File totali: {len(files_list)} (di cui {video_count} video)",
+            f"Dimensione totale: {total_size_bytes} bytes",
+        ]
+        if timing:
+            lines.append(f"Inizio: {timing.get('start')}  Fine: {timing.get('finish')}  Durata: {timing.get('elapsed_str', 'N/D')}")
+        lines.append("Destinazioni: " + ", ".join(dest_dirs))
+        lines.append("-" * 70)
+        for f in files_list:
+            lines.append(
+                f"{f.get('name')}\tsize={f.get('size_str', 'N/A')}\tstatus={f.get('status')}\t"
+                f"created={f.get('created', 'N/A')}\tmodified={f.get('modified', 'N/A')}\t"
+                f"{algo}={f.get('hash', 'N/A')}"
+            )
+            for i, (d, st) in enumerate(f.get("dest_status", {}).items(), 1):
+                lines.append(f"    Destination {i}: {d} -> {st}")
+        with open(txt_path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+        return txt_path
+
+    @classmethod
+    def save_csv_report(cls, output_dir, report_id, files_list, algo):
+        """Esporta un report CSV (una riga per file), pensato per essere importato in fogli
+        di calcolo o altri strumenti di produzione, non solo letto a schermo."""
+        import csv
+        os.makedirs(output_dir, exist_ok=True)
+        csv_path = os.path.join(output_dir, f"{report_id}_Report.csv")
+        fieldnames = ["name", "rel", "size_bytes", "status", "created", "modified", "algorithm", "hash", "media_format", "destinations"]
+        with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+            writer.writeheader()
+            for f in files_list:
+                dest_status = f.get("dest_status", {})
+                writer.writerow({
+                    "name": f.get("name", ""),
+                    "rel": f.get("rel", f.get("name", "")),
+                    "size_bytes": f.get("size_bytes", 0),
+                    "status": f.get("status", ""),
+                    "created": f.get("created", ""),
+                    "modified": f.get("modified", ""),
+                    "algorithm": algo,
+                    "hash": f.get("hash", ""),
+                    "destinations": "; ".join(f"{d}={st}" for d, st in dest_status.items()),
+                    "media_format": f.get("media_format", ""),
+                })
+        return csv_path
+
+    @staticmethod
+    def record_job_history(history_path, entry, max_entries=50):
+        """Aggiunge `entry` (dict: job_type, report_id, timestamp, status, n_files, n_ok,
+        destinations, report_path) a un log JSON persistente su disco, tenendo solo gli
+        ultimi `max_entries` (i piu' vecchi vengono scartati automaticamente).
+
+        Prima Datarium non aveva nessuna cronologia job persistente: la coda Ingest teneva
+        solo i job della sessione corrente in memoria, persi alla chiusura dell'app. Questo
+        e' un log durevole su disco, indipendente dalla sessione, con retention configurabile
+        (come "# of jobs to keep in history" di ShotPut Pro)."""
+        import json
+        history = []
+        if os.path.exists(history_path):
+            try:
+                with open(history_path, "r", encoding="utf-8") as f:
+                    history = json.load(f)
+                if not isinstance(history, list):
+                    history = []
+            except Exception:
+                history = []
+        history.append(entry)
+        if max_entries > 0 and len(history) > max_entries:
+            history = history[-max_entries:]
+        try:
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump(history, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"Errore salvataggio cronologia job: {e}")
+        return history
+
+    @staticmethod
+    def load_job_history(history_path):
+        """Legge la cronologia job persistente. Ritorna [] se non esiste o e' corrotta."""
+        import json
+        if not os.path.exists(history_path):
+            return []
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    @staticmethod
+    def purge_job_history(history_path):
+        """Svuota la cronologia job persistente (equivalente a 'Purge Report History')."""
+        import json
+        try:
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+        except Exception as e:
+            print(f"Errore purge cronologia job: {e}")
 
     @classmethod
     def save_hash_report(cls, output_dir, report_id, files_list, algo):
