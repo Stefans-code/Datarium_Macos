@@ -3233,6 +3233,7 @@ class DatariumApp(ctk.CTk):
         ShotPut Pro: naming destinazione configurabile invece del solo mirror del path sorgente).
         Ritorna "" per 'Nessuna' (comportamento identico a prima, nessuna regressione)."""
         import re
+        import datetime
         today = datetime.datetime.now().strftime("%Y-%m-%d")
 
         if scheme == "Data odierna":
