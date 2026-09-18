@@ -852,6 +852,24 @@ class AIEngine:
         except Exception:
             return "Documentazione(Lavoro, Personale), Immagini(Viaggi, Natura), Archivio(Varie)"
 
+    # Parole "vuote" tipiche dei nomi generati da camera/telefono/screenshot: un nome fatto
+    # solo di queste NON e' descrittivo e va rinominato.
+    _GENERIC_NAME_WORDS = frozenset([
+        "img", "dsc", "dscn", "dscf", "mvi", "vid", "pxl", "gopr", "screenshot", "schermata", "whatsapp",
+        "image", "immagine", "video", "scan", "scansione", "foto", "photo", "picture", "untitled",
+        "senza", "titolo", "copy", "copia", "documento", "document", "nuovo", "new", "file", "download",
+        "mov", "mp4", "clip", "audio", "recording", "registrazione", "alle", "at", "del", "the",
+    ])
+
+    def _is_descriptive_name(self, original_name):
+        """True se il nome originale gia' descrive il contenuto (es. 'Pubblicazioni film 1973 -
+        Il Tempo 14 febbraio 1973 A'): in quel caso va conservato, non sostituito da un nome
+        inventato dall'AI (che perdeva lettere/numeri di pagina e creava nomi quasi uguali)."""
+        stem = os.path.splitext(original_name)[0]
+        words = [w for w in re.split(r'[^A-Za-z' + _IT_ACCENTS + r']+', stem) if len(w) >= 3]
+        meaningful = [w for w in words if w.lower() not in self._GENERIC_NAME_WORDS]
+        return len(meaningful) >= 2
+
     def get_smart_name(self, original_name, category, context="", taxonomy=""):
         """Generates a smart name using deep context and hierarchical taxonomy."""
         if not self.llm: return f"{category}/{original_name}"
@@ -866,7 +884,7 @@ class AIEngine:
             
             clean_names = []
             for n in names_list:
-                cn = re.sub(r'[^a-zA-Z0-9]', '', n.replace(' ', ''))
+                cn = re.sub(r'[^a-zA-Z0-9' + _IT_ACCENTS + r']', '', n.replace(' ', ''))
                 if cn: clean_names.append(cn)
                 
             if len(clean_names) == 1:
@@ -883,11 +901,11 @@ class AIEngine:
             context = context.split("Persone identificate dall'utente: ")[0].strip()
 
         # Pulizia prefissi tecnici dal contesto per non confondere il modello
-        for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
+        for prefix in ["IMAGE_DESC: ", "VIDEO_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
             if context.startswith(prefix):
                 context = context[len(prefix):]
                 break
-            
+
         context_str = f"Descrizione: {context}" if context else ""
         taxo_str = f"Tassonomia consigliata: {taxonomy}" if taxonomy else ""
         
@@ -913,7 +931,7 @@ class AIEngine:
         try:
             response = self.llm.create_chat_completion(
                 messages=messages,
-                max_tokens=32,
+                max_tokens=64,
                 temperature=0.1
             )
             clean_path = response['choices'][0]['message']['content'].strip()
@@ -942,9 +960,25 @@ class AIEngine:
             elif len(parts) == 0:
                 parts = ["Generale", "Varie", os.path.splitext(original_name)[0]]
                 
+            if not subcat_override:
+                parts = self._snap_to_taxonomy(parts, taxonomy)
+
             if subcat_override:
                 parts[1] = subcat_override
-                
+
+            orig_stem = os.path.splitext(original_name)[0]
+            keep_name = (not people_prefix and getattr(self, "keep_descriptive_names", True)
+                         and self._is_descriptive_name(original_name))
+            if keep_name:
+                # Nome originale gia' descrittivo: l'AI decide solo le cartelle
+                parts[-1] = "KEEPNAMEPLACEHOLDER"
+            else:
+                # Nome generato dall'AI: aggiunge il numero finale dell'originale (IMG_0412 ->
+                # ..._0412) cosi' file simili restano distinguibili e riconducibili all'originale.
+                m = re.search(r'(\d{3,})\D*$', orig_stem)
+                if m and m.group(1) not in parts[-1]:
+                    parts[-1] = f"{parts[-1]}_{m.group(1)}"
+
             if people_prefix:
                 parts[-1] = f"{people_prefix}{parts[-1]}"
             
@@ -958,13 +992,16 @@ class AIEngine:
                 if idx > len(clean_path)-6: clean_path = clean_path[:idx]
                 else: break
             
-            # Sanifica i caratteri consentiti preservando lo slash
-            clean_path = re.sub(r'[^a-zA-Z0-9_/]', '', clean_path)
+            # Sanifica i caratteri consentiti preservando lo slash (e le accentate italiane:
+            # prima "Città" diventava "Citt", ora resta leggibile)
+            clean_path = re.sub(r'[^a-zA-Z0-9_/' + _IT_ACCENTS + r']', '', clean_path)
             
             if len(clean_path) < 3:
                 clean_path = f"Generale/Varie/{os.path.splitext(original_name)[0]}"
                 
             orig_ext = os.path.splitext(original_name)[1]
+            if keep_name:
+                clean_path = clean_path.replace("KEEPNAMEPLACEHOLDER", orig_stem)
             return f"{category}/{clean_path}{orig_ext}"
         except Exception as e:
             return f"{category}/{original_name}"

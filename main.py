@@ -272,6 +272,7 @@ class DatariumApp(ctk.CTk):
         self.autotag_accept_ai = ctk.BooleanVar(value=True)
         self.autotag_rename = ctk.BooleanVar(value=True)
         self.organizer_identify_people = ctk.BooleanVar(value=True)
+        self.organizer_keep_names = ctk.BooleanVar(value=True)
 
         # Offload Feature State
         import datetime
@@ -691,6 +692,11 @@ class DatariumApp(ctk.CTk):
         self.check_proxies_cb = ctk.CTkCheckBox(opts_row2, text="Genera Video Proxy", variable=self.proxy_gen_var)
         self.check_proxies_cb.pack(side="left", padx=8)
 
+        opts_row3 = ctk.CTkFrame(opts_container, fg_color="transparent")
+        opts_row3.pack(pady=3)
+        self.check_keep_names_cb = ctk.CTkCheckBox(opts_row3, text="Mantieni i nomi originali già descrittivi", variable=self.organizer_keep_names)
+        self.check_keep_names_cb.pack(side="left", padx=8)
+
 
 
 
@@ -1073,7 +1079,7 @@ class DatariumApp(ctk.CTk):
                 self.after(0, self._redraw_bench_chart)
                 self.after(0, lambda: self.bench_result_lbl.configure(text=verdict_text, text_color=verdict_color))
             except Exception as e:
-                self.after(0, lambda: self.bench_result_lbl.configure(text=f"Errore durante il test: {e}", text_color="#ef4444"))
+                self.after(0, lambda err=str(e): self.bench_result_lbl.configure(text=f"Errore durante il test: {err}", text_color="#ef4444"))
             finally:
                 self.after(0, lambda: self.btn_run_bench.configure(state="normal", text="🧪 Avvia Test"))
                 self.after(0, lambda: self.bench_progress.set(1))
@@ -1767,6 +1773,7 @@ class DatariumApp(ctk.CTk):
                 self.update_status("🧠 Brainstorming Tassonomia Globale...")
                 all_contexts = [it.get('context', '') for it in valid_items]
                 taxonomy = self.ai.identify_global_themes(all_contexts)
+                self.ai.keep_descriptive_names = self.organizer_keep_names.get()
 
                 groups = {}
                 for idx, item in enumerate(valid_items):
