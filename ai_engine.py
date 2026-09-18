@@ -9,6 +9,7 @@ import hashlib
 import base64
 from io import BytesIO
 from PIL import Image, ExifTags
+Image.MAX_IMAGE_PIXELS = 500_000_000  # scansioni ad alta risoluzione (default PIL ~179M px)
 try:
     import importlib
     pillow_heif = importlib.import_module("pillow_heif")
@@ -913,6 +914,14 @@ class AIEngine:
         Condivisa tra analisi foto e frame estratti dai video."""
         img = img.copy()
         img.thumbnail((1008, 1008))
+        if img.mode in ("I;16", "I;16L", "I;16B", "I;16N", "I"):
+            # 16 bit: riporta a 8 bit scalando (altrimenti convert("RGB") clippa tutto a bianco)
+            try:
+                img = img.point(lambda v: v * (1 / 256)).convert("L")
+            except Exception:
+                img = img.convert("L")
+        elif img.mode == "F":
+            img = img.convert("L")
         buffered = BytesIO()
         img.convert("RGB").save(buffered, format="JPEG", quality=85)
         img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
@@ -1281,7 +1290,9 @@ class AIEngine:
             clean_path = response['choices'][0]['message']['content'].strip()
             
             # Final cleanup
-            clean_path = clean_path.strip("'\" ").split('(')[0].split('\'')[0].split('"')[0].strip()
+            first_line = next((ln for ln in clean_path.splitlines() if ln.strip()), "")
+            clean_path = first_line.strip("'\" `").split('(')[0].strip()
+            clean_path = clean_path.replace("'", "_").replace("\u2019", "_").replace('"', "")
             
             # Normalizzazione degli slash (sostituzione di backslash e rimozione spazi intorno agli slash)
             clean_path = clean_path.replace('\\', '/')
@@ -1371,7 +1382,7 @@ class AIEngine:
         try:
             response = self.llm.create_chat_completion(
                 messages=messages,
-                max_tokens=8,
+                max_tokens=16,
                 temperature=0.1
             )
             clean = response['choices'][0]['message']['content'].strip()
@@ -1406,9 +1417,9 @@ class AIEngine:
             else:
                 hasher = hashlib.sha256()
             with open(file_path, 'rb') as afile:
-                buf = afile.read(65536)
+                buf = afile.read(4 * 1024 * 1024)
                 while len(buf) > 0:
-                    hasher.update(buf); buf = afile.read(65536)
+                    hasher.update(buf); buf = afile.read(4 * 1024 * 1024)
             return getattr(hasher, "hexdigest")()
         except Exception: return None
 
