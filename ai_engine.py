@@ -2,6 +2,9 @@ import os
 import re
 import sys
 import time
+import json
+import difflib
+import tempfile
 import hashlib
 import base64
 from io import BytesIO
@@ -253,16 +256,59 @@ def _download_parallel(url, dest_path, label, total_size, progress_callback, con
     return dest_path
 
 
+# Lettere accentate italiane (minuscole/maiuscole) da preservare quando si sanificano
+# nomi di file/persone: prima venivano tutte cancellate (es. "Città" -> "Citt").
+_IT_ACCENTS = "àèéìíîòóùúÀÈÉÌÍÎÒÓÙÚçÇ"
+
+
+def _parse_taxonomy(taxonomy_str):
+    """Converte 'Cat1(Sub1, Sub2), Cat2(Sub1)' in [(Cat1, [Sub1, Sub2]), (Cat2, [Sub1])].
+    Tollerante a formati leggermente diversi restituiti dal LLM; non solleva mai."""
+    result = []
+    if not taxonomy_str:
+        return result
+    try:
+        for chunk in re.findall(r'([^,()]+)\(([^)]*)\)', taxonomy_str):
+            cat = chunk[0].strip()
+            subs = [s.strip() for s in chunk[1].split(',') if s.strip()]
+            if cat:
+                result.append((cat, subs))
+    except Exception:
+        pass
+    return result
+
+
 class AIEngine:
     def __init__(self):
         self.llm = None
         self.is_vision = False
         self.hardware_info = "CPU"
-        
+
+        # Context window / troncamento documenti: adattivi alla qualita' installata
+        # (impostati davvero in download_model_if_needed una volta noto il profilo).
+        self._n_ctx = 2048
+        self._doc_chunk_chars = 1200
+
+        # --- Cache persistente descrizioni AI (per hash file) ---
+        # Evita di ridescrivere con l'LLM un file gia' visto in una sessione precedente
+        # (stesso identico contenuto, es. copie/backup). Solo per immagini/documenti:
+        # per i video l'hash costringerebbe a leggere l'intero file (spesso GB) solo
+        # per la cache, vanificando il risparmio.
+        self._context_cache = {}
+        self._context_cache_path = None
+        self._context_cache_dirty = False
+        self._CONTEXT_CACHE_MAX = 5000
+
+        # --- Manifest checksum modelli (models_version.json) ---
+        # None = non ancora interrogato in questa sessione; {} = interrogato ma
+        # non raggiungibile (offline/errore): in quel caso il controllo di
+        # integrita' viene saltato, non blocca mai l'utente.
+        self._models_manifest = None
+
         # --- Configurazione modelli ARGUS: vedi self.PROFILES qui sotto ---
         
         # ==========================================================
-        #  ARGUS - modelli rinominati (Apache 2.0; vedi NOTICE.txt accanto ai modelli).
+        #  ARGUS - modelli rinominati
         #  Due PROFILI scelti in fase d'installazione: "slim" (Leggero/Minor) e "full" (Pesante/Maior).
         #  Ogni voce = (repo HuggingFace, nome file ORIGINALE da scaricare, nome ARGUS locale)
         # ==========================================================
@@ -490,6 +536,38 @@ class AIEngine:
                 continue
         return None
 
+    def _load_context_cache(self):
+        """Carica (una sola volta) la cache persistente hash -> descrizione AI dalla
+        cartella modelli scrivibile. Fallisce in silenzio: la cache e' un'ottimizzazione,
+        non deve mai bloccare l'analisi."""
+        if self._context_cache_path is not None:
+            return  # gia' tentato in questa sessione
+        try:
+            self._context_cache_path = os.path.join(self.get_models_dir(force_writable=True), "context_cache.json")
+            if os.path.exists(self._context_cache_path):
+                with open(self._context_cache_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    self._context_cache = data
+        except Exception:
+            self._context_cache = {}
+
+    def _save_context_cache(self):
+        if not self._context_cache_dirty or not self._context_cache_path:
+            return
+        try:
+            # Limite dimensione: tiene solo le voci piu' recenti (inserimento = fine dict)
+            if len(self._context_cache) > self._CONTEXT_CACHE_MAX:
+                keys = list(self._context_cache.keys())[-self._CONTEXT_CACHE_MAX:]
+                self._context_cache = {k: self._context_cache[k] for k in keys}
+            tmp_path = self._context_cache_path + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._context_cache, f)
+            os.replace(tmp_path, self._context_cache_path)
+            self._context_cache_dirty = False
+        except Exception:
+            pass
+
     def check_models_missing(self):
         """Manca qualcosa? False se almeno un profilo (slim/full) ha testo + visione + mmproj."""
         try:
@@ -515,6 +593,87 @@ class AIEngine:
         except Exception:
             pass
         return None
+
+    def _fetch_models_manifest(self):
+        """
+        Interroga models_version.json: checksum SHA-256 attesi per ciascun file
+        modello, pubblicati separatamente dalla versione del software (i modelli
+        possono cambiare senza una nuova release di Datarium). Il file vive sullo
+        stesso sito di version.json.
+
+        Fallisce in silenzio: se non e' raggiungibile (offline, DNS, server giu'),
+        il controllo di integrita' viene semplicemente saltato per questa sessione
+        e l'app si comporta come prima (nessun blocco per un problema di rete).
+        """
+        if self._models_manifest is not None:
+            return self._models_manifest
+        try:
+            import urllib.request
+            import system_actions
+            req = urllib.request.Request("https://nexflamma.net/models_version.json", headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5, context=system_actions.https_context()) as resp:
+                data = json.loads(resp.read().decode())
+            self._models_manifest = data.get("models", {}) if isinstance(data, dict) else {}
+        except Exception:
+            self._models_manifest = {}
+        return self._models_manifest
+
+    def _compute_file_sha256(self, path):
+        h = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(4 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            return h.hexdigest()
+        except Exception:
+            return None
+
+    def _is_model_verified(self, path, expected_sha256, progress_callback=None):
+        """
+        Controlla che il file in `path` corrisponda a expected_sha256. Usa una
+        cache su disco (un file '<modello>.verified.json' accanto al modello) per
+        NON dover rileggere e hashare da capo file da 1-5 GB ad ogni avvio: la
+        rilettura completa scatta solo se dimensione/data modifica del modello
+        sono cambiate rispetto all'ultima verifica riuscita, o se non c'e' ancora
+        una verifica in cache.
+
+        expected_sha256 mancante (manifest irraggiungibile) => nessun controllo
+        possibile, si considera valido (non blocca l'utente per un problema di rete).
+        """
+        if not expected_sha256:
+            return True
+        try:
+            size = os.path.getsize(path)
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return False
+
+        marker_path = path + ".verified.json"
+        try:
+            if os.path.exists(marker_path):
+                with open(marker_path, "r", encoding="utf-8") as f:
+                    cached = json.load(f)
+                if (cached.get("size") == size and cached.get("mtime") == mtime
+                        and cached.get("sha256") == expected_sha256):
+                    return True  # gia' verificato in passato, file non toccato da allora
+        except Exception:
+            pass
+
+        if progress_callback:
+            progress_callback(f"Verifica integrità {os.path.basename(path)}...")
+        actual = self._compute_file_sha256(path)
+        if not actual or actual.lower() != expected_sha256.lower():
+            return False
+
+        try:
+            with open(marker_path, "w", encoding="utf-8") as f:
+                json.dump({"size": size, "mtime": mtime, "sha256": actual}, f)
+        except Exception:
+            pass
+        return True
 
     def _select_handler(self, handler_name, clip_model_path):
         """Restituisce il chat handler di visione giusto per il profilo Argus."""
@@ -550,9 +709,22 @@ class AIEngine:
 
             # Xet e progress-bar gia' disabilitati a livello di modulo (prima dell'import)
 
+            manifest = self._fetch_models_manifest()
+
             for repo, src_name, argus_name in tasks:
-                if self.resolve_model_file(argus_name):
-                    continue  # gia' presente col nome Argus (accanto all'exe o in cartella utente)
+                expected_sha = (manifest.get(argus_name) or {}).get("sha256")
+                existing = self.resolve_model_file(argus_name)
+                if existing:
+                    if self._is_model_verified(existing, expected_sha, progress_callback):
+                        continue  # gia' presente, integro e corrispondente al manifest
+                    # Presente ma corrotto o sostituito da una versione diversa sul server:
+                    # va ributtato via, altrimenti resterebbe per sempre "gia' presente".
+                    if progress_callback:
+                        progress_callback(f"{argus_name} non corrisponde alla versione attesa, riscarico...")
+                    try:
+                        os.remove(existing)
+                    except Exception:
+                        pass  # es. cartella accanto all'exe non scrivibile: si riscarica altrove
                 dl_dir = self.get_models_dir(force_writable=True)
                 if progress_callback: progress_callback(f"Scaricamento {argus_name}...")
                 # Retry con backoff: hf_hub_download RIPRENDE (resume) i file .incomplete,
@@ -587,7 +759,13 @@ class AIEngine:
                             if attempt < 3:
                                 time.sleep(3 * attempt)
                     if src_path:
-                        continue  # file pronto e gia' col nome ARGUS: prossimo modello
+                        if expected_sha and not self._is_model_verified(dst_path, expected_sha, progress_callback):
+                            try:
+                                os.remove(dst_path)
+                            except Exception:
+                                pass
+                            return False, f"Il file scaricato ({argus_name}) non corrisponde al checksum atteso: download corrotto."
+                        continue  # file pronto, integro, e gia' col nome ARGUS: prossimo modello
                     if progress_callback:
                         progress_callback(f"Download veloce non riuscito, passo alla modalita' classica...")
 
@@ -618,6 +796,13 @@ class AIEngine:
                 except Exception as e:
                     return False, f"Rename Error: {str(e)}"
 
+                if expected_sha and not self._is_model_verified(dst_path, expected_sha, progress_callback):
+                    try:
+                        os.remove(dst_path)
+                    except Exception:
+                        pass
+                    return False, f"Il file scaricato ({argus_name}) non corrisponde al checksum atteso: download corrotto."
+
             if progress_callback: progress_callback("Caricamento... Attendere.")
 
             # --- Caricamento effettivo ---
@@ -635,25 +820,40 @@ class AIEngine:
                 ngl = hw["n_gpu_layers"]
                 cpu_label = f"CPU ({hw['cpu_cores']} core)"
 
+                # Context window / troncamento documenti adattivi: il profilo "full" (Argus
+                # Maior) gira su hardware piu' capace e beneficia di un contesto piu' ampio
+                # (documenti piu' lunghi analizzati meglio); con GPU forte alziamo ulteriormente.
+                # Prima erano fissi a 2048 (1024 in fallback CPU) per qualunque profilo/hardware.
+                if quality == "full":
+                    self._n_ctx = 8192 if hw["use_gpu"] else 4096
+                    self._doc_chunk_chars = 6000 if hw["use_gpu"] else 3000
+                else:
+                    self._n_ctx = 4096 if hw["use_gpu"] else 2048
+                    self._doc_chunk_chars = 3000 if hw["use_gpu"] else 1200
+                fallback_ctx = max(1024, self._n_ctx // 2)
+
                 if vision_mode:
                     chat_handler = self._select_handler(prof["handler"], p_path)
                     try:
-                        self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=2048, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
+                        self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=self._n_ctx, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
                         self.hardware_info = hw["label"]
                     except Exception:
-                        self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=1024, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
+                        self._n_ctx = fallback_ctx
+                        self.llm = Llama(model_path=v_path, chat_handler=chat_handler, n_ctx=self._n_ctx, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
                         self.hardware_info = cpu_label
                     self.is_vision = True
                     self._active_handler = prof["handler"]
                 else:
                     try:
-                        self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
+                        self.llm = Llama(model_path=t_path, n_ctx=self._n_ctx, n_threads=n_threads, n_gpu_layers=ngl, n_batch=512, verbose=False)
                         self.hardware_info = hw["label"]
                     except Exception:
-                        self.llm = Llama(model_path=t_path, n_ctx=2048, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
+                        self._n_ctx = fallback_ctx
+                        self.llm = Llama(model_path=t_path, n_ctx=self._n_ctx, n_threads=n_threads, n_gpu_layers=0, n_batch=512, verbose=False)
                         self.hardware_info = cpu_label
                     self.is_vision = False
 
+                self._load_context_cache()
                 return True, ""
             except Exception as le:
                 return False, f"Load Error: {str(le)}"
@@ -686,13 +886,128 @@ class AIEngine:
                 pass
         return meta
 
+    _CACHEABLE_EXTS = {
+        ".pdf", ".docx", ".doc", ".txt",
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif", ".ico", ".heic", ".heif",
+        ".svg", ".avif", ".jxl", ".nef", ".nrw", ".cr2", ".cr3", ".crw", ".arw", ".srf", ".sr2", ".dng",
+        ".raf", ".rw2", ".raw", ".orf", ".ori", ".rwl", ".pef", ".ptx", ".cap", ".iiq", ".eip", ".3fr",
+        ".fff", ".dcr", ".kdc", ".dcs", ".drf", ".k25", ".mrw", ".srw", ".bay", ".x3f", ".erf", ".mef",
+        ".mos", ".pxn", ".gpr", ".rwz", ".obm", ".qtk", ".rdc", ".mdc", ".psd", ".psb", ".ai", ".indd",
+        ".cdr", ".xcf", ".afphoto", ".afdesign", ".afpub", ".sketch", ".fig", ".kra", ".clip", ".lip",
+        ".pspimage", ".psp", ".qxp", ".dwg", ".dxf", ".eps", ".ps", ".obj", ".fbx", ".stl", ".blend",
+        ".c4d", ".max", ".ma", ".mb", ".3ds", ".gltf", ".glb",
+    }
+
+    def _cache_key(self, file_path):
+        """Chiave di cache leggera: hash del contenuto solo per estensioni "cacheabili"
+        (documenti/immagini, tipicamente non enormi). I video ne restano fuori: leggerli
+        per intero solo per la cache vanificherebbe il risparmio."""
+        try:
+            h = self.compute_file_hash(file_path, "MD5")
+            return h
+        except Exception:
+            return None
+
+    def _vision_describe_image(self, img):
+        """Chiede al modello vision una descrizione dettagliata di una PIL.Image gia' aperta.
+        Condivisa tra analisi foto e frame estratti dai video."""
+        img = img.copy()
+        img.thumbnail((1008, 1008))
+        buffered = BytesIO()
+        img.convert("RGB").save(buffered, format="JPEG", quality=85)
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        data_url = f"data:image/jpeg;base64,{img_str}"
+
+        # Prompt adattivo: Moondream rende meglio con richieste brevi,
+        # Qwen2.5-VL/altri con istruzioni dettagliate.
+        if getattr(self, "_active_handler", None) == "moondream":
+            prompt_text = (
+                "Describe this image in detail: main subjects, objects, people "
+                "(clothing, actions), any visible text or logos, and the setting."
+            )
+        else:
+            prompt_text = (
+                "Describe this image with high precision. List:\n"
+                "1) The main subject, objects, and people (specify their clothing, age, actions, or details),\n"
+                "2) Any visible text, writing, or logos (read word-for-word),\n"
+                "3) Setting and background.\n"
+                "Be highly descriptive and precise."
+            )
+
+        response = self.llm.create_chat_completion(
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt_text},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]}
+            ],
+            max_tokens=150,
+            temperature=0.1
+        )
+        return response['choices'][0]['message']['content'].strip()
+
+    def _extract_video_frame(self, video_path):
+        """Estrae un frame rappresentativo (10% della durata, mai oltre i primi 20s) come
+        immagine JPEG temporanea via FFMPEG. Ritorna il percorso del frame o None se FFMPEG
+        non e' disponibile o l'estrazione fallisce. Il chiamante deve rimuovere il file."""
+        import subprocess
+        ok, ffmpeg_bin = self.check_ffmpeg()
+        if not ok:
+            return None
+        try:
+            # Durata del video (per posizionare il frame al 10%, non sempre al frame 0
+            # che spesso e' nero/titoli). Se ffprobe non e' disponibile o fallisce, ripiega su 1s.
+            seek = "1.0"
+            try:
+                ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
+                out = subprocess.check_output(
+                    [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+                    stderr=subprocess.DEVNULL, timeout=8
+                ).decode(errors="ignore").strip()
+                duration = float(out)
+                if duration > 0:
+                    seek = str(min(duration * 0.1, 20.0))
+            except Exception:
+                pass
+
+            fd, frame_path = tempfile.mkstemp(suffix=".jpg", prefix="datarium_frame_")
+            os.close(fd)
+            startupinfo = None
+            if os.name == "nt":
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = 0
+            cmd = [ffmpeg_bin, "-y", "-ss", seek, "-i", video_path, "-frames:v", "1", "-q:v", "3", frame_path]
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20, startupinfo=startupinfo)
+            if proc.returncode == 0 and os.path.exists(frame_path) and os.path.getsize(frame_path) > 0:
+                return frame_path
+            try:
+                os.remove(frame_path)
+            except OSError:
+                pass
+        except Exception:
+            pass
+        return None
+
     def extract_context(self, file_path, scan_sidecars=True):
         """Extracts a deep text summary or detailed image description with metadata fusion."""
         self.last_has_people = False
         ext = os.path.splitext(file_path)[1].lower()
+
+        # --- Cache persistente: stesso file (stesso hash) gia' descritto in passato ---
+        # (foto/documenti duplicati, o riesecuzione della stessa cartella). I video sono
+        # esclusi apposta (vedi _cache_key). Se manca il file per hashing prosegue normale.
+        cache_key = None
+        if ext in self._CACHEABLE_EXTS:
+            self._load_context_cache()
+            cache_key = self._cache_key(file_path)
+            if cache_key and cache_key in self._context_cache:
+                return self._context_cache[cache_key]
+
         metadata = self.extract_metadata(file_path)
         meta_str = f" [Metadata: {metadata}]" if metadata else ""
-        
+
         # Cerca trascrizioni sidecar (es. generate da Vocius)
         sidecar_str = ""
         if scan_sidecars:
@@ -715,7 +1030,8 @@ class AIEngine:
                 print(f"[AIEngine] Errore scansione file sidecar: {se}")
 
         context_res = ""
-        # 1. DOCUMENTI
+        # 1. DOCUMENTI (troncamento adattivo: vedi self._doc_chunk_chars in download_model_if_needed)
+        chunk = self._doc_chunk_chars
         try:
             if ext == ".pdf":
                 import importlib
@@ -724,17 +1040,19 @@ class AIEngine:
                 text = ""
                 for i in range(min(5, len(doc))):
                     text += doc[i].get_text()
-                context_res = f"DOC_CONTENT: {text[:1200]}"
-            
+                    if len(text) >= chunk:
+                        break
+                context_res = f"DOC_CONTENT: {text[:chunk]}"
+
             elif ext in [".docx", ".doc"]:
                 import docx
                 doc = docx.Document(file_path)
                 text = "\n".join([p.text for p in doc.paragraphs[:40]])
-                context_res = f"DOC_CONTENT: {text[:1200]}"
-                
+                context_res = f"DOC_CONTENT: {text[:chunk]}"
+
             elif ext == ".txt":
                 with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    context_res = f"DOC_CONTENT: {f.read(1200)}"
+                    context_res = f"DOC_CONTENT: {f.read(chunk)}"
         except Exception as e:
             print(f"Doc extraction error: {e}")
 
@@ -750,40 +1068,7 @@ class AIEngine:
         ] and self.is_vision:
             try:
                 img = Image.open(file_path)
-                img.thumbnail((1008, 1008))
-                buffered = BytesIO()
-                img.save(buffered, format="JPEG", quality=85)
-                img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-                data_url = f"data:image/jpeg;base64,{img_str}"
-                
-                # Prompt adattivo: Moondream rende meglio con richieste brevi,
-                # Qwen2.5-VL/altri con istruzioni dettagliate.
-                if getattr(self, "_active_handler", None) == "moondream":
-                    prompt_text = (
-                        "Describe this image in detail: main subjects, objects, people "
-                        "(clothing, actions), any visible text or logos, and the setting."
-                    )
-                else:
-                    prompt_text = (
-                        "Describe this image with high precision. List:\n"
-                        "1) The main subject, objects, and people (specify their clothing, age, actions, or details),\n"
-                        "2) Any visible text, writing, or logos (read word-for-word),\n"
-                        "3) Setting and background.\n"
-                        "Be highly descriptive and precise."
-                    )
-                
-                response = self.llm.create_chat_completion(
-                    messages=[
-                        {"role": "user", "content": [
-                            {"type": "text", "text": prompt_text},
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                        ]}
-                    ],
-                    max_tokens=150,
-                    temperature=0.1
-                )
-                
-                response_text = response['choices'][0]['message']['content'].strip()
+                response_text = self._vision_describe_image(img)
                 context_res = f"IMAGE_DESC: {response_text}{meta_str}"
             except Exception as e:
                 if metadata:
@@ -792,22 +1077,52 @@ class AIEngine:
                     print(f"Vision error: {e}")
 
         # 3. VIDEO (Cinema / Video)
+        # Prima si limitava a metadata/nome file: ora, se il modello vision e' caricato ed
+        # FFMPEG e' disponibile, estrae un frame rappresentativo (10% della durata) e lo
+        # descrive esattamente come una foto, cosi' il tagging/naming riflette il CONTENUTO
+        # del video e non solo i suoi metadata tecnici.
         if not context_res and ext in [
-            ".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".f4v", ".wmv", ".m4v", ".mpg", ".mpeg", ".m2v", ".3gp", ".3g2", 
+            ".mp4", ".mov", ".avi", ".mkv", ".webm", ".flv", ".f4v", ".wmv", ".m4v", ".mpg", ".mpeg", ".m2v", ".3gp", ".3g2",
             ".ts", ".mts", ".m2ts", ".vob", ".ogv", ".divx", ".asf",
             ".braw", ".r3d", ".ari", ".arx", ".mxf", ".cine", ".crm", ".mcw"
         ]:
-            if metadata:
-                context_res = f"VIDEO_METADATA: {metadata}"
-            else:
-                context_res = f"VIDEO_FILE: {os.path.basename(file_path)}"
+            frame_path = None
+            if self.is_vision:
+                try:
+                    frame_path = self._extract_video_frame(file_path)
+                    if frame_path:
+                        img = Image.open(frame_path)
+                        response_text = self._vision_describe_image(img)
+                        context_res = f"VIDEO_DESC: {response_text}{meta_str}"
+                except Exception as e:
+                    print(f"Video vision error: {e}")
+                finally:
+                    if frame_path:
+                        try:
+                            os.remove(frame_path)
+                        except OSError:
+                            pass
+
+            if not context_res:
+                if metadata:
+                    context_res = f"VIDEO_METADATA: {metadata}"
+                else:
+                    context_res = f"VIDEO_FILE: {os.path.basename(file_path)}"
 
         if context_res and sidecar_str:
             context_res += sidecar_str
         elif not context_res and sidecar_str:
             context_res = f"FILE_TRANSCRIBED: {os.path.basename(file_path)}{sidecar_str}"
-            
+
+        # Salva in cache (solo estensioni "cacheabili", vedi sopra)
+        if cache_key and context_res:
+            self._context_cache[cache_key] = context_res
+            self._context_cache_dirty = True
+            self._save_context_cache()
+
         return context_res
+
+    _FALLBACK_TAXONOMY = "Documentazione(Lavoro, Personale), Immagini(Viaggi, Natura), Archivio(Varie)"
 
     def identify_global_themes(self, all_contexts):
         """Brainstorming: Analyse all contexts to find macro-themes and sub-themes."""
@@ -816,7 +1131,7 @@ class AIEngine:
         cleaned_contexts = []
         for c in all_contexts:
             if not c: continue
-            for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
+            for prefix in ["IMAGE_DESC: ", "VIDEO_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
                 if c.startswith(prefix):
                     c = c[len(prefix):]
                     break
@@ -830,7 +1145,12 @@ class AIEngine:
             sampled = [non_empty[int(i * step)] for i in range(40)]
         else:
             sampled = non_empty
-        summaries = "\n".join(c[:150] for c in sampled)
+        # Budget in caratteri: 40 descrizioni x 150 char sforavano n_ctx=2048 (italiano ~2.2
+        # char/token). llama.cpp allora solleva un errore e finiva sempre nella tassonomia di
+        # ripiego generica, che poi _snap_to_taxonomy imponeva a tutte le cartelle.
+        char_budget = max(600, int(getattr(self, "_n_ctx", 2048) * 2.2) - 900)
+        per_item = max(40, min(150, char_budget // max(1, len(sampled))))
+        summaries = "\n".join(c[:per_item] for c in sampled)
         if not summaries: return "Varie"
         
         messages = [
@@ -846,11 +1166,35 @@ class AIEngine:
             response = self.llm.create_chat_completion(
                 messages=messages,
                 max_tokens=100,
-                temperature=0.5
+                temperature=0.2
             )
             return response['choices'][0]['message']['content'].strip()
-        except Exception:
-            return "Documentazione(Lavoro, Personale), Immagini(Viaggi, Natura), Archivio(Varie)"
+        except Exception as e:
+            print(f"[AIEngine] Tassonomia globale fallita ({e}): uso la tassonomia di ripiego")
+            return self._FALLBACK_TAXONOMY
+
+    def _snap_to_taxonomy(self, parts, taxonomy):
+        """Corregge piccole variazioni/instabilita' del LLM tra file simili (es. 'Documento'
+        vs 'Documenti', 'Viaggio' vs 'Viaggi') agganciando categoria/sottocategoria al nome
+        piu' vicino gia' presente nella tassonomia globale, cosi' non nascono cartelle
+        duplicate quasi-identiche per lo stesso concetto. Non tocca 'parts' se non trova un
+        match sufficientemente vicino (soglia 0.72) o se manca la tassonomia."""
+        if taxonomy == self._FALLBACK_TAXONOMY:
+            return parts  # tassonomia generica di ripiego: agganciarvi le cartelle le peggiora
+        taxo = _parse_taxonomy(taxonomy)
+        if not taxo or len(parts) < 2:
+            return parts
+        categories = [c for c, _ in taxo]
+        cat_match = difflib.get_close_matches(parts[0], categories, n=1, cutoff=0.72)
+        if cat_match:
+            matched_cat = cat_match[0]
+            parts[0] = matched_cat
+            subs = next((s for c, s in taxo if c == matched_cat), [])
+            if subs and parts[1] not in ("Persone_Identificate",):
+                sub_match = difflib.get_close_matches(parts[1], subs, n=1, cutoff=0.72)
+                if sub_match:
+                    parts[1] = sub_match[0]
+        return parts
 
     # Parole "vuote" tipiche dei nomi generati da camera/telefono/screenshot: un nome fatto
     # solo di queste NON e' descrittivo e va rinominato.
@@ -1011,7 +1355,7 @@ class AIEngine:
         if not self.llm or not context: return "Varie"
         
         # Pulizia prefissi dal contesto
-        for prefix in ["IMAGE_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
+        for prefix in ["IMAGE_DESC: ", "VIDEO_DESC: ", "DOC_CONTENT: ", "VIDEO_METADATA: ", "VIDEO_FILE: ", "RAW_IMAGE_METADATA: "]:
             if context.startswith(prefix):
                 context = context[len(prefix):]
                 break
@@ -1038,8 +1382,7 @@ class AIEngine:
             elif clean.lower().startswith("album:"):
                 clean = clean[6:].strip()
                 
-            import re
-            clean = re.sub(r'[^a-zA-Z0-9_ ]', '', clean).strip()
+            clean = re.sub(r'[^a-zA-Z0-9_ ' + _IT_ACCENTS + r']', '', clean).strip()
             
             # Forza il limite rigoroso di 1 o 2 parole al massimo in italiano
             words = clean.split()
