@@ -1099,81 +1099,109 @@ class AIEngine:
                         
         return False, "FFMPEG non trovato nel sistema. Configuralo nelle Impostazioni."
 
-    def generate_proxy(self, video_path, output_dir, ffmpeg_path=None, progress_callback=None, resolution="540p", format_ext="mp4"):
+    # Profili proxy sul modello di DaVinci Resolve: formato (codec) + risoluzione relativa
+    # all'originale. La chiave e' il testo mostrato nei menu delle Impostazioni.
+    PROXY_RESOLUTIONS = {
+        "Original": 1,
+        "Half": 2,
+        "Quarter": 4,
+        "One-eighth": 8,
+    }
+    PROXY_FORMATS = ["DNxHR SQ (.mov)", "H.264 (.mp4)"]
+    DEFAULT_PROXY_RESOLUTION = "Half"
+    DEFAULT_PROXY_FORMAT = "H.264 (.mp4)"
+
+    @classmethod
+    def normalize_proxy_resolution(cls, value):
+        """Riporta un valore (anche di versioni vecchie, es. '540p (960x540)') a una chiave valida."""
+        v = str(value or "").strip().lower().replace("_", "-")
+        for key in cls.PROXY_RESOLUTIONS:
+            if v == key.lower() or v.startswith(key.lower() + " "):
+                return key
+        if v in ("1/2", "half"):
+            return "Half"
+        return cls.DEFAULT_PROXY_RESOLUTION
+
+    @classmethod
+    def normalize_proxy_format(cls, value):
+        v = str(value or "").lower()
+        if "dnx" in v:
+            return "DNxHR SQ (.mov)"
+        return cls.DEFAULT_PROXY_FORMAT
+
+    def generate_proxy(self, video_path, output_dir, ffmpeg_path=None, progress_callback=None,
+                       resolution="Half", format_key="H.264 (.mp4)"):
         """
-        Genera un proxy leggero H.264 da un video nella risoluzione e formato specificati.
+        Genera un proxy da un video. resolution: Original/Half/Quarter/One-eighth (rispetto
+        all'originale); format_key: 'DNxHR SQ (.mov)' oppure 'H.264 (.mp4)'.
         Ritorna (True, percorso_proxy) o (False, messaggio_errore).
         """
         import subprocess
-        
+
         ok, executable = self.check_ffmpeg(ffmpeg_path)
         if not ok:
             return False, executable
-            
+
         if not os.path.exists(video_path):
             return False, "Video sorgente non trovato."
-            
+
+        resolution = self.normalize_proxy_resolution(resolution)
+        format_key = self.normalize_proxy_format(format_key)
+        divisor = self.PROXY_RESOLUTIONS[resolution]
+        is_dnx = format_key.startswith("DNxHR")
+        ext = "mov" if is_dnx else "mp4"
+
         os.makedirs(output_dir, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(video_path))[0]
-        proxy_path = os.path.join(output_dir, f"proxy_{base_name}.{format_ext}")
-        
-        # Se il proxy esiste già, non sovrascriverlo (ottimizzazione)
+        suffix = f"{resolution.lower()}_{'dnxhr' if is_dnx else 'h264'}"
+        proxy_path = os.path.join(output_dir, f"proxy_{base_name}_{suffix}.{ext}")
+
+        # Se il proxy esiste gia', non rigenerarlo
         if os.path.exists(proxy_path) and os.path.getsize(proxy_path) > 0:
             return True, proxy_path
-            
-        # Mappa della risoluzione in larghezza per FFMPEG scale filter
-        # scale=X:-2 garantisce larghezza X e altezza proporzionale pari (evitando errori ffmpeg per altezze dispari)
-        res_map = {
-            "1080p": "1920",
-            "720p": "1280",
-            "540p": "960",
-            "480p": "854",
-            "360p": "640"
-        }
-        width = res_map.get(resolution, "960")
-        scale_filter = f"scale={width}:-2"
-        
-        # Comando FFMPEG per proxy leggero (H.264, audio AAC)
-        cmd = [
-            executable, "-y",
-            "-i", video_path,
-            "-vf", scale_filter,
-            "-c:v", "libx264",
-            "-crf", "28",
-            "-preset", "fast",
-            "-c:a", "aac",
-            "-b:a", "128k",
-            proxy_path
-        ]
-        
+
+        # Dimensioni divise per il fattore e arrotondate a numeri pari (richiesto da H.264/yuv42x)
+        scale_filter = f"scale=trunc(iw/{divisor}/2)*2:trunc(ih/{divisor}/2)*2"
+        if is_dnx and divisor > 1:
+            # DNxHR non accetta larghezze < 256: sotto quella soglia si ferma a 256 px
+            scale_filter = f"scale=max(256\\,trunc(iw/{divisor}/2)*2):-2"
+
+        if is_dnx:
+            codec_args = ["-c:v", "dnxhd", "-profile:v", "dnxhr_sq", "-pix_fmt", "yuv422p",
+                          "-c:a", "pcm_s16le"]
+            muxer = "mov"
+        else:
+            codec_args = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p",
+                          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart"]
+            muxer = "mp4"
+
+        # Scrive su file temporaneo e rinomina a fine lavoro: un proxy interrotto non resta
+        # a meta' sul disco e non viene scambiato per completo alla prossima esecuzione.
+        tmp_path = proxy_path + ".part"
+        cmd = [executable, "-y", "-nostdin", "-i", video_path,
+               "-map", "0:v:0", "-map", "0:a?", "-sn", "-dn",
+               "-vf", scale_filter, *codec_args, "-f", muxer, tmp_path]
+
         try:
             if progress_callback:
                 progress_callback(f"Transcodifica in corso: {os.path.basename(video_path)}...")
-            
-            # Nascondiamo la finestra su Windows per non far apparire schermate nere CMD moleste
-            startupinfo = None
-            if os.name == 'nt':
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = 0 # SW_HIDE
-                
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                startupinfo=startupinfo
-            )
-            
-            # Attendiamo la fine del processo
-            stdout, stderr = process.communicate()
-            
-            if process.returncode == 0 and os.path.exists(proxy_path):
+
+            flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW su Windows
+            process = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     creationflags=flags)
+            if process.returncode == 0 and os.path.exists(tmp_path):
+                os.replace(tmp_path, proxy_path)
                 return True, proxy_path
-            else:
-                err_msg = stderr.decode('utf-8', errors='ignore') if stderr else "Errore generico FFMPEG"
-                return False, f"FFMPEG fallito (codice {process.returncode}): {err_msg}"
+            err_msg = process.stderr.decode('utf-8', errors='ignore')[-500:] if process.stderr else "Errore generico FFMPEG"
+            return False, f"FFMPEG fallito (codice {process.returncode}): {err_msg}"
         except Exception as e:
             return False, f"Eccezione durante transcodifica: {e}"
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
 
     def apply_custom_rules(self, file_path, rules_list):
         """

@@ -1143,7 +1143,7 @@ class ReportGenerator:
             print(f"Errore purge cronologia job: {e}")
 
     @classmethod
-    def save_hash_report(cls, output_dir, report_id, files_list, algo):
+    def save_hash_report(cls, output_dir, report_id, files_list, algo, comparison=None):
         """Genera e salva un vero e proprio file PDF di verifica Hash usando PyMuPDF."""
         os.makedirs(output_dir, exist_ok=True)
         report_path = os.path.join(output_dir, f"{report_id}_Hash_Report.pdf")
@@ -1173,8 +1173,35 @@ class ReportGenerator:
                              cls.safe_text(f"Riepilogo Scansione:\n- File Analizzati: {len(files_list)}\n- Algoritmo Checksum: {algo}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
-        # Tabella dei File
         y = 190
+        if comparison:
+            n_ok, n_diff = len(comparison["identical"]), len(comparison["different"])
+            n_a, n_b, n_mv = len(comparison["only_a"]), len(comparison["only_b"]), len(comparison["moved"])
+            all_ok = not (n_diff or n_a or n_b or n_mv)
+            page.insert_text((20, y+8), "CONFRONTO CARTELLA 1 / CARTELLA 2", fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
+            page.insert_text((20, y+24), cls.safe_text("Cartella 1: " + comparison["a_root"])[:95], fontsize=7, fontname=font_name, color=(0.3, 0.3, 0.3))
+            page.insert_text((20, y+34), cls.safe_text("Cartella 2: " + comparison["b_root"])[:95], fontsize=7, fontname=font_name, color=(0.3, 0.3, 0.3))
+            verdict = "ESITO: CARTELLE IDENTICHE" if all_ok else "ESITO: LE CARTELLE NON COINCIDONO"
+            page.insert_text((20, y+52), verdict, fontsize=11, fontname=f"{font_name}-bold", color=(0.06, 0.55, 0.35) if all_ok else (0.8, 0.15, 0.15))
+            page.insert_text((20, y+66), f"{n_ok} identici - {n_diff} diversi - {n_a} solo in Cartella 1 - {n_b} solo in Cartella 2 - {n_mv} percorso diverso", fontsize=8, fontname=font_name, color=(0.2, 0.2, 0.2))
+            y += 80
+            problems = ([("DIVERSO", a["rel"]) for a, _b in comparison["different"]]
+                        + [("SOLO C1", r["rel"]) for r in comparison["only_a"]]
+                        + [("SOLO C2", r["rel"]) for r in comparison["only_b"]]
+                        + [("PERCORSO", a["rel"]) for a, _b in comparison["moved"]])
+            for label, rel in problems:
+                if y > 800:
+                    page = doc.new_page(width=595, height=842)
+                    y = 40
+                page.insert_text((25, y+10), label, fontsize=8, fontname=f"{font_name}-bold", color=(0.8, 0.15, 0.15))
+                page.insert_text((85, y+10), cls.safe_text(rel)[:90], fontsize=8, fontname=font_name, color=(0.1, 0.1, 0.1))
+                y += 13
+            y += 15
+            if y > 760:
+                page = doc.new_page(width=595, height=842)
+                y = 40
+
+        # Tabella dei File
         page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
         page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
         page.insert_text((220, y+14), "Tipo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
@@ -1207,6 +1234,8 @@ class ReportGenerator:
             page.insert_text((280, y+12), h_disp, fontsize=8, fontname="courier", color=(0.06, 0.5, 0.3))
             
             role_text = "Sorgente" if f.get("is_source") else "Confronto"
+            if f.get("root") and comparison:
+                role_text = "Cartella 1" if f["root"] == comparison["a_root"] else "Cartella 2"
             role_color = (0.06, 0.72, 0.5) if f.get("is_source") else (0.38, 0.65, 0.98)
             page.insert_text((510, y+12), role_text, fontsize=8, fontname=f"{font_name}-bold", color=role_color)
             

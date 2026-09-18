@@ -46,7 +46,7 @@ from face_memory import FaceMemoryManager
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.2.9"
+APP_VERSION = "1.3.0"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -313,16 +313,17 @@ class DatariumApp(ctk.CTk):
         self.offload_presets = {}
         self.offload_selected_preset = ctk.StringVar(value="")
 
-        # Ingest Feature State (Fase 0-2: coda, trigger auto, multi-destinazione, proxy)
-        self.ingest_destinations = []
-        self.ingest_organize_ai = ctk.BooleanVar(value=True)
-        self.ingest_make_report = ctk.BooleanVar(value=True)
-        self.ingest_make_proxy = ctk.BooleanVar(value=False)
-        self.ingest_watch = ctk.BooleanVar(value=False)
-        self.ingest_queue = []
-        self.ingest_worker_running = False
-        self._ingest_known_drives = set()
-        self.ingest_report_path = None
+
+        # Sincronizza Dischi (confronto A/B stile FreeFileSync)
+        self.sync_path_a = ctk.StringVar(value="")
+        self.sync_path_b = ctk.StringVar(value="")
+        self.sync_deep = ctk.BooleanVar(value=False)
+        self.sync_verify = ctk.BooleanVar(value=True)
+        self.sync_exclude = ctk.StringVar(value="")
+        self.sync_mode_var = ctk.StringVar(value="Aggiorna A ▶ B (copia il nuovo, non elimina)")
+        self.sync_show = {k: ctk.BooleanVar(value=(k != "identical")) for k in ("only_a", "only_b", "different", "identical")}
+        self.sync_rows = []
+        self.sync_busy = False
 
         # Settings state
         self.load_settings()
@@ -368,8 +369,8 @@ class DatariumApp(ctk.CTk):
         self.ffmpeg_path = ""
         self.scan_sidecars_enabled = True
         self.proxy_gen_enabled = False
-        self.proxy_resolution = "540p (960x540)"
-        self.proxy_format = "MP4 (.mp4)"
+        self.proxy_resolution = "Half"
+        self.proxy_format = "H.264 (.mp4)"
         self.offload_presets = {}
         self.job_history_max = 50
 
@@ -381,8 +382,8 @@ class DatariumApp(ctk.CTk):
                     self.ffmpeg_path = data.get("ffmpeg_path", "")
                     self.scan_sidecars_enabled = data.get("scan_sidecars_enabled", True)
                     self.proxy_gen_enabled = data.get("proxy_gen_enabled", False)
-                    self.proxy_resolution = data.get("proxy_resolution", "540p (960x540)")
-                    self.proxy_format = data.get("proxy_format", "MP4 (.mp4)")
+                    self.proxy_resolution = self.ai.normalize_proxy_resolution(data.get("proxy_resolution"))
+                    self.proxy_format = self.ai.normalize_proxy_format(data.get("proxy_format"))
                     self.offload_presets = data.get("offload_presets", {})
                     self.job_history_max = data.get("job_history_max", 50)
             except Exception as e:
@@ -448,9 +449,9 @@ class DatariumApp(ctk.CTk):
         self.btn_offload.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Offload"] = self.btn_offload
 
-        self.btn_ingest = ctk.CTkButton(self.sidebar, text="Ingest", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("IngestHome"), **self.NAV_INACTIVE)
-        self.btn_ingest.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
-        self._nav_buttons["Ingest"] = self.btn_ingest
+        self.btn_sync = ctk.CTkButton(self.sidebar, text="Sincronizza Dischi", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Sync"), **self.NAV_INACTIVE)
+        self.btn_sync.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Sync"] = self.btn_sync
 
         # Bottom Buttons
         self.sidebar.grid_rowconfigure(7, weight=1)
@@ -477,7 +478,7 @@ class DatariumApp(ctk.CTk):
         self.init_hash_pages()
         self.init_autotag_page()
         self.init_offload_pages()
-        self.init_ingest_pages()
+        self.init_sync_page()
 
     def init_organizer_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -801,7 +802,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(proxy_settings_row, text="Risoluzione Proxy:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 10))
         self.proxy_resolution_menu = ctk.CTkOptionMenu(
             proxy_settings_row, 
-            values=["1080p (1920x1080)", "720p (1280x720)", "540p (960x540)", "480p (854x480)", "360p (640x360)"],
+            values=list(self.ai.PROXY_RESOLUTIONS.keys()),
             variable=self.proxy_resolution_var,
             command=lambda v: self.save_settings()
         )
@@ -810,7 +811,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(proxy_settings_row, text="Formato Proxy:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 10))
         self.proxy_format_menu = ctk.CTkOptionMenu(
             proxy_settings_row, 
-            values=["MP4 (.mp4)", "MKV (.mkv)", "MOV (.mov)"],
+            values=list(self.ai.PROXY_FORMATS),
             variable=self.proxy_format_var,
             command=lambda v: self.save_settings()
         )
@@ -1526,7 +1527,7 @@ class DatariumApp(ctk.CTk):
         "AutoTag": "AutoTag",
         "HashHome": "Hash", "HashOptions": "Hash", "HashResults": "Hash",
         "OffloadHome": "Offload", "OffloadResults": "Offload",
-        "IngestHome": "Ingest",
+        "Sync": "Sync",
         "Settings": "Settings",
     }
 
@@ -1543,7 +1544,7 @@ class DatariumApp(ctk.CTk):
         ctk.set_appearance_mode(mode)
 
     def set_sidebar_state(self, state="normal"):
-        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_ingest, self.btn_settings]
+        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_sync, self.btn_settings]
         for btn in buttons:
             btn.configure(state=state)
         if hasattr(self, 'appearance_mode_segmented'):
@@ -1962,15 +1963,13 @@ class DatariumApp(ctk.CTk):
                         # Generazione video proxy se abilitata
                         if self.proxy_gen_var.get() and it['type'] == "Video":
                             proxy_dir = os.path.join(os.path.dirname(target), "Proxies")
-                            res_code = self.proxy_resolution_var.get().split()[0]
-                            fmt_code = self.proxy_format_var.get().split()[0].lower()
                             self.ai.generate_proxy(
                                 target, 
                                 proxy_dir, 
                                 ffmpeg_path=self.ffmpeg_path, 
                                 progress_callback=self.update_status,
-                                resolution=res_code,
-                                format_ext=fmt_code
+                                resolution=self.proxy_resolution_var.get(),
+                                format_key=self.proxy_format_var.get()
                             )
                     except Exception as e:
                         print(f"Errore spostamento/proxy {it['old']}: {e}")
@@ -2163,28 +2162,42 @@ class DatariumApp(ctk.CTk):
             from tkinter import messagebox
             messagebox.showwarning("File Non Trovato", "Il file selezionato non è più disponibile.")
 
-    def compute_hash(self, file_path, algo="SHA-256"):
+    @staticmethod
+    def _make_hasher(algo):
         import hashlib
-        try:
-            if algo == "MD5":
-                h = hashlib.md5()
-            elif algo == "SHA-1":
-                h = hashlib.sha1()
-            elif algo == "xxHash64":
+        if algo == "MD5":
+            return hashlib.md5()
+        if algo == "SHA-1":
+            return hashlib.sha1()
+        if algo == "xxHash64":
+            try:
                 import xxhash
-                h = xxhash.xxh64()
-            else:
-                h = hashlib.sha256()
-                
-            with open(file_path, "rb") as f:
+                return xxhash.xxh64()
+            except ImportError:
+                return hashlib.sha256()
+        return hashlib.sha256()
+
+    def compute_hash(self, file_path, algo="SHA-256", progress_cb=None):
+        """Hash di un file con buffer riutilizzato da 8 MB (nessuna allocazione per blocco).
+        progress_cb(byte_letti_nel_blocco) viene chiamato dopo ogni lettura."""
+        try:
+            h = self._make_hasher(algo)
+            buf = bytearray(8 * 1024 * 1024)
+            view = memoryview(buf)
+            with open(file_path, "rb", buffering=0) as f:
                 if hasattr(os, "posix_fadvise"):
                     try:
                         os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
                     except Exception:
                         pass
-                while chunk := f.read(4 * 1024 * 1024):
-                    h.update(chunk)
-            return getattr(h, "hexdigest")()
+                while True:
+                    n = f.readinto(buf)
+                    if not n:
+                        break
+                    h.update(view[:n])
+                    if progress_cb:
+                        progress_cb(n)
+            return h.hexdigest()
         except Exception as e:
             return f"Error: {e}"
 
@@ -2221,7 +2234,7 @@ class DatariumApp(ctk.CTk):
         viene riletto da disco: si usano i byte già letti in anticipo da
         _prefetch_next_source() durante la verifica del file precedente (dischi
         diversi = lettura sorgente e verifica destinazione avvengono in parallelo
-        senza contendersi lo stesso disco). Vedi offload_bg/_ingest_run_one.
+        senza contendersi lo stesso disco). Vedi offload_bg.
 
         Prima la pipeline di Offload leggeva il sorgente 1 volta per l'hash e poi
         di nuovo 1 volta per OGNI destinazione (shutil.copy2): con 3 dischi di backup
@@ -2490,10 +2503,13 @@ class DatariumApp(ctk.CTk):
 
     def check_content_equal(self, f1, f2):
         try:
-            with open(f1, "rb") as a, open(f2, "rb") as b:
+            if os.path.getsize(f1) != os.path.getsize(f2):
+                return False
+            size = 4 * 1024 * 1024
+            with open(f1, "rb", buffering=0) as a, open(f2, "rb", buffering=0) as b:
                 while True:
-                    ch1 = a.read(8192)
-                    ch2 = b.read(8192)
+                    ch1 = a.read(size)
+                    ch2 = b.read(size)
                     if ch1 != ch2:
                         return False
                     if not ch1:
@@ -2558,7 +2574,12 @@ class DatariumApp(ctk.CTk):
             
         algo = self.selected_hash_algo.get()
         if algo == "-Scegli-":
-            algo = "SHA-256"
+            # xxHash64 e' molto piu' veloce di SHA-256 e basta per verificare copie/backup
+            try:
+                import xxhash  # noqa: F401
+                algo = "xxHash64"
+            except ImportError:
+                algo = "SHA-256"
 
         files_to_hash = []
         if self.selected_hash_files_list:
@@ -2598,18 +2619,21 @@ class DatariumApp(ctk.CTk):
 
     def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
         try:
+            import time
+            import threading as _th
+            from concurrent.futures import ThreadPoolExecutor
+
             results = []
             source_paths = set()
 
-            # 1. Raccogli la lista completa dei file da elaborare (sorgenti + cartelle),
-            #    così possiamo mostrare una barra di avanzamento reale.
-            tasks = []  # (path, is_source)
+            # 1. Lista completa dei file: (path, is_source, root, rel)
+            tasks = []
             for sf in files_to_hash:
                 if os.path.exists(sf):
                     ap = os.path.abspath(sf)
                     if ap not in source_paths:
                         source_paths.add(ap)
-                        tasks.append((sf, True))
+                        tasks.append((sf, True, None, os.path.basename(sf)))
 
             for sd in sd_list:
                 if os.path.isdir(sd):
@@ -2618,52 +2642,124 @@ class DatariumApp(ctk.CTk):
                             p = os.path.join(root, f)
                             if os.path.abspath(p) in source_paths:
                                 continue
-                            tasks.append((p, False))
+                            tasks.append((p, False, sd, os.path.relpath(p, sd)))
 
             total = len(tasks)
             if total == 0:
                 self.after(0, self._render_hash_results, results)
                 return
 
-            import time
             sizes = []
-            for p, _is_source in tasks:
+            for t_ in tasks:
                 try:
-                    sizes.append(os.path.getsize(p))
+                    sizes.append(os.path.getsize(t_[0]))
                 except Exception:
                     sizes.append(0)
             total_bytes = sum(sizes)
-            bytes_done = 0
+
+            # 2. Raggruppa per disco fisico: gruppi su dischi diversi girano IN PARALLELO
+            #    (il tempo totale e' quello del disco piu' lento, non la somma); file sullo
+            #    stesso disco restano sequenziali per non far "sbattere" le testine di un HDD.
+            def _dev(path):
+                try:
+                    return os.stat(path).st_dev
+                except Exception:
+                    return None
+            groups = {}
+            for idx, t_ in enumerate(tasks):
+                groups.setdefault(_dev(t_[0]), []).append(idx)
+
+            out = [None] * total
+            lock = _th.Lock()
+            state = {"bytes": 0, "done": 0, "last_ui": 0.0}
             start_time = time.time()
 
-            # 2. Calcola gli hash aggiornando barra e stato a ogni file
-            for idx, (p, is_source) in enumerate(tasks):
-                name = os.path.basename(p)
-                elapsed = time.time() - start_time
-                self.after(0, lambda n=name, i=idx, bd=bytes_done, tb=total_bytes, e=elapsed:
-                           self._update_hash_progress(i, total, n, bd, tb, e))
-                hash_val = self.compute_hash(p, algo)
-                sz = sizes[idx]
-                bytes_done += sz
-                ext = os.path.splitext(p)[1].upper().replace('.', '')
-                results.append({
-                    "name": name,
-                    "path": p,
-                    "type": ext if ext else "FILE",
-                    "hash": hash_val,
-                    "size": self.format_file_size(sz),
-                    "is_source": is_source
-                })
+            def _push_ui(name, force=False):
+                now = time.time()
+                with lock:
+                    if not force and now - state["last_ui"] < 0.25:
+                        return
+                    state["last_ui"] = now
+                    bd, dn = state["bytes"], state["done"]
+                el = now - start_time
+                self.after(0, lambda: self._update_hash_progress(min(dn, total - 1), total, name, bd, total_bytes, el))
 
-                if is_source and p not in self.recent_hash_files:
-                    self.recent_hash_files.insert(0, p)
+            def _worker(indices):
+                for idx in indices:
+                    p, is_source, root, rel = tasks[idx]
+                    name = os.path.basename(p)
+
+                    def _cb(n, name=name):
+                        with lock:
+                            state["bytes"] += n
+                        _push_ui(name)
+
+                    hash_val = self.compute_hash(p, algo, progress_cb=_cb)
+                    ext = os.path.splitext(p)[1].upper().replace('.', '')
+                    out[idx] = {
+                        "name": name, "path": p, "type": ext if ext else "FILE",
+                        "hash": hash_val, "size": self.format_file_size(sizes[idx]),
+                        "is_source": is_source, "root": root, "rel": rel,
+                    }
+                    with lock:
+                        state["done"] += 1
+                    _push_ui(name, force=True)
+
+            with ThreadPoolExecutor(max_workers=max(1, min(len(groups), 4))) as ex:
+                list(ex.map(_worker, groups.values()))
+
+            results = [r for r in out if r]
+            for r in results:
+                if r["is_source"] and r["path"] not in self.recent_hash_files:
+                    self.recent_hash_files.insert(0, r["path"])
                     self.recent_hash_files = self.recent_hash_files[:10]
-                    self.after(0, self.update_recent_hash_ui)
+            self.after(0, self.update_recent_hash_ui)
 
+            self.hash_last_algo = algo
             self.after(0, self._render_hash_results, results)
         finally:
             self.is_scanning = False
             self.after(0, lambda: self.set_sidebar_state("normal"))
+
+    @staticmethod
+    def build_hash_comparison(results):
+        """Confronta i file di DUE cartelle per percorso relativo. Ritorna None se le
+        cartelle non sono due, altrimenti un dict con: identical, different, only_a,
+        only_b, moved (stesso hash ma percorso diverso)."""
+        roots = []
+        for r in results:
+            if r.get("root") and r["root"] not in roots:
+                roots.append(r["root"])
+        if len(roots) != 2:
+            return None
+        a_root, b_root = roots
+        a = {r["rel"]: r for r in results if r.get("root") == a_root}
+        b = {r["rel"]: r for r in results if r.get("root") == b_root}
+        same, diff, only_a, only_b = [], [], [], []
+        for rel, ra in a.items():
+            rb = b.get(rel)
+            if rb is None:
+                only_a.append(ra)
+            elif ra["hash"] == rb["hash"] and not ra["hash"].startswith("Error"):
+                same.append((ra, rb))
+            else:
+                diff.append((ra, rb))
+        for rel, rb in b.items():
+            if rel not in a:
+                only_b.append(rb)
+        moved = []
+        b_by_hash = {}
+        for rb in only_b:
+            b_by_hash.setdefault(rb["hash"], []).append(rb)
+        for ra in list(only_a):
+            cands = b_by_hash.get(ra["hash"])
+            if cands and not ra["hash"].startswith("Error"):
+                moved.append((ra, cands.pop(0)))
+                only_a.remove(ra)
+        moved_b = {id(m[1]) for m in moved}
+        only_b = [rb for rb in only_b if id(rb) not in moved_b]
+        return {"a_root": a_root, "b_root": b_root, "identical": same, "different": diff,
+                "only_a": only_a, "only_b": only_b, "moved": moved}
 
     def _render_hash_results(self, results):
         self.last_hash_results = results
@@ -2681,7 +2777,12 @@ class DatariumApp(ctk.CTk):
             hash_groups.setdefault(r['hash'], []).append(r)
 
         dup_hash_files = [r for r in results if hash_counts.get(r['hash'], 0) > 1]
-        
+
+        comp = self.build_hash_comparison(results)
+        self.last_hash_comparison = comp
+        if comp:
+            self._render_hash_comparison(comp)
+
         self.create_section_header(self.hash_results_scroll, "📋 Tutti i file e gli hash")
         self.create_table_header(self.hash_results_scroll)
         self.populate_section(self.hash_results_scroll, results)
@@ -2706,6 +2807,41 @@ class DatariumApp(ctk.CTk):
             self.create_table_header(self.hash_results_scroll)
             self.populate_section(self.hash_results_scroll, dup_content_files, bg_color=("#ffedd5", "#7c2d12"), text_color=("#ea580c", "#fb923c"))
 
+    def _render_hash_comparison(self, comp):
+        """Verdetto file-per-file tra Cartella 1 e Cartella 2 (abbinati per percorso relativo)."""
+        n_ok, n_diff = len(comp["identical"]), len(comp["different"])
+        n_a, n_b, n_mv = len(comp["only_a"]), len(comp["only_b"]), len(comp["moved"])
+        all_ok = not (n_diff or n_a or n_b or n_mv)
+        self.create_section_header(self.hash_results_scroll, "⚖️ Confronto Cartella 1 ↔ Cartella 2")
+        verdict = "✅ Le due cartelle sono IDENTICHE" if all_ok else "⚠️ Le due cartelle NON coincidono"
+        ctk.CTkLabel(self.hash_results_scroll, text=verdict, font=ctk.CTkFont(size=16, weight="bold"),
+                     text_color="#10b981" if all_ok else "#ef4444").pack(anchor="w", padx=10, pady=(2, 2))
+        ctk.CTkLabel(self.hash_results_scroll,
+                     text=f"{n_ok} identici · {n_diff} diversi · {n_a} solo in Cartella 1 · {n_b} solo in Cartella 2 · {n_mv} stesso contenuto/percorso diverso",
+                     font=ctk.CTkFont(size=12), anchor="w").pack(anchor="w", padx=10, pady=(0, 6))
+
+        def _rows(title, items, color, note=None):
+            if not items:
+                return
+            self.create_section_header(self.hash_results_scroll, title)
+            for item in items:
+                row = ctk.CTkFrame(self.hash_results_scroll, fg_color=color, corner_radius=5)
+                row.pack(fill="x", pady=2)
+                if isinstance(item, tuple):
+                    txt = item[0]['rel'] if item[0]['rel'] == item[1]['rel'] else f"{item[0]['rel']}  ↔  {item[1]['rel']}"
+                    sub = f"1: {item[0]['hash'][:16]}…   2: {item[1]['hash'][:16]}…   ({item[0]['size']})"
+                else:
+                    txt, sub = item['rel'], f"{note}  ({item['size']})"
+                ctk.CTkLabel(row, text=txt, font=ctk.CTkFont(size=12, weight="bold"), anchor="w", justify="left", wraplength=700).pack(anchor="w", padx=10, pady=(4, 0))
+                ctk.CTkLabel(row, text=sub, font=ctk.CTkFont(size=11), anchor="w", text_color="gray").pack(anchor="w", padx=10, pady=(0, 4))
+
+        red = ("#fee2e2", "#7f1d1d")
+        amber = ("#ffedd5", "#7c2d12")
+        _rows(f"❌ Contenuto DIVERSO ({n_diff})", comp["different"], red)
+        _rows(f"⚠️ Solo in Cartella 1 ({n_a})", comp["only_a"], amber, "manca in Cartella 2")
+        _rows(f"⚠️ Solo in Cartella 2 ({n_b})", comp["only_b"], amber, "manca in Cartella 1")
+        _rows(f"↔️ Stesso contenuto, percorso diverso ({n_mv})", comp["moved"], amber)
+
     def copy_to_clipboard(self, text):
         self.clipboard_clear()
         self.clipboard_append(text)
@@ -2728,7 +2864,7 @@ class DatariumApp(ctk.CTk):
         
         from report_generator import ReportGenerator
         try:
-            report_path = ReportGenerator.save_hash_report(report_dir, report_id, self.last_hash_results, self.selected_hash_algo.get())
+            report_path = ReportGenerator.save_hash_report(report_dir, report_id, self.last_hash_results, getattr(self, 'hash_last_algo', None) or self.selected_hash_algo.get(), comparison=getattr(self, 'last_hash_comparison', None))
             import webbrowser
             webbrowser.open(pathlib.Path(report_path).absolute().as_uri())
             from tkinter import messagebox
@@ -2843,6 +2979,15 @@ class DatariumApp(ctk.CTk):
         if folder:
             self.autotag_dest_folder.set(folder)
 
+    # Estensioni che Auto Tag sa leggere: foto (anche RAW), video (anche BRAW/R3D/MXF...) e documenti.
+    AUTOTAG_EXTS = frozenset([
+        '.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.avif',
+        '.nef', '.nrw', '.cr2', '.cr3', '.crw', '.arw', '.srf', '.sr2', '.dng', '.raf', '.rw2', '.orf', '.pef', '.srw',
+        '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv', '.m4v', '.mpg', '.mpeg', '.m2v', '.3gp',
+        '.ts', '.mts', '.m2ts', '.vob', '.braw', '.r3d', '.ari', '.arx', '.mxf', '.cine', '.crm',
+        '.pdf', '.docx', '.doc', '.txt',
+    ])
+
     def run_autotag_analysis(self):
         src = self.autotag_source_folder.get()
         dst = self.autotag_dest_folder.get()
@@ -2874,14 +3019,14 @@ class DatariumApp(ctk.CTk):
                 for root, _, files in os.walk(src):
                     for f in files:
                         ext = os.path.splitext(f)[1].lower()
-                        if ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.mp4', '.mov', '.avi']:
+                        if ext in self.AUTOTAG_EXTS and not f.startswith('._'):
                             valid_files.append(os.path.join(root, f))
 
                 if not valid_files:
                     self.after(0, lambda: self.btn_confirm_at.configure(state="normal", text="Conferma"))
                     self.after(0, lambda: self.show_autotag_subpage("Config"))
                     from tkinter import messagebox
-                    self.after(0, lambda: messagebox.showinfo("Nessun file", "Nessun file multimediale (foto/video) trovato nella cartella selezionata."))
+                    self.after(0, lambda: messagebox.showinfo("Nessun file", "Nessun file leggibile (foto, video o documenti) trovato nella cartella selezionata."))
                     return
 
                 # Group files into albums based on AI/metadata
@@ -3302,6 +3447,8 @@ class DatariumApp(ctk.CTk):
         self.offload_make_proxy.set(preset.get("make_proxy", False))
         self._update_naming_prefix_visibility()
 
+    PROXY_VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mxf', '.mpg', '.mpeg', '.mts', '.m2ts', '.wmv')
+
     def run_offload_process(self):
         src = self.offload_source_folder.get()
         dests = [d for d in self.offload_destinations if d.strip()]
@@ -3336,7 +3483,7 @@ class DatariumApp(ctk.CTk):
         for w in self.offload_results_scroll.winfo_children():
             w.destroy()
 
-        self.offload_status_lbl.configure(text="Avvio copia ed elaborazione...", text_color="white")
+        self.offload_status_lbl.configure(text="Avvio copia ed elaborazione...", text_color=("gray10", "white"))
         self.offload_progress_bar.set(0)
         self.offload_log_text.configure(state="normal")
         self.offload_log_text.delete("1.0", "end")
@@ -3422,6 +3569,46 @@ class DatariumApp(ctk.CTk):
                 if files_to_copy:
                     _kick_prefetch(files_to_copy[0]["path"])
 
+                # Barra/percentuale/velocita'/ETA: UN solo calcolo, basato sempre sui BYTE
+                # (prima la barra saltava tra frazione di byte durante la copia e frazione
+                # di file a file completato). Velocita' mostrata = media mobile sulla sola
+                # fase di copia; ETA = byte rimanenti / velocita' media complessiva (include
+                # verifica e proxy, quindi e' il tempo reale al completamento). Nei primi
+                # secondi l'ETA e' instabile: si mostra "calcolo..." finche' non ci sono
+                # almeno 3 s e l'1% di dati.
+                ui_state = {"t": 0.0, "last_t": None, "last_done": 0, "ewma": None}
+
+                def _ui_progress(done, force=False):
+                    now = time.time()
+                    if not force and now - ui_state["t"] < 0.25:
+                        return
+                    ui_state["t"] = now
+                    if total_bytes:
+                        done = min(done, total_bytes)
+                        frac = done / total_bytes
+                    else:
+                        frac = processed_files / max(1, total_files)
+                    elapsed = max(0.001, now - start_time)
+                    overall = done / elapsed
+                    if ui_state["last_t"] is None:
+                        ui_state["last_t"], ui_state["last_done"] = now, done
+                    elif now - ui_state["last_t"] >= 0.5:
+                        inst = (done - ui_state["last_done"]) / (now - ui_state["last_t"])
+                        ui_state["ewma"] = inst if ui_state["ewma"] is None else 0.3 * inst + 0.7 * ui_state["ewma"]
+                        ui_state["last_t"], ui_state["last_done"] = now, done
+                    speed = ui_state["ewma"] if ui_state["ewma"] else overall
+                    if elapsed >= 3 and frac >= 0.01 and overall > 0:
+                        eta_s = int(max(0, total_bytes - done) / overall) if total_bytes else 0
+                        eta_str = f"{eta_s // 3600}h {(eta_s % 3600) // 60}m" if eta_s >= 3600 else (f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s")
+                    else:
+                        eta_str = "calcolo..."
+                    n_file = min(processed_files + 1, total_files) if frac < 1 else total_files
+                    text = f"{int(frac * 100)}% · {self.format_file_size(int(speed))}/s · ETA {eta_str} · file {n_file}/{total_files}"
+                    self.after(0, lambda v=frac, tx=text: (
+                        self.offload_progress_bar.set(v),
+                        self.offload_status_lbl.configure(text=tx, text_color=("gray10", "white"))
+                    ))
+
                 for _idx, it in enumerate(files_to_copy):
                     try:
                         sz = os.path.getsize(it["path"])
@@ -3454,25 +3641,10 @@ class DatariumApp(ctk.CTk):
                         # aggiornamento e l'altro. Throttle a ~4 volte/secondo per non intasare
                         # la coda eventi della UI su file da decine di GB.
                         bytes_before_file = copied_bytes
-                        _throttle = {"t": 0.0}
+                        ui_state["last_t"] = None  # la fase di verifica/proxy non conta nella velocita' di copia
 
                         def _on_file_progress(n, _bf=bytes_before_file, _sz=sz):
-                            now = time.time()
-                            if now - _throttle["t"] < 0.25 and n < _sz:
-                                return
-                            _throttle["t"] = now
-                            done = _bf + n
-                            elapsed = max(0.001, now - start_time)
-                            speed = done / elapsed
-                            remaining = max(0, total_bytes - done)
-                            eta_s = int(remaining / speed) if speed > 0 else 0
-                            pct = int(done / total_bytes * 100) if total_bytes else 0
-                            speed_str = self.format_file_size(int(speed)) + "/s"
-                            eta_str = (f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s")
-                            self.after(0, lambda v=done / total_bytes if total_bytes else 0, p=pct, s=speed_str, e=eta_str: (
-                                self.offload_progress_bar.set(v),
-                                self.offload_status_lbl.configure(text=f"{p}% · {s} · ETA {e}", text_color=("gray10", "white"))
-                            ))
+                            _ui_progress(_bf + n, force=(n >= _sz))
 
                         src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, algos_list, prefetched_chunks=prefetched, progress_callback=_on_file_progress)
                         src_hash = src_hashes[algo]
@@ -3546,7 +3718,12 @@ class DatariumApp(ctk.CTk):
                         # Proxy video (ffmpeg) sulla prima destinazione (best-effort)
                         if make_proxy:
                             try:
-                                self._ingest_make_proxy_file(it["path"], os.path.join(dests[0], "Proxies"))
+                                if os.path.splitext(it["path"])[1].lower() in self.PROXY_VIDEO_EXTS:
+                                    self.ai.generate_proxy(
+                                        it["path"], os.path.join(dests[0], "Proxies"),
+                                        ffmpeg_path=self.ffmpeg_path,
+                                        resolution=self.proxy_resolution_var.get(),
+                                        format_key=self.proxy_format_var.get())
                             except Exception:
                                 pass
 
@@ -3603,17 +3780,7 @@ class DatariumApp(ctk.CTk):
                         copied_bytes += os.path.getsize(it["path"])
                     except Exception:
                         pass
-                    elapsed = max(0.001, time.time() - start_time)
-                    speed = copied_bytes / elapsed
-                    remaining = max(0, total_bytes - copied_bytes)
-                    eta_s = int(remaining / speed) if speed > 0 else 0
-                    speed_str = self.format_file_size(int(speed)) + "/s"
-                    eta_str = (f"{eta_s // 60}m {eta_s % 60}s" if eta_s >= 60 else f"{eta_s}s")
-                    progress_val = processed_files / total_files
-                    self.after(0, lambda val=progress_val, s=speed_str, e=eta_str, n=processed_files, t=total_files: (
-                        self.offload_progress_bar.set(val),
-                        self.offload_status_lbl.configure(text=f"{n}/{t} file · {s} · ETA {e}", text_color=("gray10", "white"))
-                    ))
+                    _ui_progress(copied_bytes, force=True)
 
                 # Generate and save report
                 self.after(0, lambda: self.offload_status_lbl.configure(text="Generazione Report..."))
@@ -3785,516 +3952,286 @@ class DatariumApp(ctk.CTk):
         # e' ormai imminente/avvenuto: niente resta appeso in giro.
         win.after(60000, lambda: win.destroy() if win.winfo_exists() else None)
 
-    # ==================== INGEST (Fase 1-2: coda, trigger auto, multi-dest, proxy) ====================
-    def init_ingest_pages(self):
+    # ==================== SINCRONIZZA DISCHI (stile FreeFileSync) ====================
+    SYNC_COLORS = {
+        "only_a": ("#dbeafe", "#1e3a5f"),
+        "only_b": ("#dcfce7", "#14532d"),
+        "different": ("#fef3c7", "#78350f"),
+        "identical": ("gray92", "gray17"),
+    }
+    SYNC_ACTION_LOOK = {
+        "a2b": ("▶", "#2563eb"),
+        "b2a": ("◀", "#16a34a"),
+        "skip": ("⏸", "#6b7280"),
+        "del_a": ("🗑 A", "#dc2626"),
+        "del_b": ("🗑 B", "#dc2626"),
+    }
+    SYNC_MAX_ROWS = 400
+
+    def init_sync_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
-        self.pages["IngestHome"] = page
+        self.pages["Sync"] = page
 
-        ctk.CTkLabel(page, text="Ingest AI", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 4))
-        ctk.CTkLabel(page, text="Copia → verifica → tag AI → report, in coda. Attiva la sorveglianza per avviare l'ingest da solo quando colleghi una scheda.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=780, justify="left").pack(anchor="w", pady=(0, 12))
+        ctk.CTkLabel(page, text="Sincronizza Dischi", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 2))
+        ctk.CTkLabel(page, text="Confronta due dischi o cartelle, controlla l'anteprima e sincronizza. Niente viene cancellato davvero: i file eliminati o sostituiti vanno nella cartella _Datarium_Sync_Cestino del disco e si possono recuperare.",
+                     text_color="gray", font=ctk.CTkFont(size=12), wraplength=820, justify="left").pack(anchor="w", pady=(0, 8))
 
-        cfg = ctk.CTkFrame(page, corner_radius=12, border_width=1, border_color=("gray85", "gray15"))
-        cfg.pack(fill="x", pady=(0, 10))
+        top = ctk.CTkFrame(page, corner_radius=10)
+        top.pack(fill="x", pady=(0, 6))
+        for col, (label, var) in enumerate((("Disco A", self.sync_path_a), ("Disco B", self.sync_path_b))):
+            cell = ctk.CTkFrame(top, fg_color="transparent")
+            cell.grid(row=0, column=col, sticky="ew", padx=12, pady=(10, 4))
+            top.columnconfigure(col, weight=1)
+            ctk.CTkLabel(cell, text=label, font=ctk.CTkFont(weight="bold")).pack(anchor="w")
+            row = ctk.CTkFrame(cell, fg_color="transparent")
+            row.pack(fill="x")
+            ctk.CTkEntry(row, textvariable=var, placeholder_text="Scegli cartella o disco...").pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ctk.CTkButton(row, text="📂", width=40, command=lambda v=var: self._sync_pick(v)).pack(side="left")
 
-        ctk.CTkLabel(cfg, text="Destinazioni (copia + backup):", font=ctk.CTkFont(weight="bold", size=13)).pack(anchor="w", padx=16, pady=(12, 2))
-        self.ingest_dest_frame = ctk.CTkFrame(cfg, fg_color="transparent")
-        self.ingest_dest_frame.pack(fill="x", padx=16)
-        self._render_ingest_destinations()
+        mrow = ctk.CTkFrame(top, fg_color="transparent")
+        mrow.grid(row=1, column=0, columnspan=2, sticky="ew", padx=12, pady=(2, 10))
+        ctk.CTkLabel(mrow, text="Modalità:", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        import disk_sync
+        ctk.CTkOptionMenu(mrow, values=list(disk_sync.MODES.keys()), variable=self.sync_mode_var, width=330,
+                          command=lambda _v: self._sync_apply_mode()).pack(side="left", padx=(8, 18))
+        ctk.CTkLabel(mrow, text="Escludi:", font=ctk.CTkFont(weight="bold")).pack(side="left")
+        ctk.CTkEntry(mrow, textvariable=self.sync_exclude, width=230, placeholder_text="es. *.tmp, Proxies, Cache").pack(side="left", padx=8)
 
-        optrow = ctk.CTkFrame(cfg, fg_color="transparent")
-        optrow.pack(fill="x", padx=16, pady=(8, 4))
-        ctk.CTkCheckBox(optrow, text="Organizza foto in album (AI)", variable=self.ingest_organize_ai).grid(row=0, column=0, sticky="w", padx=(0, 18), pady=3)
-        ctk.CTkCheckBox(optrow, text="Report PDF", variable=self.ingest_make_report).grid(row=0, column=1, sticky="w", padx=(0, 18), pady=3)
-        ctk.CTkCheckBox(optrow, text="Proxy video (ffmpeg)", variable=self.ingest_make_proxy).grid(row=0, column=2, sticky="w", pady=3)
-        ctk.CTkLabel(optrow, text="Verifica:").grid(row=1, column=0, sticky="w", pady=3)
-        ctk.CTkOptionMenu(optrow, variable=self.offload_algo, values=["xxHash64", "SHA-256", "MD5", "Solo Dimensione"], width=130).grid(row=1, column=1, sticky="w", pady=3)
+        opts = ctk.CTkFrame(page, fg_color="transparent")
+        opts.pack(fill="x", pady=(0, 4))
+        self.btn_sync_scan = ctk.CTkButton(opts, text="🔍 Confronta", width=130, height=34, font=ctk.CTkFont(weight="bold"), command=self.sync_scan)
+        self.btn_sync_scan.pack(side="left")
+        ctk.CTkCheckBox(opts, text="Approfondito (hash di tutto)", variable=self.sync_deep).pack(side="left", padx=(14, 0))
+        ctk.CTkCheckBox(opts, text="Verifica dopo la copia", variable=self.sync_verify).pack(side="left", padx=(14, 0))
 
-        ctrl = ctk.CTkFrame(cfg, fg_color="transparent")
-        ctrl.pack(fill="x", padx=16, pady=(4, 12))
-        ctk.CTkSwitch(ctrl, text="🔎 Sorveglia nuove schede (auto-ingest)", variable=self.ingest_watch, command=self._ingest_watch_changed).pack(side="left")
-        ctk.CTkButton(ctrl, text="➕ Aggiungi cartella", width=170, command=self.ingest_add_folder).pack(side="right")
+        flt = ctk.CTkFrame(page, fg_color="transparent")
+        flt.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(flt, text="Mostra:", font=ctk.CTkFont(size=12)).pack(side="left")
+        for key, text in (("only_a", "Solo in A"), ("only_b", "Solo in B"), ("different", "Diversi"), ("identical", "Identici")):
+            ctk.CTkCheckBox(flt, text=text, variable=self.sync_show[key], width=20, command=self._sync_render).pack(side="left", padx=(10, 0))
 
-        self.ingest_status_lbl = ctk.CTkLabel(page, text="Coda vuota.", font=ctk.CTkFont(size=13, weight="bold"))
-        self.ingest_status_lbl.pack(anchor="w", pady=(2, 2))
-        self.ingest_progress_bar = ctk.CTkProgressBar(page, height=12)
-        self.ingest_progress_bar.pack(fill="x")
-        self.ingest_progress_bar.set(0)
+        self.sync_status_lbl = ctk.CTkLabel(page, text="Scegli i due dischi e premi Confronta.", font=ctk.CTkFont(size=13, weight="bold"), anchor="w")
+        self.sync_status_lbl.pack(fill="x", pady=(2, 0))
+        self.sync_progress = ctk.CTkProgressBar(page, height=10)
+        self.sync_progress.pack(fill="x", pady=(2, 6))
+        self.sync_progress.set(0)
 
-        qhdr = ctk.CTkFrame(page, fg_color="transparent")
-        qhdr.pack(fill="x", pady=(12, 2))
-        ctk.CTkLabel(qhdr, text="Coda", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        self.btn_ingest_open_report = ctk.CTkButton(qhdr, text="📄 Ultimo report", width=150, state="disabled", command=self.open_ingest_report)
-        self.btn_ingest_open_report.pack(side="right")
-        ctk.CTkButton(qhdr, text="Pulisci completati", width=150, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=self._ingest_clear_done).pack(side="right", padx=8)
+        hdr = ctk.CTkFrame(page, fg_color=("gray85", "gray20"), corner_radius=6)
+        hdr.pack(fill="x")
+        hdr.columnconfigure(0, weight=1, uniform="s")
+        hdr.columnconfigure(2, weight=1, uniform="s")
+        ctk.CTkLabel(hdr, text="DISCO A", font=ctk.CTkFont(weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=6, pady=4)
+        ctk.CTkLabel(hdr, text="Azione", width=70, font=ctk.CTkFont(size=11)).grid(row=0, column=1)
+        ctk.CTkLabel(hdr, text="DISCO B", font=ctk.CTkFont(weight="bold"), anchor="w").grid(row=0, column=2, sticky="ew", padx=6, pady=4)
 
-        self.ingest_queue_scroll = ctk.CTkScrollableFrame(page, fg_color=("gray95", "gray10"))
-        self.ingest_queue_scroll.pack(fill="both", expand=True, pady=(0, 4))
-        self._render_ingest_queue()
+        self.sync_scroll = ctk.CTkScrollableFrame(page, fg_color=("gray95", "gray10"))
+        self.sync_scroll.pack(fill="both", expand=True, pady=(2, 6))
 
-        # Fase 1: avvia il watcher (polling leggero dei volumi rimovibili)
-        try:
-            self._ingest_known_drives = self._list_removable_mounts()
-        except Exception:
-            self._ingest_known_drives = set()
-        self.after(3000, self._ingest_watch_tick)
+        bot = ctk.CTkFrame(page, fg_color="transparent")
+        bot.pack(fill="x")
+        self.btn_sync_go = ctk.CTkButton(bot, text="⚡ Sincronizza", height=42, width=190, fg_color="#10b981", hover_color="#059669",
+                                         font=ctk.CTkFont(weight="bold", size=14), state="disabled", command=self.sync_apply)
+        self.btn_sync_go.pack(side="left")
+        self.sync_summary_lbl = ctk.CTkLabel(bot, text="", font=ctk.CTkFont(size=12), anchor="w", justify="left", wraplength=560)
+        self.sync_summary_lbl.pack(side="left", padx=14)
 
-    # ---- Destinazioni multiple (Fase 2) ----
-    def _render_ingest_destinations(self):
-        for w in self.ingest_dest_frame.winfo_children():
-            w.destroy()
-        if not self.ingest_destinations:
-            ctk.CTkLabel(self.ingest_dest_frame, text="Nessuna destinazione. Aggiungine almeno una.", text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(anchor="w", pady=4)
-        else:
-            for idx, path in enumerate(self.ingest_destinations):
-                row = ctk.CTkFrame(self.ingest_dest_frame, fg_color=("gray90", "gray15"), corner_radius=6)
-                row.pack(fill="x", pady=2)
-                tag = "primaria" if idx == 0 else "backup"
-                ctk.CTkLabel(row, text=f"[{tag}] {path}", font=ctk.CTkFont(size=11), anchor="w").pack(side="left", padx=10, fill="x", expand=True, pady=4)
-                ctk.CTkButton(row, text="❌", width=28, height=24, fg_color="transparent", text_color="#ef4444", hover_color=("gray80", "gray25"), command=lambda i=idx: self._ingest_remove_destination(i)).pack(side="right", padx=4)
-        ctk.CTkButton(self.ingest_dest_frame, text="➕ Aggiungi destinazione", height=28, width=200, font=ctk.CTkFont(size=11, weight="bold"), command=self._ingest_add_destination).pack(anchor="w", pady=(6, 4))
-
-    def _ingest_add_destination(self):
-        folder = filedialog.askdirectory(title="Cartella di destinazione (o backup)")
-        if folder and folder not in self.ingest_destinations:
-            self.ingest_destinations.append(folder)
-            self._render_ingest_destinations()
-
-    def _ingest_remove_destination(self, index):
-        if 0 <= index < len(self.ingest_destinations):
-            self.ingest_destinations.pop(index)
-            self._render_ingest_destinations()
-
-    # ---- Coda (Fase 1) ----
-    def ingest_add_folder(self):
-        folder = filedialog.askdirectory(title="Cartella sorgente da importare")
+    def _sync_pick(self, var):
+        folder = filedialog.askdirectory(title="Seleziona disco o cartella")
         if folder:
-            self._ingest_enqueue(folder, auto=False)
+            var.set(folder)
 
-    def _ingest_enqueue(self, src, auto=False):
-        if not self.ingest_destinations:
-            if not auto:
-                from tkinter import messagebox
-                messagebox.showwarning("Destinazione mancante", "Aggiungi almeno una destinazione prima di mettere in coda.")
-            else:
-                self.ingest_status_lbl.configure(text="🔎 Scheda rilevata ma nessuna destinazione impostata.", text_color="#f59e0b")
+    def _sync_set_busy(self, busy):
+        self.sync_busy = busy
+        self.is_scanning = busy
+        self.set_sidebar_state("disabled" if busy else "normal")
+        self.btn_sync_scan.configure(state="disabled" if busy else "normal")
+        if busy:
+            self.btn_sync_go.configure(state="disabled")
+
+    def _sync_status(self, text, progress=None):
+        def _u():
+            self.sync_status_lbl.configure(text=text, text_color=("gray10", "gray90"))
+            if progress is not None:
+                self.sync_progress.set(progress)
+        self.after(0, _u)
+
+    def _sync_mode(self):
+        import disk_sync
+        return disk_sync.MODES.get(self.sync_mode_var.get(), "update")
+
+    def _sync_apply_mode(self):
+        """Riassegna le azioni di default di ogni riga secondo la modalita' scelta."""
+        import disk_sync
+        mode = self._sync_mode()
+        for r in self.sync_rows:
+            r["action"] = disk_sync.default_action(r, mode)
+        self._sync_render()
+
+    def sync_scan(self):
+        from tkinter import messagebox
+        import disk_sync
+        a, b = self.sync_path_a.get().strip(), self.sync_path_b.get().strip()
+        if not (os.path.isdir(a) and os.path.isdir(b)):
+            messagebox.showwarning("Selezione mancante", "Scegli due cartelle/dischi validi (A e B).")
             return
-        for j in self.ingest_queue:
-            if j["src"] == src and j["status"] in ("queued", "running"):
-                return
-        self.ingest_queue.append({"src": src, "status": "queued", "detail": "in attesa", "auto": auto})
-        self._render_ingest_queue()
-        self._ingest_start_worker()
+        if os.path.abspath(a) == os.path.abspath(b):
+            messagebox.showwarning("Stessa cartella", "Disco A e Disco B sono lo stesso percorso.")
+            return
+        deep = self.sync_deep.get()
+        exclude = disk_sync.parse_exclude(self.sync_exclude.get())
+        self._sync_set_busy(True)
+        self.sync_progress.configure(mode="indeterminate")
+        self.sync_progress.start()
 
-    def _ingest_clear_done(self):
-        self.ingest_queue = [j for j in self.ingest_queue if j["status"] in ("queued", "running")]
-        self._render_ingest_queue()
+        def bg():
+            try:
+                rows = disk_sync.compare(a, b, deep=deep, exclude=exclude, status_cb=lambda s: self._sync_status(s))
+                mode = self._sync_mode()
+                for r in rows:
+                    r["action"] = disk_sync.default_action(r, mode)
+                self.sync_rows = rows
+            except Exception as e:
+                self.sync_rows = []
+                self._sync_status(f"Errore durante il confronto: {e}")
+            finally:
+                self.after(0, self._sync_scan_done)
+        threading.Thread(target=bg, daemon=True).start()
 
-    def _render_ingest_queue(self):
-        for w in self.ingest_queue_scroll.winfo_children():
+    def _sync_scan_done(self):
+        self.sync_progress.stop()
+        self.sync_progress.configure(mode="determinate")
+        self.sync_progress.set(0)
+        self._sync_set_busy(False)
+        self._sync_render()
+
+    def _sync_counts(self):
+        c = {"only_a": 0, "only_b": 0, "different": 0, "identical": 0}
+        for r in self.sync_rows:
+            c[r["status"]] += 1
+        return c
+
+    def _sync_refresh_summary(self):
+        import disk_sync
+        s = disk_sync.summarize(self.sync_rows)
+        n = s["a2b"] + s["b2a"] + s["del"]
+        parts = []
+        if s["a2b"]:
+            parts.append(f"▶ {s['a2b']} A→B")
+        if s["b2a"]:
+            parts.append(f"◀ {s['b2a']} B→A")
+        if s["del"]:
+            parts.append(f"🗑 {s['del']} nel cestino")
+        txt = " · ".join(parts) if parts else "Nessuna azione prevista"
+        if n:
+            txt += f"  ({disk_sync.fmt_size(s['bytes'])} da copiare"
+            txt += f", {s['overwrite']} sostituzioni)" if s["overwrite"] else ")"
+        self.sync_summary_lbl.configure(text=txt)
+        self.btn_sync_go.configure(state="normal" if (n and not self.sync_busy) else "disabled")
+
+    def _sync_render(self):
+        import disk_sync
+        for w in self.sync_scroll.winfo_children():
             w.destroy()
-        if not self.ingest_queue:
-            ctk.CTkLabel(self.ingest_queue_scroll, text="La coda è vuota. Aggiungi una cartella o attiva la sorveglianza.", text_color="gray").pack(anchor="w", padx=10, pady=10)
+        c = self._sync_counts()
+        if not self.sync_rows:
+            self._sync_refresh_summary()
             return
-        icons = {"queued": "🕓", "running": "⏳", "done": "✓", "failed": "❌"}
-        colors = {"queued": "gray", "running": "#3b82f6", "done": "#10b981", "failed": "#ef4444"}
-        for j in self.ingest_queue:
-            row = ctk.CTkFrame(self.ingest_queue_scroll, fg_color="transparent")
-            row.pack(fill="x", pady=2)
-            ctk.CTkLabel(row, text=icons.get(j["status"], "•"), text_color=colors.get(j["status"], "gray"), font=ctk.CTkFont(size=14, weight="bold"), width=24).pack(side="left", padx=(8, 4))
-            label = os.path.basename(j["src"].rstrip("/\\")) or j["src"]
-            ctk.CTkLabel(row, text=label, font=ctk.CTkFont(size=12, weight="bold"), anchor="w").pack(side="left", fill="x", expand=True)
-            ctk.CTkLabel(row, text=j.get("detail", ""), font=ctk.CTkFont(size=11), text_color="gray").pack(side="right", padx=10)
+        if not (c["only_a"] or c["only_b"] or c["different"]):
+            self.sync_status_lbl.configure(text=f"✅ I due dischi sono identici ({c['identical']} file).", text_color="#10b981")
+        else:
+            self.sync_status_lbl.configure(
+                text=f"{c['only_a']} solo in A · {c['only_b']} solo in B · {c['different']} diversi · {c['identical']} identici",
+                text_color=("gray10", "gray90"))
 
-    def _ingest_start_worker(self):
-        if self.ingest_worker_running:
-            return
-        self.ingest_worker_running = True
-        threading.Thread(target=self._ingest_worker, daemon=True).start()
+        shown = [r for r in self.sync_rows if self.sync_show[r["status"]].get()]
+        mode = self._sync_mode()
+        for r in shown[:self.SYNC_MAX_ROWS]:
+            row = ctk.CTkFrame(self.sync_scroll, fg_color=self.SYNC_COLORS[r["status"]], corner_radius=4)
+            row.pack(fill="x", pady=1)
+            row.columnconfigure(0, weight=1, uniform="s")
+            row.columnconfigure(2, weight=1, uniform="s")
 
-    def _ingest_worker(self):
-        try:
-            while True:
-                job = next((j for j in self.ingest_queue if j["status"] == "queued"), None)
-                if job is None:
-                    break
-                job["status"] = "running"
-                job["detail"] = "in corso..."
-                self.after(0, self._render_ingest_queue)
-                try:
-                    n_ok, total, rep = self._ingest_run_one(job)
-                    if total == 0:
-                        job["status"] = "failed"
-                        job["detail"] = "nessun file"
-                    else:
-                        job["status"] = "done" if n_ok == total else "failed"
-                        job["detail"] = f"{n_ok}/{total} verificati"
-                        try:
-                            import datetime as _dt
-                            from report_generator import ReportGenerator
-                            ReportGenerator.record_job_history(self.get_job_history_path(), {
-                                "job_type": "ingest",
-                                "report_id": os.path.basename(job["src"].rstrip("/\\")),
-                                "timestamp": _dt.datetime.now().isoformat(),
-                                "status": "Verified" if n_ok == total else "Failed",
-                                "n_files": total,
-                                "n_ok": n_ok,
-                                "destinations": list(self.ingest_destinations),
-                                "report_path": rep,
-                            }, max_entries=self.job_history_max)
-                        except Exception as e:
-                            print(f"Errore registrazione cronologia job ingest: {e}")
-                    if rep:
-                        self.ingest_report_path = rep
-                        self.after(0, lambda: self.btn_ingest_open_report.configure(state="normal"))
-                except Exception as e:
-                    job["status"] = "failed"
-                    job["detail"] = f"errore: {e}"
-                self.after(0, self._render_ingest_queue)
-        finally:
-            self.ingest_worker_running = False
-            if any(j["status"] == "queued" for j in self.ingest_queue):
-                self._ingest_start_worker()
+            def _side(info, col):
+                if info:
+                    txt, sub = r["rel"], f"{disk_sync.fmt_size(info[0])} · {disk_sync.fmt_date(info[1])}"
+                else:
+                    txt, sub = "— manca —", ""
+                ctk.CTkLabel(row, text=txt, font=ctk.CTkFont(size=12, weight="bold" if info else "normal"),
+                             text_color=None if info else "gray", anchor="w", justify="left", wraplength=300).grid(row=0, column=col, sticky="ew", padx=6, pady=(3, 0))
+                ctk.CTkLabel(row, text=sub or r["note"], font=ctk.CTkFont(size=10), text_color="gray", anchor="w").grid(row=1, column=col, sticky="ew", padx=6, pady=(0, 3))
+            _side(r["a"], 0)
+            _side(r["b"], 2)
+
+            if r["status"] != "identical":
+                sym, col = self.SYNC_ACTION_LOOK[r["action"]]
+                btn = ctk.CTkButton(row, text=sym, width=58, height=28, fg_color=col, hover_color=col, font=ctk.CTkFont(size=13, weight="bold"))
+                btn.configure(command=lambda rr=r, b=btn: self._sync_cycle_action(rr, b))
+                btn.grid(row=0, column=1, rowspan=2, padx=6)
             else:
-                self.after(0, lambda: self.ingest_status_lbl.configure(text="Coda completata." if self.ingest_queue else "Coda vuota.", text_color=("gray10", "gray90")))
-                self.after(0, lambda: self.ingest_progress_bar.set(0))
-                if self.ingest_queue:
-                    n_done = sum(1 for j in self.ingest_queue if j["status"] == "done")
-                    n_failed = sum(1 for j in self.ingest_queue if j["status"] == "failed")
-                    if n_failed:
-                        self.send_local_notification("Datarium - Ingest con errori", f"{n_done} completati, {n_failed} con errori su {len(self.ingest_queue)} job.")
-                    else:
-                        self.send_local_notification("Datarium - Ingest Completato", f"{n_done} job completati e verificati con successo.")
+                ctk.CTkLabel(row, text="=", width=58, font=ctk.CTkFont(size=16, weight="bold")).grid(row=0, column=1, rowspan=2, padx=6)
 
-    def _ingest_run_one(self, job):
-        import os
-        import shutil
-        import datetime
-        import concurrent.futures
-        from report_generator import ReportGenerator
-        src = job["src"]
-        dests = list(self.ingest_destinations)
-        algo = self.offload_algo.get()
-        use_ai = self.ingest_organize_ai.get()
-        make_report = self.ingest_make_report.get()
-        make_proxy = self.ingest_make_proxy.get()
-        alt_algo = None if algo == "Solo Dimensione" else ("SHA-256" if algo == "xxHash64" else "MD5")
-        algos_list = [algo] if alt_algo is None else [algo, alt_algo]
+        if len(shown) > self.SYNC_MAX_ROWS:
+            ctk.CTkLabel(self.sync_scroll, text=f"... e altri {len(shown) - self.SYNC_MAX_ROWS} file non mostrati (la sincronizzazione li include comunque).",
+                         text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=8)
+        self._sync_refresh_summary()
 
-        if use_ai and not self.is_ai_loaded:
-            self.after(0, lambda: self.ingest_status_lbl.configure(text="🧠 Caricamento modello AI..."))
-            try:
-                ok_ai, _ = self.ai.download_model_if_needed(vision_mode=True, progress_callback=None)
-                if ok_ai:
-                    self.is_ai_loaded = True
-            except Exception:
-                pass
-        use_ai_eff = use_ai and self.is_ai_loaded
+    def _sync_cycle_action(self, row, btn):
+        """Click sul pulsante di una riga: passa alla prossima azione consentita."""
+        import disk_sync
+        acts = disk_sync.allowed_actions(row, self._sync_mode())
+        cur = row.get("action")
+        nxt = acts[(acts.index(cur) + 1) % len(acts)] if cur in acts else acts[0]
+        row["action"] = nxt
+        sym, col = self.SYNC_ACTION_LOOK[nxt]
+        btn.configure(text=sym, fg_color=col, hover_color=col)
+        self._sync_refresh_summary()
 
-        files = []
-        for root, _, fs in os.walk(src):
-            for f in fs:
-                files.append({"name": f, "path": os.path.join(root, f)})
-        total = len(files)
-        if total == 0:
-            return (0, 0, None)
-
+    def sync_apply(self):
+        from tkinter import messagebox
+        import disk_sync
         import time
-        total_bytes = 0
-        for it in files:
+        a, b = self.sync_path_a.get().strip(), self.sync_path_b.get().strip()
+        s = disk_sync.summarize(self.sync_rows)
+        if not (s["a2b"] or s["b2a"] or s["del"]):
+            return
+        msg = f"Eseguire la sincronizzazione?\n\n▶ {s['a2b']} file A → B\n◀ {s['b2a']} file B → A\n🗑 {s['del']} file spostati nel cestino\nDati da copiare: {disk_sync.fmt_size(s['bytes'])}"
+        if s["overwrite"]:
+            msg += f"\n\n{s['overwrite']} file esistono gia' con contenuto diverso: la versione attuale finira' nel cestino _Datarium_Sync_Cestino."
+        if not messagebox.askyesno("Conferma sincronizzazione", msg):
+            return
+
+        verify = self.sync_verify.get()
+        total_bytes = max(s["bytes"], 1)
+        self._sync_set_busy(True)
+        state = {"bytes": 0, "start": time.time()}
+
+        def _cb(i, n_jobs, rel, n):
+            state["bytes"] += n
+            el = max(time.time() - state["start"], 0.05)
+            speed = state["bytes"] / el
+            eta = int(max(0, total_bytes - state["bytes"]) / speed) if speed > 0 else 0
+            eta_txt = f"{eta // 60}m {eta % 60}s" if eta >= 60 else f"{eta}s"
+            self._sync_status(f"{i + 1}/{n_jobs}: {rel} · {min(100, int(state['bytes'] / total_bytes * 100))}% · {disk_sync.fmt_size(int(speed))}/s · ETA {eta_txt}",
+                              min(1.0, state["bytes"] / total_bytes))
+
+        def bg():
             try:
-                total_bytes += os.path.getsize(it["path"])
-            except Exception:
-                pass
-        bytes_done = 0
-        start_time = time.time()
-        job_start_dt = datetime.datetime.now()
-
-        results = []
-        n_ok = 0
-        srclabel = os.path.basename(src.rstrip("/\\")) or src
-
-        # Stessa pre-lettura in background usata in Offload: legge il PROSSIMO file
-        # sorgente in memoria mentre quello corrente è in fase di verifica (dischi
-        # fisicamente diversi = nessuna contesa). Il percorso sorgente del prossimo
-        # file è già noto a prescindere dalla classificazione AI (che riguarda solo
-        # la destinazione), quindi si può avviare subito.
-        import threading
-        prefetch_state = {"path": None, "thread": None, "chunks": None}
-
-        def _kick_prefetch(path):
-            def _do():
-                prefetch_state["chunks"] = self._prefetch_next_source(path)
-            prefetch_state["path"] = path
-            prefetch_state["chunks"] = None
-            t = threading.Thread(target=_do, daemon=True)
-            t.start()
-            prefetch_state["thread"] = t
-
-        if files:
-            _kick_prefetch(files[0]["path"])
-
-        for i, it in enumerate(files, 1):
-            album = "Varie"
-            try:
-                sz = os.path.getsize(it["path"])
-                elapsed = time.time() - start_time
-                speed = bytes_done / elapsed if elapsed > 0.05 else 0
-                eta_str = ""
-                if speed > 0:
-                    remaining_s = int(max(0, total_bytes - bytes_done) / speed)
-                    eta_str = f" · {self.format_file_size(int(speed))}/s · ETA " + (
-                        f"{remaining_s // 60}m {remaining_s % 60}s" if remaining_s >= 60 else f"{remaining_s}s")
-                pct = int(bytes_done / total_bytes * 100) if total_bytes else int((i - 1) / total * 100)
-                status_text = f"[{srclabel}] {pct}% · {i}/{total}: {it['name']}{eta_str}"
-                self.after(0, lambda t=status_text: self.ingest_status_lbl.configure(text=t, text_color=("gray10", "gray90")))
-                album = self._ingest_album_for(it["path"], use_ai_eff)
-
-                # Copia + checksum sorgente in UN'UNICA lettura del file, scritta
-                # simultaneamente su tutte le destinazioni (stesso fix applicato a
-                # Offload): prima si leggeva il sorgente 1 volta per l'hash + 1 volta
-                # per OGNI destinazione, il vero collo di bottiglia con più dischi di
-                # backup lenti in parallelo.
-                target_paths = []
-                for d in dests:
-                    tdir = os.path.join(d, album)
-                    os.makedirs(tdir, exist_ok=True)
-                    tpath = os.path.join(tdir, it["name"])
-                    if os.path.exists(tpath):
-                        b, e = os.path.splitext(it["name"])
-                        k = 1
-                        while os.path.exists(os.path.join(tdir, f"{b}_{k}{e}")):
-                            k += 1
-                        tpath = os.path.join(tdir, f"{b}_{k}{e}")
-                    target_paths.append(tpath)
-
-                prefetched = None
-                if prefetch_state["path"] == it["path"] and prefetch_state["thread"] is not None:
-                    prefetch_state["thread"].join()
-                    prefetched = prefetch_state["chunks"]
-
-                src_hashes, write_ok, chunk_hashes = self.copy_write_and_hash(it["path"], target_paths, algos_list, prefetched_chunks=prefetched)
-                src_hash = src_hashes.get(algo, "")
-                src_hash_alt = src_hashes.get(alt_algo, "") if alt_algo else "N/A"
-
-                # Avvia la pre-lettura del prossimo file: da qui in poi (retry + verifica)
-                # il disco sorgente è libero.
-                if i < total:
-                    _kick_prefetch(files[i]["path"])
-
-                # Retry mirato SOLO sulle destinazioni che hanno fallito la scrittura
-                # (drive USB lenti/ballerini): non serve rileggere il sorgente per
-                # quelle già scritte correttamente al primo giro.
-                for tpath in target_paths:
-                    if write_ok.get(tpath):
-                        continue
-                    try:
-                        shutil.copy2(it["path"], tpath)
-                        write_ok[tpath] = True
-                    except OSError:
-                        try:
-                            shutil.copy(it["path"], tpath)
-                            write_ok[tpath] = True
-                        except Exception as ce:
-                            print(f"Errore copia fallita per {it['name']}: {ce}")
-
-                # Verifica integrità A CAMPIONE (vedi _verify_sampled_destinations): rilegge
-                # solo una manciata di blocchi per destinazione invece dell'intero file,
-                # in parallelo su ogni destinazione. Stesso trade-off scelto in Offload:
-                # copertura ridotta rispetto alla rilettura completa, ma molto più veloce.
-                all_ok = True
-                dest_status = {tp: "Verified" for tp in target_paths}
-                verify_targets = [tp for tp in target_paths if write_ok.get(tp)]
-                if any(not write_ok.get(tp) for tp in target_paths):
-                    all_ok = False
-                    for tp in target_paths:
-                        if not write_ok.get(tp):
-                            dest_status[tp] = "Failed (scrittura)"
-
-                if verify_targets:
-                    verify_ok = self._verify_sampled_destinations(
-                        verify_targets, chunk_hashes, 4 * 1024 * 1024, algo, sz)
-                    for tpath, ok in verify_ok.items():
-                        if not src_hash or src_hash.startswith("Error") or not ok:
-                            all_ok = False
-                            dest_status[tpath] = "Failed (checksum)"
-
-                if make_proxy:
-                    try:
-                        self._ingest_make_proxy_file(it["path"], os.path.join(dests[0], "Proxies", album))
-                    except Exception:
-                        pass
-
-                status = "Verified" if all_ok else "Failed"
-                if all_ok:
-                    n_ok += 1
-                bytes_done += sz
-                mtime = os.path.getmtime(it["path"])
-                ctime = os.path.getctime(it["path"])
-                mi = ReportGenerator.extract_media_info(it["path"], self.ffmpeg_path)
-                rel = os.path.join(album, os.path.basename(target_paths[0])) if target_paths else it["name"]
-                results.append({
-                    "name": it["name"], "path": it["path"], "rel": rel, "size_bytes": sz,
-                    "size_str": self.format_file_size(sz),
-                    "created": datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "modified": datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S"),
-                    "hash": src_hash, "hash_alt": src_hash_alt, "status": status,
-                    "media_format": mi["media_format"], "codec": mi["codec"], "duration": mi["duration"],
-                    "resolution": mi["resolution"], "camera": mi["camera"], "shot": album,
-                    "frames": mi["frames"], "bitrate": mi["bitrate"], "audio": mi["audio"], "album": album,
-                    "timecode": mi.get("timecode", "N/A"),
-                    "dest_status": {d: dest_status.get(tp, "Unknown") for d, tp in zip(dests, target_paths)},
-                })
+                failed = disk_sync.execute(self.sync_rows, a, b, verify=verify, progress_cb=_cb)
+                self.after(0, lambda: self._sync_apply_done(failed))
             except Exception as e:
-                print(f"Ingest errore su {it['name']}: {e}")
-                results.append({"name": it["name"], "path": it["path"], "size_bytes": 0, "size_str": "0 B", "hash": "ERROR", "status": "Failed", "shot": album, "album": album})
-            self.after(0, lambda v=i / total: self.ingest_progress_bar.set(v))
+                self._sync_status(f"Errore durante la sincronizzazione: {e}")
+                self.after(0, lambda: self._sync_set_busy(False))
+        threading.Thread(target=bg, daemon=True).start()
 
-        report_path = None
-        if make_report:
-            try:
-                rid = "ING" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                elapsed_s = int(time.time() - start_time)
-                elapsed_str = f"{elapsed_s // 60}m {elapsed_s % 60}s" if elapsed_s >= 60 else f"{elapsed_s}s"
-                timing = {"start": job_start_dt, "finish": datetime.datetime.now(), "elapsed_str": elapsed_str}
-                ingest_report_dir = os.path.join(dests[0], "Ingest_Reports")
-                report_path = ReportGenerator.save_report(ingest_report_dir, rid, src, results, algo, dests, None, timing)
-                try:
-                    ReportGenerator.save_txt_report(ingest_report_dir, rid, results, algo, dests, timing)
-                    ReportGenerator.save_csv_report(ingest_report_dir, rid, results, algo)
-                    ReportGenerator.save_mhl_files(dests, rid, results, algo)
-                except Exception as e:
-                    print(f"Errore export TXT/CSV/MHL ingest: {e}")
-            except Exception as e:
-                print(f"Report ingest errore: {e}")
-        return (n_ok, total, report_path)
-
-    def _ingest_album_for(self, path, use_ai):
-        ext = os.path.splitext(path)[1].lower()
-        image_exts = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.tiff', '.tif']
-        video_exts = ['.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mxf', '.mpg', '.mpeg', '.mts', '.m2ts', '.wmv']
-        if use_ai and ext in image_exts:
-            try:
-                context = self.ai.extract_context(path)
-                album = self.ai.get_album_name(context) if context else "Varie"
-                for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
-                    album = album.replace(ch, "")
-                album = album.strip().capitalize()
-                return album or "Varie"
-            except Exception:
-                return "Foto"
-        if ext in image_exts:
-            return "Foto"
-        if ext in video_exts:
-            return "Video"
-        return "Documenti"
-
-    def _ingest_make_proxy_file(self, src_path, out_dir):
-        """Genera un proxy H.264 con ffmpeg (solo video). Ritorna il path o None; non solleva."""
-        ext = os.path.splitext(src_path)[1].lower()
-        if ext not in ('.mp4', '.mov', '.avi', '.mkv', '.m4v', '.mxf', '.mpg', '.mpeg', '.mts', '.m2ts', '.wmv'):
-            return None
-        import shutil as _sh
-        import subprocess
-        import re as _re
-        ff = (self.ffmpeg_path or "").strip() if hasattr(self, "ffmpeg_path") else ""
-        if not ff or not os.path.exists(ff):
-            ff = _sh.which("ffmpeg") or ""
-        if not ff:
-            # PATH ridotto quando l'app parte da Finder/launcher: usa la ricerca completa
-            # dell'engine (posizioni comuni Homebrew/MacPorts/apt oltre al PATH).
-            try:
-                ok_ff, found = self.ai.check_ffmpeg(None)
-                if ok_ff:
-                    ff = found
-            except Exception:
-                pass
-        if not ff:
-            return None
-        try:
-            os.makedirs(out_dir, exist_ok=True)
-            base = os.path.splitext(os.path.basename(src_path))[0]
-            out_path = os.path.join(out_dir, base + "_proxy.mp4")
-            res = self.proxy_resolution_var.get() if hasattr(self, "proxy_resolution_var") else "540p"
-            m = _re.search(r'(\d+)p', res or "")
-            height = int(m.group(1)) if m else 540
-            cmd = [ff, "-y", "-i", src_path, "-vf", f"scale=-2:{height}", "-c:v", "libx264",
-                   "-preset", "veryfast", "-crf", "26", "-c:a", "aac", "-b:a", "128k", out_path]
-            flags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW su Windows
-            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, creationflags=flags)
-            return out_path if os.path.exists(out_path) else None
-        except Exception:
-            return None
-
-    def open_ingest_report(self):
-        if getattr(self, "ingest_report_path", None) and os.path.exists(self.ingest_report_path):
-            import webbrowser
-            webbrowser.open(pathlib.Path(self.ingest_report_path).absolute().as_uri())
-
-    # ---- Watcher volumi rimovibili (Fase 1) ----
-    def _list_removable_mounts(self):
-        import platform
-        mounts = set()
-        system = platform.system()
-        try:
-            if system == "Windows":
-                import ctypes
-                import string
-                bitmask = ctypes.windll.kernel32.GetLogicalDrives()
-                for i, letter in enumerate(string.ascii_uppercase):
-                    if bitmask & (1 << i):
-                        root = f"{letter}:\\"
-                        try:
-                            if ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(root)) == 2:
-                                mounts.add(root)
-                        except Exception:
-                            pass
-            elif system == "Darwin":
-                base = "/Volumes"
-                if os.path.isdir(base):
-                    for name in os.listdir(base):
-                        p = os.path.join(base, name)
-                        try:
-                            if os.path.ismount(p):
-                                mounts.add(p)
-                        except Exception:
-                            pass
-            else:
-                user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
-                for base in (f"/media/{user}", f"/run/media/{user}", "/media", "/mnt"):
-                    if os.path.isdir(base):
-                        for name in os.listdir(base):
-                            p = os.path.join(base, name)
-                            try:
-                                if os.path.ismount(p):
-                                    mounts.add(p)
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-        return mounts
-
-    def _ingest_watch_changed(self):
-        try:
-            self._ingest_known_drives = self._list_removable_mounts()
-        except Exception:
-            self._ingest_known_drives = set()
-        if self.ingest_watch.get():
-            self.ingest_status_lbl.configure(text="🔎 Sorveglianza attiva: collega una scheda...", text_color=("gray10", "gray90"))
-
-    def _ingest_watch_tick(self):
-        try:
-            current = self._list_removable_mounts()
-            if self.ingest_watch.get():
-                new = current - getattr(self, "_ingest_known_drives", set())
-                for m in sorted(new):
-                    self._ingest_enqueue(m, auto=True)
-            self._ingest_known_drives = current
-        except Exception:
-            pass
-        try:
-            self.after(3000, self._ingest_watch_tick)
-        except Exception:
-            pass
+    def _sync_apply_done(self, failed):
+        from tkinter import messagebox
+        self._sync_set_busy(False)
+        if failed:
+            details = "\n".join(f"- {rel}: {err}" for rel, err in failed[:10])
+            messagebox.showwarning("Sincronizzazione con errori", f"{len(failed)} operazioni fallite:\n{details}")
+        else:
+            messagebox.showinfo("Sincronizzazione completata", "Fatto." + (" Copie verificate con hash." if self.sync_verify.get() else ""))
+        self.sync_scan()  # riconfronta: mostra lo stato reale dopo la sincronizzazione
 
 if __name__ == "__main__":
     try:

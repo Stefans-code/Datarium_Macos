@@ -35,7 +35,7 @@ STAGE = os.path.join(ROOT, "build_src")
 CORE_MODULES = ["ai_engine.py", "license_manager.py", "face_memory.py", "report_generator.py"]
 # Moduli importati da main.py ma senza logica da proteggere: restano .py normali
 # nel bundle (PyInstaller li include comunque grazie agli --hidden-import).
-PLAIN_MODULES = ["disk_benchmark.py", "system_actions.py"]
+PLAIN_MODULES = ["disk_benchmark.py", "system_actions.py", "disk_sync.py"]
 APP_SRC = "main.py"
 APP_DST = "datarium_app.py"
 
@@ -183,6 +183,7 @@ def main():
         "--hidden-import=report_generator",
         "--hidden-import=datarium_app",
         "--hidden-import=disk_benchmark",
+        "--hidden-import=disk_sync",
         "--hidden-import=system_actions",
         "--hidden-import=PIL",
         "--hidden-import=fitz",
