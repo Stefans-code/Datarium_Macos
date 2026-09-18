@@ -316,7 +316,11 @@ class AIEngine:
         self.PROFILES = {
             # ARGUS MINOR - Leggero. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
             "slim": {
-                "text":   ("Stegeno/Nexflamma_Models", "Argus-Minor-text-Q2_K.gguf",     "Argus-Minor-text-Q2_K.gguf"),
+                # Prima: Argus-Minor-text-Q2_K (Qwen2.5-3B a 2 bit, segue male il formato e inventa
+                # nomi). Ora lo stesso Qwen2.5-3B in Q4_K_M, file gia' presente su HF e condiviso
+                # col profilo Pesante (su disco resta una copia sola).
+                "text":   ("Stegeno/Nexflamma_Models", "Argus-Maior-text-Q4_K_M.gguf",   "Argus-Maior-text-Q4_K_M.gguf"),
+                "text_legacy": "Argus-Minor-text-Q2_K.gguf",
                 "vision": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision.gguf",        "Argus-Minor-vision.gguf"),
                 "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision-mmproj.gguf", "Argus-Minor-vision-mmproj.gguf"),
                 "handler": "moondream",
@@ -573,7 +577,7 @@ class AIEngine:
         """Manca qualcosa? False se almeno un profilo (slim/full) ha testo + visione + mmproj."""
         try:
             for prof in self.PROFILES.values():
-                if (self.resolve_model_file(prof["text"][2])
+                if (self._profile_text_present(prof)
                         and self.resolve_model_file(prof["vision"][2])
                         and self.resolve_model_file(prof["mmproj"][2])):
                     return False  # almeno un profilo completo presente
@@ -587,7 +591,7 @@ class AIEngine:
         try:
             for q in ("full", "slim"):
                 prof = self.PROFILES[q]
-                if (self.resolve_model_file(prof["text"][2])
+                if (self._profile_text_present(prof)
                         and self.resolve_model_file(prof["vision"][2])
                         and self.resolve_model_file(prof["mmproj"][2])):
                     return q
@@ -1131,6 +1135,78 @@ class AIEngine:
 
         return context_res
 
+    def _profile_text_present(self, prof):
+        """True se il modello di testo del profilo c'e' (anche col vecchio nome Minor Q2_K)."""
+        return bool(self.resolve_model_file(prof["text"][2])
+                    or (prof.get("text_legacy") and self.resolve_model_file(prof["text_legacy"])))
+
+    # Grammatiche GBNF: il modello (3B) puo' produrre SOLO testo nel formato atteso. Niente piu'
+    # spiegazioni, virgolette, elenchi numerati o percorsi a meta'. Se la libreria non le
+    # supporta, _chat ripiega automaticamente sulla generazione libera.
+    _GBNF_WORD = "[A-Za-z0-9\u00e0\u00e8\u00e9\u00ec\u00ed\u00ee\u00f2\u00f3\u00f9\u00fa\u00c0\u00c8\u00c9\u00cc\u00cd\u00ce\u00d2\u00d3\u00d9\u00da\u00e7\u00c7]"
+    _GBNF_PATH = 'root ::= seg "/" seg "/" seg\nseg ::= word ("_" word)*\nword ::= ' + _GBNF_WORD + '+\n'
+    _GBNF_TAXO = ('root ::= item (", " item)*\nitem ::= name "(" name (", " name)* ")"\n'
+                  'name ::= [A-Za-z0-9_ \u00e0\u00e8\u00e9\u00ec\u00f2\u00f9\u00c0\u00c8\u00c9\u00cc\u00d2\u00d9]+\n')
+    _GBNF_ALBUM = 'root ::= word (" " word)?\nword ::= ' + _GBNF_WORD + '+\n'
+
+    def _chat(self, llm, messages, max_tokens, temperature, grammar=None):
+        """create_chat_completion con grammatica opzionale; se la grammatica non e' supportata
+        o fallisce, riprova senza (mai peggio di prima)."""
+        kwargs = {"messages": messages, "max_tokens": max_tokens, "temperature": temperature}
+        if grammar:
+            try:
+                cache = self.__dict__.setdefault("_grammar_cache", {})
+                if grammar not in cache:
+                    from llama_cpp import LlamaGrammar
+                    cache[grammar] = LlamaGrammar.from_string(grammar, verbose=False)
+                kwargs["grammar"] = cache[grammar]
+            except Exception as e:
+                print(f"[AIEngine] Grammatica non disponibile ({e}): generazione libera")
+        try:
+            return llm.create_chat_completion(**kwargs)
+        except Exception as e:
+            if "grammar" in kwargs:
+                print(f"[AIEngine] Errore con grammatica ({e}): ritento senza")
+                kwargs.pop("grammar")
+                return llm.create_chat_completion(**kwargs)
+            raise
+
+    def _naming_llm(self):
+        """Modello da usare per i compiti di SOLO TESTO (tassonomia, nomi, album).
+        Il profilo leggero carica per le foto Moondream: un captioner, con un template di
+        chat pensato per descrivere immagini, che segue male le istruzioni testuali. In quel
+        caso si carica (una volta) il modello di testo Qwen2.5-3B e si usa quello.
+        Il profilo Pesante usa gia' Qwen2.5-VL, valido anche per il testo."""
+        if not (self.is_vision and getattr(self, "_active_handler", None) == "moondream"):
+            return self.llm
+        cached = getattr(self, "_text_llm", None)
+        if cached is not None:
+            return cached
+        if getattr(self, "_text_llm_failed", False):
+            return self.llm
+        try:
+            import importlib
+            Llama = importlib.import_module("llama_cpp").Llama
+            prof = self.PROFILES["slim"]
+            t_path = (self.resolve_model_file(prof["text"][2])
+                      or (prof.get("text_legacy") and self.resolve_model_file(prof["text_legacy"])))
+            if not t_path:
+                self._text_llm_failed = True
+                return self.llm
+            hw = self.detect_hardware()
+            n_threads = os.cpu_count() or 4
+            try:
+                self._text_llm = Llama(model_path=t_path, n_ctx=self._n_ctx, n_threads=n_threads,
+                                       n_gpu_layers=hw["n_gpu_layers"], n_batch=512, verbose=False)
+            except Exception:
+                self._text_llm = Llama(model_path=t_path, n_ctx=self._n_ctx, n_threads=n_threads,
+                                       n_gpu_layers=0, n_batch=512, verbose=False)
+            return self._text_llm
+        except Exception as e:
+            print(f"[AIEngine] Modello di testo dedicato non caricabile ({e}): uso il modello visione")
+            self._text_llm_failed = True
+            return self.llm
+
     _FALLBACK_TAXONOMY = "Documentazione(Lavoro, Personale), Immagini(Viaggi, Natura), Archivio(Varie)"
 
     def identify_global_themes(self, all_contexts):
@@ -1172,11 +1248,7 @@ class AIEngine:
         ]
         
         try:
-            response = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=100,
-                temperature=0.2
-            )
+            response = self._chat(self._naming_llm(), messages, max_tokens=100, temperature=0.2, grammar=self._GBNF_TAXO)
             return response['choices'][0]['message']['content'].strip()
         except Exception as e:
             print(f"[AIEngine] Tassonomia globale fallita ({e}): uso la tassonomia di ripiego")
@@ -1268,8 +1340,13 @@ class AIEngine:
                 "Sei un archivista esperto. Rinomina il file nel formato esatto: Categoria/Sottocategoria/Nome_Descrittivo\n"
                 "Regole fondamentali:\n"
                 "Il nome descrittivo deve essere in italiano ed estremamente specifico.\n"
-                "Usa da 3 a 5 parole significative separate esclusivamente da trattini bassi (_) (esempio: Bambino_Camicia_Rossa_Soridente).\n"
+                "Usa da 3 a 5 parole significative separate esclusivamente da trattini bassi (_) (esempio: Bambino_Camicia_Rossa_Sorridente).\n"
+                "Se e' presente una tassonomia consigliata, riusa le sue Categorie e Sottocategorie invece di inventarne di nuove.\n"
                 "Non usare elenchi numerati, preamboli o estensioni.\n"
+                "Esempi:\n"
+                "Descrizione: un gatto grigio dorme su un divano -> Animali/Gatti/Gatto_Grigio_Dorme_Divano\n"
+                "Descrizione: fattura di Enel Energia di marzo 2023 -> Documenti/Fatture/Fattura_Enel_Energia_Marzo_2023\n"
+                "Descrizione: pagina di giornale del 1973 su un processo -> Archivio/Giornali/Articolo_Processo_1973\n"
                 "Rispondi SOLO ed ESCLUSIVAMENTE con la stringa Categoria/Sottocategoria/Nome."
             )},
             {"role": "user", "content": (
@@ -1282,11 +1359,7 @@ class AIEngine:
         ]
         
         try:
-            response = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=64,
-                temperature=0.1
-            )
+            response = self._chat(self._naming_llm(), messages, max_tokens=64, temperature=0.1, grammar=self._GBNF_PATH)
             clean_path = response['choices'][0]['message']['content'].strip()
             
             # Final cleanup
@@ -1380,11 +1453,7 @@ class AIEngine:
         ]
         
         try:
-            response = self.llm.create_chat_completion(
-                messages=messages,
-                max_tokens=16,
-                temperature=0.1
-            )
+            response = self._chat(self._naming_llm(), messages, max_tokens=16, temperature=0.1, grammar=self._GBNF_ALBUM)
             clean = response['choices'][0]['message']['content'].strip()
             
             # Rimuove prefisso "Tema:" o "Album:" qualora fosse ritornato dall'AI prima della sanificazione
