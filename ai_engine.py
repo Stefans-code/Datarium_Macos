@@ -316,11 +316,7 @@ class AIEngine:
         self.PROFILES = {
             # ARGUS MINOR - Leggero. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
             "slim": {
-                # Prima: Argus-Minor-text-Q2_K (Qwen2.5-3B a 2 bit, segue male il formato e inventa
-                # nomi). Ora lo stesso Qwen2.5-3B in Q4_K_M, file gia' presente su HF e condiviso
-                # col profilo Pesante (su disco resta una copia sola).
-                "text":   ("Stegeno/Nexflamma_Models", "Argus-Maior-text-Q4_K_M.gguf",   "Argus-Maior-text-Q4_K_M.gguf"),
-                "text_legacy": "Argus-Minor-text-Q2_K.gguf",
+                "text":   ("Stegeno/Nexflamma_Models", "Argus-Minor-text-Q2_K.gguf",     "Argus-Minor-text-Q2_K.gguf"),
                 "vision": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision.gguf",        "Argus-Minor-vision.gguf"),
                 "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision-mmproj.gguf", "Argus-Minor-vision-mmproj.gguf"),
                 "handler": "moondream",
@@ -1145,6 +1141,7 @@ class AIEngine:
     # supporta, _chat ripiega automaticamente sulla generazione libera.
     _GBNF_WORD = "[A-Za-z0-9\u00e0\u00e8\u00e9\u00ec\u00ed\u00ee\u00f2\u00f3\u00f9\u00fa\u00c0\u00c8\u00c9\u00cc\u00cd\u00ce\u00d2\u00d3\u00d9\u00da\u00e7\u00c7]"
     _GBNF_PATH = 'root ::= seg "/" seg "/" seg\nseg ::= word ("_" word)*\nword ::= ' + _GBNF_WORD + '+\n'
+    _GBNF_FOLDER = 'root ::= seg "/" seg\nseg ::= word ("_" word)*\nword ::= ' + _GBNF_WORD + '+\n'
     _GBNF_TAXO = ('root ::= item (", " item)*\nitem ::= name "(" name (", " name)* ")"\n'
                   'name ::= [A-Za-z0-9_ \u00e0\u00e8\u00e9\u00ec\u00f2\u00f9\u00c0\u00c8\u00c9\u00cc\u00d2\u00d9]+\n')
     _GBNF_ALBUM = 'root ::= word (" " word)?\nword ::= ' + _GBNF_WORD + '+\n'
@@ -1331,6 +1328,12 @@ class AIEngine:
                 context = context[len(prefix):]
                 break
 
+        # Nome originale gia' descrittivo (e conservato): al modello si chiede SOLO la cartella
+        # (Categoria/Sottocategoria). Compito piu' corto e semplice = meno errori e meno
+        # invenzioni, importante con il modello leggero a 2 bit.
+        folders_only = bool(not people_prefix and getattr(self, "keep_descriptive_names", True)
+                            and self._is_descriptive_name(original_name))
+
         context_str = f"Descrizione: {context}" if context else ""
         taxo_str = f"Tassonomia consigliata: {taxonomy}" if taxonomy else ""
         
@@ -1359,7 +1362,29 @@ class AIEngine:
         ]
         
         try:
-            response = self._chat(self._naming_llm(), messages, max_tokens=64, temperature=0.1, grammar=self._GBNF_PATH)
+            if folders_only:
+                messages = [
+                    {"role": "system", "content": (
+                        "Sei un archivista esperto. Scegli la cartella in cui archiviare il file, nel formato esatto: Categoria/Sottocategoria\n"
+                        "Categoria e Sottocategoria: una o due parole italiane, separate da trattini bassi (_) se sono due.\n"
+                        "Se e' presente una tassonomia consigliata, riusa le sue Categorie e Sottocategorie invece di inventarne di nuove.\n"
+                        "Esempi:\n"
+                        "File: Fattura Enel marzo 2023 -> Documenti/Fatture\n"
+                        "File: Pubblicazioni film 1973 Il Tempo articolo -> Archivio/Giornali\n"
+                        "File: Intervista regista Roma 2019 -> Interviste/Registi\n"
+                        "Rispondi SOLO con la stringa Categoria/Sottocategoria."
+                    )},
+                    {"role": "user", "content": (
+                        f"File: {os.path.splitext(original_name)[0]}\n"
+                        f"Tipo: {category}\n"
+                        f"{context_str}\n"
+                        f"{taxo_str}\n\n"
+                        "Cartella (Categoria/Sottocategoria):"
+                    )}
+                ]
+            response = self._chat(self._naming_llm(), messages,
+                                  max_tokens=(32 if folders_only else 64), temperature=0.1,
+                                  grammar=(self._GBNF_FOLDER if folders_only else self._GBNF_PATH))
             clean_path = response['choices'][0]['message']['content'].strip()
             
             # Final cleanup
@@ -1372,6 +1397,13 @@ class AIEngine:
             clean_path = re.sub(r'\s*/\s*', '/', clean_path)
             
             parts = [p.strip() for p in clean_path.split('/') if p.strip()]
+            if folders_only:
+                # Il modello ha dato solo le cartelle: il nome file e' quello originale
+                if not parts:
+                    parts = ["Generale", "Varie"]
+                elif len(parts) == 1:
+                    parts = [parts[0], "Generale"]
+                parts = parts[:2] + ["KEEPNAMEPLACEHOLDER"]
             
             # Meccanismo di fallback difensivo a 3 livelli (garantisce sempre la struttura corretta)
             if len(parts) == 1:
