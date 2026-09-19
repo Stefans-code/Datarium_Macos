@@ -1521,6 +1521,8 @@ class DatariumApp(ctk.CTk):
             self.sidebar.grid(row=0, column=0, sticky="nsew")
             self.grid_columnconfigure(0, weight=0) # Sidebar width fixed
             
+        if name == "HashHome":
+            self._reset_hash_selection()
         for p in self.pages.values(): p.pack_forget()
         self.pages[name].pack(fill="both", expand=True)
         self._update_nav_active(name)
@@ -2135,6 +2137,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(f_row, text="File:", font=ctk.CTkFont(weight="bold")).pack(side="left")
         ctk.CTkLabel(f_row, textvariable=self.hash_source_file, text_color="gray", font=ctk.CTkFont(size=11), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
         ctk.CTkButton(f_row, text="📁", width=40, command=self.pick_hash_file).pack(side="right")
+        ctk.CTkButton(f_row, text="✖", width=32, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self._clear_hash_field("file")).pack(side="right", padx=(0, 6))
 
         # Folder Pick Row
         fold_row = ctk.CTkFrame(modal, fg_color="transparent")
@@ -2142,6 +2145,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(fold_row, text="Cartella:", font=ctk.CTkFont(weight="bold")).pack(side="left")
         ctk.CTkLabel(fold_row, textvariable=self.hash_source_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
         ctk.CTkButton(fold_row, text="📂", width=40, command=self.pick_hash_folder).pack(side="right")
+        ctk.CTkButton(fold_row, text="✖", width=32, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self._clear_hash_field("folder")).pack(side="right", padx=(0, 6))
 
         # Folder 2 Pick Row
         fold_row_2 = ctk.CTkFrame(modal, fg_color="transparent")
@@ -2149,6 +2153,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(fold_row_2, text="Cartella 2 (Confronto):", font=ctk.CTkFont(weight="bold")).pack(side="left")
         ctk.CTkLabel(fold_row_2, textvariable=self.hash_source_folder_2, text_color="gray", font=ctk.CTkFont(size=11), wraplength=250, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
         ctk.CTkButton(fold_row_2, text="📂", width=40, command=self.pick_hash_folder_2).pack(side="right")
+        ctk.CTkButton(fold_row_2, text="✖", width=32, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self._clear_hash_field("folder2")).pack(side="right", padx=(0, 6))
 
         # Hash Algo
         algo_row = ctk.CTkFrame(modal, fg_color="transparent")
@@ -2208,9 +2213,29 @@ class DatariumApp(ctk.CTk):
             self.compare_contents.set(False)
             self.chk_compare.pack_forget()
 
+    def _reset_hash_selection(self):
+        """Azzera file e cartelle scelti: prima restavano in memoria da un uso precedente e
+        finivano nel confronto (es. un video estraneo insieme alle due cartelle scelte)."""
+        self.selected_hash_files_list = []
+        self.hash_source_folders_list = []
+        self.hash_source_file.set("")
+        self.hash_source_folder.set("")
+        self.hash_source_folder_2.set("")
+
+    def _clear_hash_field(self, which):
+        if which == "file":
+            self.selected_hash_files_list = []
+            self.hash_source_file.set("")
+        elif which == "folder":
+            self.hash_source_folders_list = []
+            self.hash_source_folder.set("")
+        else:
+            self.hash_source_folder_2.set("")
+
     def pick_hash_file_home(self):
         file_paths = filedialog.askopenfilenames(title="Seleziona File")
         if file_paths:
+            self._reset_hash_selection()
             self.selected_hash_files_list = list(file_paths)
             if len(self.selected_hash_files_list) == 1:
                 self.hash_source_file.set(self.selected_hash_files_list[0])
@@ -2221,6 +2246,7 @@ class DatariumApp(ctk.CTk):
     def pick_hash_folder_home(self):
         folder_path = filedialog.askdirectory(title="Seleziona Cartella")
         if folder_path:
+            self._reset_hash_selection()
             self.hash_source_folders_list = [folder_path]
             self.hash_source_folder.set(folder_path)
             self.show_page("HashOptions")
@@ -2263,6 +2289,7 @@ class DatariumApp(ctk.CTk):
 
     def select_recent_file(self, path):
         if os.path.exists(path):
+            self._reset_hash_selection()
             self.hash_source_file.set(path)
             self.show_page("HashOptions")
         else:
@@ -2693,6 +2720,10 @@ class DatariumApp(ctk.CTk):
             files_to_hash = list(self.selected_hash_files_list)
         elif self.hash_source_file.get():
             files_to_hash = [self.hash_source_file.get()]
+
+        if len(sd_list) == 2 and files_to_hash:
+            # Confronto tra due cartelle: un file "extra" falsa il risultato, lo si esclude
+            files_to_hash = []
 
         if not files_to_hash and not sd_list:
             from tkinter import messagebox
