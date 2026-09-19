@@ -1626,6 +1626,7 @@ class DatariumApp(ctk.CTk):
             if not src: return
 
             self._organize_start_time = time.time()
+            self._review_count = 0
             self.set_progress(0)
             text_items = []
             vision_items = []
@@ -1797,6 +1798,7 @@ class DatariumApp(ctk.CTk):
                             res = f"{item['type']}/{series_folder[skey]}/{item['old']}"
                         else:
                             res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
+                            item['_ai'] = True
                             if skey:
                                 parts_ = res.split('/')
                                 if len(parts_) >= 4:
@@ -1808,6 +1810,21 @@ class DatariumApp(ctk.CTk):
                     groups[cat].append(item)
                     self.set_progress(0.7 + 0.3 * ((idx+1)/max(1, len(valid_items))))
                 
+                # Post-elaborazione: (1) casi incerti -> "Da_Rivedere"; (2) foto/video dello stesso
+                # evento (scatti ravvicinati) -> stessa cartella, per votazione.
+                for it_ in valid_items:
+                    if it_.get('_ai') and self._needs_review(it_):
+                        it_['new'] = f"{it_['type']}/Da_Rivedere/{it_['old']}"
+                        it_['_review'] = True
+                try:
+                    self._apply_event_clusters([
+                        it_ for it_ in valid_items
+                        if it_.get('_ai') and not it_.get('_review') and it_['type'] in ("Image", "Video")
+                        and not self.ai._is_descriptive_name(it_['old'])])
+                except Exception as ev_err:
+                    print(f"[Organizer] Raggruppamento per evento saltato: {ev_err}")
+                self._review_count = sum(1 for it_ in valid_items if it_.get('_review'))
+
                 self.last_groups = groups
             else:
                 # Fallback senza AI ma con regole custom applicabili!
@@ -1825,12 +1842,80 @@ class DatariumApp(ctk.CTk):
                     groups[cat].append(item)
                 self.last_groups = groups
 
-            self.update_status("✨ Analisi completata!")
+            n_rev = getattr(self, "_review_count", 0)
+            self.update_status("✨ Analisi completata!" + (f" {n_rev} file in 'Da_Rivedere' (l'AI non era sicura)." if n_rev else ""))
             self.after(0, lambda: self.render_groups(self.last_groups))
             self.send_local_notification("Datarium - Analisi Completata", f"Analizzati con successo {len(valid_items)} file.")
         finally:
             self.is_scanning = False
             self.after(0, lambda: self.set_sidebar_state("normal"))
+
+    def _needs_review(self, item):
+        """True se l'esito dell'AI e' poco affidabile: percorso non valido, categoria di ripiego
+        (Generale/Varie) o foto senza alcuna descrizione e con nome non descrittivo."""
+        parts = str(item.get('new', '')).split('/')
+        if len(parts) < 4:
+            return True
+        if parts[1].lower() == "generale" and parts[2].lower() in ("varie", "generale"):
+            return True
+        if item.get('type') == "Image" and "IMAGE_DESC" not in (item.get('context') or ""):
+            return not self.ai._is_descriptive_name(item.get('old', ''))
+        return False
+
+    def _event_timestamp(self, item):
+        """Data di scatto (EXIF) o di modifica come timestamp; None se non leggibile."""
+        import datetime
+        try:
+            md = self.ai.extract_metadata(item['path'])
+            s = md.get('DateTimeOriginal') or md.get('FileModificationDate')
+            if s:
+                return datetime.datetime.strptime(str(s)[:19], "%Y:%m:%d %H:%M:%S").timestamp()
+        except Exception:
+            pass
+        try:
+            return os.path.getmtime(item['path'])
+        except Exception:
+            return None
+
+    def _apply_event_clusters(self, items, gap_seconds=1800):
+        """Scatti ravvicinati (pausa < 30 min tra uno e l'altro, stesso tipo) = stesso evento.
+        La cartella vincente (Categoria/Sottocategoria) e' quella scelta dalla maggioranza dei
+        membri (almeno il 50%): gli altri la adottano, cosi' la foto della nonna e quella di
+        gruppo della stessa festa non finiscono in posti diversi. Le foto con persone
+        identificate restano dove sono."""
+        from collections import Counter
+        timed = []
+        for it in items:
+            ts = self._event_timestamp(it)
+            if ts is not None:
+                timed.append((ts, it))
+        timed.sort(key=lambda x: x[0])
+        clusters, cur, last = [], [], None
+        for ts, it in timed:
+            if cur and (ts - last > gap_seconds or it['type'] != cur[-1]['type']):
+                clusters.append(cur)
+                cur = []
+            cur.append(it)
+            last = ts
+        if cur:
+            clusters.append(cur)
+
+        for cl in clusters:
+            if len(cl) < 2:
+                continue
+            folders = []
+            for it in cl:
+                p = it['new'].split('/')
+                folders.append("/".join(p[1:-1]) if len(p) >= 4 else None)
+            counts = Counter(f for f in folders if f)
+            if not counts:
+                continue
+            winner, n = counts.most_common(1)[0]
+            if n / len(cl) < 0.5:
+                continue
+            for it, f in zip(cl, folders):
+                if f and f != winner and "Persone_Identificate" not in f:
+                    it['new'] = f"{it['type']}/{winner}/{it['new'].split('/')[-1]}"
 
     def render_groups(self, groups):
         for w in self.scroll_frame.winfo_children(): w.destroy()
