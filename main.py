@@ -46,7 +46,7 @@ from face_memory import FaceMemoryManager
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
