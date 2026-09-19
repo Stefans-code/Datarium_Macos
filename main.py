@@ -2739,21 +2739,36 @@ class DatariumApp(ctk.CTk):
         threading.Thread(target=self._run_hash_verification_bg, args=(files_to_hash, sd_list, algo), daemon=True).start()
 
     def _update_hash_progress(self, idx, total, name, bytes_done=None, total_bytes=None, elapsed=None):
-        """Aggiorna barra e stato del calcolo hash (chiamato dal thread UI). Con
-        bytes_done/total_bytes/elapsed calcola anche velocità e tempo rimanente reali
-        (come in Offload), invece di mostrare solo 'i/totale: nomefile' senza indicazione
-        di quanto manca davvero."""
+        """Aggiorna barra e stato del calcolo hash (thread UI). Barra e percentuale usano la
+        STESSA scala (byte, prima la barra contava i file e la percentuale i byte: due numeri
+        diversi). I dati importanti vengono per primi e il nome del file, accorciato, per ultimo:
+        prima una riga lunga usciva dalla finestra e l'ETA non si vedeva."""
+        have_bytes = bytes_done is not None and total_bytes
         if hasattr(self, 'hash_progress_bar') and self.hash_progress_bar.winfo_exists():
-            self.hash_progress_bar.set((idx + 1) / max(1, total))
+            frac = (bytes_done / total_bytes) if have_bytes else ((idx + 1) / max(1, total))
+            self.hash_progress_bar.set(min(1.0, max(0.0, frac)))
         if hasattr(self, 'hash_status_lbl') and self.hash_status_lbl.winfo_exists():
-            suffix = ""
-            if bytes_done is not None and total_bytes and elapsed is not None and elapsed > 0.05:
+            short = name if len(name) <= 34 else name[:31] + "..."
+            parts = []
+            if have_bytes and elapsed is not None and elapsed > 0.05:
                 speed = bytes_done / elapsed
-                remaining_s = int(max(0, total_bytes - bytes_done) / speed) if speed > 0 else 0
-                eta_str = f"{remaining_s // 60}m {remaining_s % 60}s" if remaining_s >= 60 else f"{remaining_s}s"
                 pct = min(100, int(bytes_done / total_bytes * 100))
-                suffix = f" · {pct}% · {self.format_file_size(int(speed))}/s · ETA {eta_str}"
-            self.hash_status_lbl.configure(text=f"Calcolo hash {idx + 1}/{total}: {name}{suffix}")
+                parts.append(f"{pct}%")
+                parts.append(f"{self.format_file_size(int(speed))}/s")
+                if elapsed >= 3 and speed > 0:
+                    remaining_s = int(max(0, total_bytes - bytes_done) / speed)
+                    if remaining_s >= 3600:
+                        eta_str = f"{remaining_s // 3600}h {(remaining_s % 3600) // 60}m"
+                    elif remaining_s >= 60:
+                        eta_str = f"{remaining_s // 60}m {remaining_s % 60}s"
+                    else:
+                        eta_str = f"{remaining_s}s"
+                    parts.append(f"ETA {eta_str}")
+                else:
+                    parts.append("ETA calcolo...")
+            parts.append(f"file {idx + 1}/{total}")
+            parts.append(short)
+            self.hash_status_lbl.configure(text=" · ".join(parts), wraplength=700, justify="left")
 
     def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
         try:
