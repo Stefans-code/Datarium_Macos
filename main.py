@@ -1774,6 +1774,9 @@ class DatariumApp(ctk.CTk):
                 all_contexts = [it.get('context', '') for it in valid_items]
                 taxonomy = self.ai.identify_global_themes(all_contexts)
                 self.ai.keep_descriptive_names = self.organizer_keep_names.get()
+                # Serie di file (pagine A/B/C, numerazioni): la cartella si decide UNA volta e vale
+                # per tutti i membri. Coerenza garantita e una chiamata al modello in meno per file.
+                series_folder = {}
 
                 groups = {}
                 for idx, item in enumerate(valid_items):
@@ -1785,7 +1788,19 @@ class DatariumApp(ctk.CTk):
                         res = self.ai.apply_custom_rules(item['path'], self.custom_rules)
                         
                     if not res:
-                        res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
+                        skey = None
+                        if self.ai.keep_descriptive_names and self.ai._is_descriptive_name(item['old']):
+                            skey = self.ai.series_key(item['old'])
+                            if skey:
+                                skey = (item['type'], skey)
+                        if skey and skey in series_folder:
+                            res = f"{item['type']}/{series_folder[skey]}/{item['old']}"
+                        else:
+                            res = self.ai.get_smart_name(item['old'], item['type'], item.get('context', ''), taxonomy)
+                            if skey:
+                                parts_ = res.split('/')
+                                if len(parts_) >= 4:
+                                    series_folder[skey] = "/".join(parts_[1:-1])
                     item['new'] = res
                     
                     cat = res.split('/')[0]

@@ -1323,6 +1323,16 @@ class AIEngine:
         "mov", "mp4", "clip", "audio", "recording", "registrazione", "alle", "at", "del", "the",
     ])
 
+    @staticmethod
+    def series_key(name):
+        """Chiave comune ai file della stessa SERIE (pagine A/B/C dello stesso articolo,
+        '... 01', '... (2)', 'copia'): il nome senza l'ultimo elemento distintivo. None se il
+        nome non ha un suffisso di serie o e' troppo corto per essere affidabile."""
+        stem = os.path.splitext(name)[0]
+        key = re.sub(r'[\s_\-\.\(\)]*(?:\(?\d{1,3}\)?|[A-Za-z]|copia|copy)\s*$', '', stem, flags=re.I).strip()
+        key = re.sub(r'\s+', ' ', key).lower()
+        return key if len(key) >= 12 and key != stem.lower() else None
+
     def _is_descriptive_name(self, original_name):
         """True se il nome originale gia' descrive il contenuto (es. 'Pubblicazioni film 1973 -
         Il Tempo 14 febbraio 1973 A'): in quel caso va conservato, non sostituito da un nome
