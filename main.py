@@ -2171,7 +2171,7 @@ class DatariumApp(ctk.CTk):
         chk_dups = ctk.CTkCheckBox(check_row, text="Evidenzia File con stesso hash", variable=self.highlight_dups, font=ctk.CTkFont(size=13), command=self.toggle_compare_contents_visibility)
         chk_dups.pack(anchor="w", pady=3)
         
-        self.chk_compare = ctk.CTkCheckBox(check_row, text="Confronta contenuto", variable=self.compare_contents, font=ctk.CTkFont(size=13))
+        self.chk_compare = ctk.CTkCheckBox(check_row, text="Confronta contenuto (rilegge i file: raddoppia i tempi)", variable=self.compare_contents, font=ctk.CTkFont(size=13))
         if self.highlight_dups.get():
             self.chk_compare.pack(anchor="w", pady=3, padx=(20, 0))
 
@@ -2704,12 +2704,15 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(tbl_hdr, text="Hash", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=2, padx=10, sticky="ew")
         ctk.CTkLabel(tbl_hdr, text="Dimensione", font=ctk.CTkFont(size=11, weight="bold"), anchor="e").grid(row=0, column=3, padx=10, sticky="ew")
 
-    def populate_section(self, parent, items, bg_color="transparent", text_color=None):
+    def populate_section(self, parent, items, bg_color="transparent", text_color=None, limit=500):
         if not items:
             ctk.CTkLabel(parent, text="Nessun file trovato in questa sezione.", text_color="gray", font=ctk.CTkFont(size=12, slant="italic")).pack(pady=15)
             return
 
-        for it in items:
+        if len(items) > limit:
+            ctk.CTkLabel(parent, text=f"Mostrati i primi {limit} di {len(items)} file (l'elenco completo e' nel report PDF).",
+                         text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=(4, 2))
+        for it in items[:limit]:
             row_frame = ctk.CTkFrame(parent, fg_color=bg_color, corner_radius=5)
             row_frame.pack(fill="x", pady=2)
             row_frame.columnconfigure(0, weight=3)
@@ -3014,20 +3017,51 @@ class DatariumApp(ctk.CTk):
         self.populate_section(self.hash_results_scroll, dup_hash_files, bg_color=("#ffedd5", "#7c2d12"), text_color=("#ea580c", "#fb923c"))
 
         if self.compare_contents.get() and self.highlight_dups.get():
-            dup_content_files = []
-            for h_val, items in hash_groups.items():
-                if len(items) > 1:
-                    ref_item = items[0]
-                    valid_items = [ref_item]
-                    for other in items[1:]:
-                        if self.check_content_equal(ref_item['path'], other['path']):
-                            valid_items.append(other)
-                    if len(valid_items) > 1:
-                        dup_content_files.extend(valid_items)
+            to_check = [items for items in hash_groups.values() if len(items) > 1]
+            if to_check:
+                # Rilegge i file: in background, con avanzamento. Prima girava QUI, sul thread
+                # dell'interfaccia, e su cartelle da centinaia di GB la finestra restava
+                # congelata (rotella su Mac) per tutta la durata.
+                self.is_scanning = True
+                self.set_sidebar_state("disabled")
+                self.hash_progress_bar.set(0)
+                self.hash_status_lbl.configure(text="Confronto byte per byte dei file con hash uguale...")
+                threading.Thread(target=self._content_compare_bg, args=(to_check,), daemon=True).start()
 
-            self.create_section_header(self.hash_results_scroll, "📦 File con hash uguale e contenuto uguale")
-            self.create_table_header(self.hash_results_scroll)
-            self.populate_section(self.hash_results_scroll, dup_content_files, bg_color=("#ffedd5", "#7c2d12"), text_color=("#ea580c", "#fb923c"))
+    def _content_compare_bg(self, groups):
+        import time
+        try:
+            n_pairs = sum(len(g) - 1 for g in groups)
+            done = 0
+            start = time.time()
+            dup_content_files = []
+            for items in groups:
+                ref_item = items[0]
+                valid_items = [ref_item]
+                for other in items[1:]:
+                    el = time.time() - start
+                    eta = f" · ETA {int(el * (n_pairs - done) / done) // 60}m" if done and el > 5 else ""
+                    self.after(0, lambda d=done, nm=other['name'], e=eta: (
+                        self.hash_progress_bar.set(d / max(1, n_pairs)),
+                        self.hash_status_lbl.configure(text=f"Confronto contenuto {d + 1}/{n_pairs}{e} · {nm[:34]}")))
+                    if self.check_content_equal(ref_item['path'], other['path']):
+                        valid_items.append(other)
+                    done += 1
+                if len(valid_items) > 1:
+                    dup_content_files.extend(valid_items)
+            self.after(0, self._render_content_compare, dup_content_files)
+        except Exception as e:
+            self.after(0, lambda err=str(e): self.hash_status_lbl.configure(text=f"Confronto contenuto interrotto: {err}"))
+        finally:
+            self.is_scanning = False
+            self.after(0, lambda: self.set_sidebar_state("normal"))
+
+    def _render_content_compare(self, dup_content_files):
+        self.hash_progress_bar.set(1.0)
+        self.hash_status_lbl.configure(text=f"✓ Completato: {len(self.last_hash_results)} file elaborati, contenuto verificato")
+        self.create_section_header(self.hash_results_scroll, "📦 File con hash uguale e contenuto uguale")
+        self.create_table_header(self.hash_results_scroll)
+        self.populate_section(self.hash_results_scroll, dup_content_files, bg_color=("#ffedd5", "#7c2d12"), text_color=("#ea580c", "#fb923c"))
 
     def _render_hash_comparison(self, comp):
         """Verdetto file-per-file tra Cartella 1 e Cartella 2 (abbinati per percorso relativo)."""
