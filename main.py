@@ -262,6 +262,8 @@ class DatariumApp(ctk.CTk):
         self.selected_hash_files_list = []
         self.hash_source_folder = ctk.StringVar(value="")
         self.hash_source_folder_2 = ctk.StringVar(value="")
+        self.hash_shutdown_after = ctk.BooleanVar(value=False)
+        self.hash_quick_mode = ctk.BooleanVar(value=False)
         self.selected_hash_algo = ctk.StringVar(value="-Scegli-")
         self.highlight_dups = ctk.BooleanVar(value=True)
         self.compare_contents = ctk.BooleanVar(value=False)
@@ -2125,7 +2127,7 @@ class DatariumApp(ctk.CTk):
         page_opts = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["HashOptions"] = page_opts
 
-        modal = ctk.CTkFrame(page_opts, width=650, height=520, corner_radius=20, border_width=2, border_color=("gray80", "gray20"))
+        modal = ctk.CTkFrame(page_opts, width=650, height=650, corner_radius=20, border_width=2, border_color=("gray80", "gray20"))
         modal.place(relx=0.5, rely=0.5, anchor="center")
         modal.pack_propagate(False)
 
@@ -2173,6 +2175,12 @@ class DatariumApp(ctk.CTk):
         if self.highlight_dups.get():
             self.chk_compare.pack(anchor="w", pady=3, padx=(20, 0))
 
+        # Verifica rapida e spegnimento (utile per dischi da centinaia di GB)
+        opt_row2 = ctk.CTkFrame(modal, fg_color="transparent")
+        opt_row2.pack(fill="x", padx=40, pady=(4, 0))
+        ctk.CTkCheckBox(opt_row2, text="Verifica rapida (campiona 3 blocchi per file: molto piu' veloce, meno sicura)", variable=self.hash_quick_mode, font=ctk.CTkFont(size=12)).pack(anchor="w", pady=3)
+        ctk.CTkCheckBox(opt_row2, text="Spegni il PC al termine (annullabile, solo se non ci sono differenze)", variable=self.hash_shutdown_after, font=ctk.CTkFont(size=12)).pack(anchor="w", pady=3)
+
         # Footer Row
         footer_btn_f = ctk.CTkFrame(modal, fg_color="transparent")
         footer_btn_f.pack(side="bottom", fill="x", padx=40, pady=30)
@@ -2190,6 +2198,8 @@ class DatariumApp(ctk.CTk):
         self.hash_status_lbl.pack(anchor="w", padx=5)
         self.hash_progress_bar = ctk.CTkProgressBar(self.hash_progress_frame, height=10)
         self.hash_progress_bar.pack(fill="x", padx=5, pady=(2, 0))
+        ctk.CTkLabel(self.hash_progress_frame, text="Passo 1: calcolo l'hash di ogni file, uno alla volta. Il confronto tra le cartelle avviene alla fine, per percorso.",
+                     font=ctk.CTkFont(size=11), text_color="gray", anchor="w", justify="left", wraplength=700).pack(anchor="w", padx=5, pady=(2, 0))
         self.hash_progress_bar.set(0)
 
         # A single master scrollable frame to hold all tables/sections
@@ -2311,14 +2321,37 @@ class DatariumApp(ctk.CTk):
                 return hashlib.sha256()
         return hashlib.sha256()
 
-    def compute_hash(self, file_path, algo="SHA-256", progress_cb=None):
-        """Hash di un file con buffer riutilizzato da 8 MB (nessuna allocazione per blocco).
-        progress_cb(byte_letti_nel_blocco) viene chiamato dopo ogni lettura."""
+    def compute_hash(self, file_path, algo="SHA-256", progress_cb=None, sampled=False):
+        """Hash di un file con buffer riutilizzato da 8 MB. Con sampled=True legge solo 3 blocchi
+        (inizio, meta', fine) piu' la dimensione: molto piu' veloce sui file enormi ma una
+        VERIFICA PARZIALE (il risultato e' prefissato 'q-' per non confonderlo con un hash pieno)."""
         try:
             h = self._make_hasher(algo)
-            buf = bytearray(8 * 1024 * 1024)
+            CH = 8 * 1024 * 1024
+            buf = bytearray(CH)
             view = memoryview(buf)
             with open(file_path, "rb", buffering=0) as f:
+                if sampled:
+                    size = os.fstat(f.fileno()).st_size
+                    h.update(str(size).encode())
+                    if size <= 3 * CH:
+                        offsets = [0]
+                        limits = [size]
+                    else:
+                        offsets = [0, max(0, size // 2 - CH // 2), size - CH]
+                        limits = [CH, CH, CH]
+                    for off, lim in zip(offsets, limits):
+                        f.seek(off)
+                        left = lim
+                        while left > 0:
+                            n = f.readinto(memoryview(buf)[:min(CH, left)])
+                            if not n:
+                                break
+                            h.update(view[:n])
+                            left -= n
+                            if progress_cb:
+                                progress_cb(n)
+                    return "q-" + h.hexdigest()
                 if hasattr(os, "posix_fadvise"):
                     try:
                         os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_SEQUENTIAL)
@@ -2736,6 +2769,8 @@ class DatariumApp(ctk.CTk):
         self.hash_progress_bar.set(0)
         self.hash_status_lbl.configure(text="Preparazione calcolo hash...")
 
+        self._hash_quick = self.hash_quick_mode.get()
+        self._hash_shutdown = self.hash_shutdown_after.get()
         threading.Thread(target=self._run_hash_verification_bg, args=(files_to_hash, sd_list, algo), daemon=True).start()
 
     def _update_hash_progress(self, idx, total, name, bytes_done=None, total_bytes=None, elapsed=None):
@@ -2771,6 +2806,13 @@ class DatariumApp(ctk.CTk):
             self.hash_status_lbl.configure(text=" · ".join(parts), wraplength=700, justify="left")
 
     def _run_hash_verification_bg(self, files_to_hash, sd_list, algo):
+        import system_actions
+        # PC sveglio per tutta la durata (calcoli da decine di minuti o di ore: altrimenti la
+        # sospensione notturna li interrompe), come gia' in Offload.
+        sleep_guard = system_actions.SleepInhibitor()
+        sleep_guard.__enter__()
+        quick = bool(getattr(self, "_hash_quick", False))
+        shutdown_after = bool(getattr(self, "_hash_shutdown", False))
         try:
             import time
             import threading as _th
@@ -2808,7 +2850,9 @@ class DatariumApp(ctk.CTk):
                     sizes.append(os.path.getsize(t_[0]))
                 except Exception:
                     sizes.append(0)
-            total_bytes = sum(sizes)
+            # Byte realmente da leggere (in modalita' rapida sono solo i blocchi campionati)
+            work = [min(s, 3 * 8 * 1024 * 1024) if quick else s for s in sizes]
+            total_bytes = sum(work)
 
             # 2. Raggruppa per disco fisico: gruppi su dischi diversi girano IN PARALLELO
             #    (il tempo totale e' quello del disco piu' lento, non la somma); file sullo
@@ -2821,10 +2865,14 @@ class DatariumApp(ctk.CTk):
             groups = {}
             for idx, t_ in enumerate(tasks):
                 groups.setdefault(_dev(t_[0]), []).append(idx)
+            # Stesso percorso relativo = file uno accanto all'altro: nel confronto di due cartelle
+            # si vede lo stesso nome due volte di fila (A e B) invece di nomi che "saltano".
+            for g_ in groups.values():
+                g_.sort(key=lambda i_: (tasks[i_][3].lower(), str(tasks[i_][2])))
 
             out = [None] * total
             lock = _th.Lock()
-            state = {"bytes": 0, "done": 0, "last_ui": 0.0}
+            state = {"bytes": 0, "done": 0, "last_ui": 0.0, "cur": {}}
             start_time = time.time()
 
             def _push_ui(name, force=False):
@@ -2834,8 +2882,11 @@ class DatariumApp(ctk.CTk):
                         return
                     state["last_ui"] = now
                     bd, dn = state["bytes"], state["done"]
+                    state["cur"][_th.get_ident()] = name
+                    shown = list(dict.fromkeys(state["cur"].values()))
+                disp = shown[0] if len(shown) == 1 else " | ".join(shown)
                 el = now - start_time
-                self.after(0, lambda: self._update_hash_progress(min(dn, total - 1), total, name, bd, total_bytes, el))
+                self.after(0, lambda: self._update_hash_progress(min(dn, total - 1), total, disp, bd, total_bytes, el))
 
             def _worker(indices):
                 for idx in indices:
@@ -2847,7 +2898,7 @@ class DatariumApp(ctk.CTk):
                             state["bytes"] += n
                         _push_ui(name)
 
-                    hash_val = self.compute_hash(p, algo, progress_cb=_cb)
+                    hash_val = self.compute_hash(p, algo, progress_cb=_cb, sampled=quick)
                     ext = os.path.splitext(p)[1].upper().replace('.', '')
                     out[idx] = {
                         "name": name, "path": p, "type": ext if ext else "FILE",
@@ -2868,9 +2919,27 @@ class DatariumApp(ctk.CTk):
                     self.recent_hash_files = self.recent_hash_files[:10]
             self.after(0, self.update_recent_hash_ui)
 
-            self.hash_last_algo = algo
+            self.hash_last_algo = algo + (" (verifica rapida)" if quick else "")
             self.after(0, self._render_hash_results, results)
+
+            # Spegnimento a fine lavoro: solo se le due cartelle non presentano differenze
+            # (altrimenti l'utente deve poter vedere il risultato prima).
+            if shutdown_after:
+                comp = self.build_hash_comparison(results)
+                clean = (comp is None and not any(str(r.get("hash", "")).startswith("Error") for r in results)) or (
+                    comp is not None and not (comp["different"] or comp["only_a"] or comp["only_b"] or comp["moved"]))
+                if clean:
+                    ok_sd, msg_sd, sd_handle = system_actions.shutdown_computer(60)
+                    if ok_sd:
+                        self._pending_shutdown_handle = sd_handle
+                        self.after(0, lambda: self._show_shutdown_countdown("Verifica hash completata."))
+                else:
+                    from tkinter import messagebox
+                    self.after(0, lambda: messagebox.showwarning(
+                        "Spegnimento annullato",
+                        "Il confronto ha rilevato differenze o errori: lo spegnimento automatico e' stato annullato per farti controllare il risultato."))
         finally:
+            sleep_guard.__exit__(None, None, None)
             self.is_scanning = False
             self.after(0, lambda: self.set_sidebar_state("normal"))
 
@@ -4133,7 +4202,7 @@ class DatariumApp(ctk.CTk):
 
         threading.Thread(target=offload_bg, daemon=True).start()
 
-    def _show_shutdown_countdown(self):
+    def _show_shutdown_countdown(self, headline="Offload completato."):
         """Popup non bloccante con pulsante per annullare lo spegnimento automatico
         programmato a fine Offload (margine di 60s prima che avvenga davvero)."""
         from tkinter import messagebox
@@ -4141,7 +4210,7 @@ class DatariumApp(ctk.CTk):
         win.title("Spegnimento programmato")
         win.geometry("380x150")
         win.attributes("-topmost", True)
-        ctk.CTkLabel(win, text="Offload completato.\nIl PC si spegnerà tra 60 secondi.",
+        ctk.CTkLabel(win, text=f"{headline}\nIl PC si spegnerà tra 60 secondi.",
                      font=ctk.CTkFont(weight="bold")).pack(pady=(20, 10))
 
         def do_cancel():
