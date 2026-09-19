@@ -3037,13 +3037,62 @@ class DatariumApp(ctk.CTk):
                     return
 
                 # Group files into albums based on AI/metadata
+                # 1) documenti (pdf/docx/txt) letti in PARALLELO; foto/video in sequenza (un solo
+                #    modello vision in memoria). 2) nome album per file, riusando quello gia'
+                #    dato a un contesto identico (frame/descrizioni uguali = stessa risposta).
+                # Avanzamento con percentuale ed ETA reali sul pulsante.
+                import concurrent.futures
+                total_steps = max(1, 2 * len(valid_files))
+                state = {"done": 0, "t0": time.time(), "last": 0.0}
+
+                def _tick(label):
+                    state["done"] += 1
+                    now = time.time()
+                    if now - state["last"] < 0.4 and state["done"] < total_steps:
+                        return
+                    state["last"] = now
+                    frac = state["done"] / total_steps
+                    el = max(now - state["t0"], 0.001)
+                    eta = int(el * (1 - frac) / frac) if frac > 0.02 else None
+                    eta_txt = (f" · ETA {eta // 60}m {eta % 60}s" if eta and eta >= 60 else (f" · ETA {eta}s" if eta is not None else ""))
+                    txt = f"{label} {int(frac * 100)}%{eta_txt}"
+                    self.after(0, lambda tx=txt: self.btn_confirm_at.configure(text=tx))
+
+                doc_exts = ('.pdf', '.docx', '.doc', '.txt')
+                contexts = {}
+                doc_files = [p for p in valid_files if os.path.splitext(p)[1].lower() in doc_exts]
+                media_files = [p for p in valid_files if os.path.splitext(p)[1].lower() not in doc_exts]
+
+                if doc_files:
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
+                        futs = {ex.submit(self.ai.extract_context, p): p for p in doc_files}
+                        for fut in concurrent.futures.as_completed(futs):
+                            try:
+                                contexts[futs[fut]] = fut.result()
+                            except Exception:
+                                contexts[futs[fut]] = ""
+                            _tick("👁️ Analisi")
+                for p in media_files:
+                    try:
+                        # Il modello vision e' gia' caricato sopra: extract_context descrive anche i
+                        # video (frame estratto via ffmpeg); senza frame usa nome/cartelle/ffprobe.
+                        contexts[p] = self.ai.extract_context(p)
+                    except Exception:
+                        contexts[p] = ""
+                    _tick("👁️ Analisi")
+
                 albums = {}
+                album_cache = {}
                 for path in valid_files:
                     try:
-                        # Il modello vision e' gia' caricato sopra: extract_context ora descrive
-                        # anche i video (frame estratto via ffmpeg), niente piu' placeholder fisso.
-                        context = self.ai.extract_context(path)
-                        album_name = self.ai.get_album_name(context) if context else "Varie"
+                        context = contexts.get(path) or ""
+                        if not context:
+                            album_name = "Varie"
+                        elif context in album_cache:
+                            album_name = album_cache[context]
+                        else:
+                            album_name = self.ai.get_album_name(context)
+                            album_cache[context] = album_name
                         # Clean filename characters
                         for ch in ['\\', '/', ':', '*', '?', '"', '<', '>', '|']:
                             album_name = album_name.replace(ch, "")
@@ -3051,6 +3100,7 @@ class DatariumApp(ctk.CTk):
                         albums.setdefault(album_name, []).append(path)
                     except Exception:
                         albums.setdefault("Ricordi", []).append(path)
+                    _tick("🏷️ Tag")
 
                 self.current_albums = albums
 

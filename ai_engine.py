@@ -955,6 +955,42 @@ class AIEngine:
         )
         return response['choices'][0]['message']['content'].strip()
 
+    def _video_hint(self, file_path):
+        """Testo descrittivo per un video senza fotogramma: nome file, ultime 2 cartelle e,
+        se ffprobe riesce a leggerlo, durata/risoluzione/codec. Non solleva mai."""
+        parts = [f"nome file: {os.path.splitext(os.path.basename(file_path))[0]}"]
+        try:
+            folders = [p for p in os.path.normpath(os.path.dirname(file_path)).split(os.sep)[-2:] if p]
+            if folders:
+                parts.append("cartelle: " + "/".join(folders))
+        except Exception:
+            pass
+        try:
+            import subprocess
+            ok, ffmpeg_bin = self.check_ffmpeg()
+            if ok:
+                exe = "ffprobe.exe" if os.name == "nt" else "ffprobe"
+                ffprobe = os.path.join(os.path.dirname(ffmpeg_bin), exe)
+                if os.path.exists(ffprobe):
+                    out = subprocess.check_output(
+                        [ffprobe, "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=codec_name,width,height:format=duration",
+                         "-of", "json", file_path],
+                        stderr=subprocess.DEVNULL, timeout=8,
+                        creationflags=(0x08000000 if os.name == "nt" else 0))
+                    info = json.loads(out.decode("utf-8", errors="ignore"))
+                    st = (info.get("streams") or [{}])[0]
+                    if st.get("width") and st.get("height"):
+                        parts.append(f"risoluzione {st['width']}x{st['height']}")
+                    if st.get("codec_name"):
+                        parts.append(f"codec {st['codec_name']}")
+                    dur = float((info.get("format") or {}).get("duration") or 0)
+                    if dur > 0:
+                        parts.append(f"durata {int(dur // 60)}m{int(dur % 60):02d}s")
+        except Exception:
+            pass
+        return "; ".join(parts)
+
     def _extract_video_frame(self, video_path):
         """Estrae un frame rappresentativo (10% della durata, mai oltre i primi 20s) come
         immagine JPEG temporanea via FFMPEG. Ritorna il percorso del frame o None se FFMPEG
@@ -1113,10 +1149,14 @@ class AIEngine:
                             pass
 
             if not context_res:
+                # Nessun fotogramma (es. BRAW/R3D non decodificabili da ffmpeg): al modello si
+                # danno nome file, cartelle superiori e dati tecnici, cosi' ha comunque
+                # qualcosa di significativo da cui dedurre il tema.
+                hint = self._video_hint(file_path)
                 if metadata:
-                    context_res = f"VIDEO_METADATA: {metadata}"
+                    context_res = f"VIDEO_METADATA: {hint}. Dati: {metadata}"
                 else:
-                    context_res = f"VIDEO_FILE: {os.path.basename(file_path)}"
+                    context_res = f"VIDEO_FILE: {hint}"
 
         if context_res and sidecar_str:
             context_res += sidecar_str
@@ -1479,6 +1519,7 @@ class AIEngine:
         messages = [
             {"role": "system", "content": (
                 "Sei un assistente esperto. Ritorna solo un nome di album o tema estremamente sintetico (massimo 1 o 2 parole in ITALIANO) in base alla descrizione.\n"
+                "Se la descrizione contiene solo il nome del file e le cartelle, deduci il tema da quelli.\n"
                 "Non usare elenchi numerati o spiegazioni. Rispondi solo con il nome del tema."
             )},
             {"role": "user", "content": f"Descrizione: {context}\nTema/Album:"}
