@@ -323,7 +323,7 @@ class DatariumApp(ctk.CTk):
         self.sync_deep = ctk.BooleanVar(value=False)
         self.sync_verify = ctk.BooleanVar(value=True)
         self.sync_exclude = ctk.StringVar(value="")
-        self.sync_mode_var = ctk.StringVar(value="Aggiorna A ▶ B (copia il nuovo, non elimina)")
+        self.sync_mode_var = ctk.StringVar(value="Bidirezionale (vince il file più recente)")
         self.sync_show = {k: ctk.BooleanVar(value=(k != "identical")) for k in ("only_a", "only_b", "different", "identical")}
         self.sync_rows = []
         self.sync_busy = False
@@ -4338,8 +4338,11 @@ class DatariumApp(ctk.CTk):
         self.btn_sync_go = ctk.CTkButton(bot, text="⚡ Sincronizza", height=42, width=190, fg_color="#10b981", hover_color="#059669",
                                          font=ctk.CTkFont(weight="bold", size=14), state="disabled", command=self.sync_apply)
         self.btn_sync_go.pack(side="left")
-        self.sync_summary_lbl = ctk.CTkLabel(bot, text="", font=ctk.CTkFont(size=12), anchor="w", justify="left", wraplength=560)
-        self.sync_summary_lbl.pack(side="left", padx=14)
+        self.sync_summary_lbl = ctk.CTkLabel(page, text="Premi 🔍 Confronta per analizzare i due dischi.", font=ctk.CTkFont(size=12), anchor="w", justify="left", wraplength=780)
+        self.sync_summary_lbl.pack(fill="x", pady=(0, 4), before=bot)
+        for txt_, dir_ in (("Tutto A ▶ B", "a2b"), ("Tutto B ▶ A", "b2a"), ("Ripristina", "reset")):
+            ctk.CTkButton(bot, text=txt_, width=110, height=32, fg_color="transparent", border_width=1,
+                          text_color=("gray10", "gray90"), command=lambda d=dir_: self._sync_bulk(d)).pack(side="left", padx=(8, 0))
 
     def _sync_pick(self, var):
         folder = filedialog.askdirectory(title="Seleziona disco o cartella")
@@ -4427,7 +4430,18 @@ class DatariumApp(ctk.CTk):
             parts.append(f"◀ {s['b2a']} B→A")
         if s["del"]:
             parts.append(f"🗑 {s['del']} nel cestino")
-        txt = " · ".join(parts) if parts else "Nessuna azione prevista"
+        if parts:
+            txt = " · ".join(parts)
+        elif not self.sync_rows:
+            txt = "Premi 🔍 Confronta per analizzare i due dischi."
+        else:
+            c = self._sync_counts()
+            diffs = c["only_a"] + c["only_b"] + c["different"]
+            if diffs == 0:
+                txt = "Nulla da sincronizzare: i due dischi sono identici."
+            else:
+                txt = (f"Nessuna azione selezionata per le {diffs} differenze, quindi «Sincronizza» resta spento. "
+                       "Cambia modalità, usa «Tutto A ▶ B» / «Tutto B ▶ A», oppure clicca ⏸ sulle righe per scegliere cosa copiare.")
         if n:
             txt += f"  ({disk_sync.fmt_size(s['bytes'])} da copiare"
             txt += f", {s['overwrite']} sostituzioni)" if s["overwrite"] else ")"
@@ -4480,6 +4494,22 @@ class DatariumApp(ctk.CTk):
             ctk.CTkLabel(self.sync_scroll, text=f"... e altri {len(shown) - self.SYNC_MAX_ROWS} file non mostrati (la sincronizzazione li include comunque).",
                          text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=8)
         self._sync_refresh_summary()
+
+    def _sync_bulk(self, direction):
+        """Imposta l'azione di TUTTE le righe: A>B, B>A oppure torna ai valori della modalita'."""
+        import disk_sync
+        if not self.sync_rows:
+            return
+        if direction == "reset":
+            self._sync_apply_mode()
+            return
+        for r in self.sync_rows:
+            st = r["status"]
+            if direction == "a2b":
+                r["action"] = disk_sync.A2B if st in (disk_sync.ONLY_A, disk_sync.DIFFERENT) else disk_sync.SKIP
+            else:
+                r["action"] = disk_sync.B2A if st in (disk_sync.ONLY_B, disk_sync.DIFFERENT) else disk_sync.SKIP
+        self._sync_render()
 
     def _sync_cycle_action(self, row, btn):
         """Click sul pulsante di una riga: passa alla prossima azione consentita."""
