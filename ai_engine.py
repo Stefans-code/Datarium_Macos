@@ -32,10 +32,76 @@ _MODEL_SIZE_HINTS_MB = {
     "Argus-Maior-text-Q4_K_M.gguf": 2100,
     "Argus-Maior-vision-Q4_K_M.gguf": 4680,
     "Argus-Maior-vision-mmproj.gguf": 1350,
-    "Argus-Minor-text-Q2_K.gguf": 1380,
+    "Argus-Minor-text.gguf": 1060,
     "Argus-Minor-vision.gguf": 2840,
     "Argus-Minor-vision-mmproj.gguf": 910,
+    "dizionario_app.json": 1,
 }
+
+# File di modelli precedenti da cancellare quando il sostituto e' installato e verificato
+_FILE_OBSOLETI = {"Argus-Minor-text-Q2_K.gguf": "Argus-Minor-text.gguf"}
+# Dizionario inglese -> italiano usato per suggerire le traduzioni al modello di testo
+DIZIONARIO = ("Stegeno/Nexflamma_Models", "dizionario_app.json", "dizionario_app.json")
+
+# --- Suggerimenti di traduzione per Argus Minor ---
+# Il modello di testo leggero non puo' ricordare decine di migliaia di parole: prima di chiamarlo
+# si cercano nel dizionario le parole inglesi della descrizione (Moondream scrive in inglese) e si
+# aggiungono al prompt come "Traduzioni: dragonfly = libellula; wheelbarrow = carriola".
+# Il modello e' addestrato esattamente su questo formato: non cambiarlo.
+_SUGG_MAX = 8
+# parole troppo generiche: non servono come suggerimento
+_SUGG_IGNORA = {"image", "photo", "picture", "background", "foreground", "view", "scene", "close", "shows", "show",
+                "side", "top", "bottom", "left", "right", "front", "back", "middle", "center", "part", "area", "light",
+                "color", "colors", "day", "time", "way", "lot", "kind", "type", "thing", "things", "metadata",
+                "model", "make", "software"}
+
+
+def _sugg_singolare(w):
+    if len(w) > 4 and w.endswith("ies"):
+        return w[:-3] + "y"
+    if len(w) > 4 and w.endswith(("ches", "shes", "xes", "sses")):
+        return w[:-2]
+    if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+        return w[:-1]
+    return w
+
+
+def _sugg_trova(testo, dizionario, massimo=_SUGG_MAX):
+    """Voci del dizionario presenti nel testo (prima le espressioni di 3 e 2 parole, poi le singole),
+    nell'ordine in cui compaiono, senza doppioni: [(inglese, italiano), ...]"""
+    # solo la descrizione: niente metadati EXIF ("Model": ...) ne' trascrizioni
+    testo = re.sub(r"\[(Metadata|Trascrizione)[^\]]*\]", " ", testo)
+    parole = re.findall(r"[a-z]+(?:-[a-z]+)?", testo.lower())
+    usate = [False] * len(parole)
+    trovate = []
+    for n in (3, 2, 1):
+        for i in range(len(parole) - n + 1):
+            if any(usate[i:i + n]):
+                continue
+            chiave = " ".join(parole[i:i + n])
+            voce = dizionario.get(chiave)
+            if voce is None:
+                chiave = " ".join(parole[i:i + n - 1] + [_sugg_singolare(parole[i + n - 1])])
+                voce = dizionario.get(chiave)
+            if voce and (n > 1 or chiave not in _SUGG_IGNORA):
+                trovate.append((i, chiave, voce))
+                for j in range(i, i + n):
+                    usate[j] = True
+    trovate.sort()
+    visti, out = set(), []
+    for _, en, it in trovate:
+        if en not in visti:
+            visti.add(en)
+            out.append((en, it))
+    return out[:massimo]
+
+
+def _sugg_riga(testo, dizionario):
+    """La riga da aggiungere al prompt (vuota se non c'e' niente da suggerire)."""
+    if not testo or not dizionario:
+        return ""
+    s = _sugg_trova(testo, dizionario)
+    return ("Traduzioni: " + "; ".join(f"{en} = {it.replace('_', ' ').lower()}" for en, it in s)) if s else ""
 
 
 def _incomplete_bytes(dl_dir):
@@ -305,6 +371,8 @@ class AIEngine:
         # non raggiungibile (offline/errore): in quel caso il controllo di
         # integrita' viene saltato, non blocca mai l'utente.
         self._models_manifest = None
+        # Dizionario inglese -> italiano per i suggerimenti ad Argus Minor (vuoto = nessun suggerimento)
+        self._dizionario = {}
 
         # --- Configurazione modelli ARGUS: vedi self.PROFILES qui sotto ---
         
@@ -316,7 +384,10 @@ class AIEngine:
         self.PROFILES = {
             # ARGUS MINOR - Leggero. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
             "slim": {
-                "text":   ("Stegeno/Nexflamma_Models", "Argus-Minor-text-Q2_K.gguf",     "Argus-Minor-text-Q2_K.gguf"),
+                "text":   ("Stegeno/Nexflamma_Models", "Argus-Minor-text.gguf",          "Argus-Minor-text.gguf"),
+                # Vecchio nome: un'installazione esistente resta riconosciuta come "slim"
+                # finche' il nuovo modello non viene scaricato (poi il vecchio viene cancellato)
+                "text_legacy": "Argus-Minor-text-Q2_K.gguf",
                 "vision": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision.gguf",        "Argus-Minor-vision.gguf"),
                 "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision-mmproj.gguf", "Argus-Minor-vision-mmproj.gguf"),
                 "handler": "moondream",
@@ -704,6 +775,10 @@ class AIEngine:
 
             # Ogni voce = (repo, nome_originale_HF, nome_ARGUS_locale)
             tasks = [prof["text"]]
+            # Il dizionario serve solo al modello di testo Minor (addestrato con i suggerimenti
+            # di traduzione), anche senza visione: nome e cartella dei documenti
+            if quality == "slim":
+                tasks.append(DIZIONARIO)
             if vision_mode:
                 tasks.append(prof["vision"])
                 tasks.append(prof["mmproj"])
@@ -713,6 +788,11 @@ class AIEngine:
             manifest = self._fetch_models_manifest()
 
             for repo, src_name, argus_name in tasks:
+                # Se non si riesce a scaricare si va avanti lo stesso: il dizionario e' un aiuto,
+                # e al posto del nuovo Minor si usa il vecchio finche' non arriva
+                opzionale = (argus_name == DIZIONARIO[2]
+                             or (argus_name == prof["text"][2] and prof.get("text_legacy")
+                                 and self.resolve_model_file(prof["text_legacy"])))
                 expected_sha = (manifest.get(argus_name) or {}).get("sha256")
                 existing = self.resolve_model_file(argus_name)
                 if existing:
@@ -765,6 +845,8 @@ class AIEngine:
                                 os.remove(dst_path)
                             except Exception:
                                 pass
+                            if opzionale:
+                                continue
                             return False, f"Il file scaricato ({argus_name}) non corrisponde al checksum atteso: download corrotto."
                         continue  # file pronto, integro, e gia' col nome ARGUS: prossimo modello
                     if progress_callback:
@@ -788,6 +870,8 @@ class AIEngine:
                         stop_event.set()
                         monitor.join(timeout=1)
                 if last_err is not None or src_path is None:
+                    if opzionale:
+                        continue
                     return False, f"Network Error: {str(last_err)}"
                 # Rinomina il file scaricato col nome ARGUS
                 try:
@@ -795,6 +879,8 @@ class AIEngine:
                         if os.path.exists(dst_path): os.remove(dst_path)
                         os.replace(src_path, dst_path)
                 except Exception as e:
+                    if opzionale:
+                        continue
                     return False, f"Rename Error: {str(e)}"
 
                 if expected_sha and not self._is_model_verified(dst_path, expected_sha, progress_callback):
@@ -802,7 +888,28 @@ class AIEngine:
                         os.remove(dst_path)
                     except Exception:
                         pass
+                    if opzionale:
+                        continue
                     return False, f"Il file scaricato ({argus_name}) non corrisponde al checksum atteso: download corrotto."
+
+            # Il nuovo modello e' installato e verificato: il vecchio non serve piu'
+            for vecchio, nuovo in _FILE_OBSOLETI.items():
+                if self.resolve_model_file(nuovo):
+                    for cartella in {self.get_models_dir(), self.get_models_dir(force_writable=True)}:
+                        p = os.path.join(cartella, vecchio)
+                        try:
+                            if os.path.exists(p):
+                                os.remove(p)
+                                if os.path.exists(p + ".verified.json"):
+                                    os.remove(p + ".verified.json")
+                                if progress_callback:
+                                    progress_callback(f"Rimosso il vecchio modello {vecchio}")
+                        except Exception:
+                            pass  # cartella non scrivibile (es. Program Files): si riprova al prossimo avvio
+            if quality == "slim":
+                self._carica_dizionario()
+            else:
+                self._dizionario = {}   # Maior non e' addestrato con i suggerimenti
 
             if progress_callback: progress_callback("Caricamento... Attendere.")
 
@@ -813,7 +920,9 @@ class AIEngine:
 
                 n_threads = os.cpu_count() or 4
                 final_dir = self.get_models_dir()
-                t_path = self.resolve_model_file(prof["text"][2]) or os.path.join(final_dir, prof["text"][2])
+                t_path = (self.resolve_model_file(prof["text"][2])
+                          or (prof.get("text_legacy") and self.resolve_model_file(prof["text_legacy"]))
+                          or os.path.join(final_dir, prof["text"][2]))
                 v_path = self.resolve_model_file(prof["vision"][2]) or os.path.join(final_dir, prof["vision"][2])
                 p_path = self.resolve_model_file(prof["mmproj"][2]) or os.path.join(final_dir, prof["mmproj"][2])
 
@@ -1171,6 +1280,22 @@ class AIEngine:
 
         return context_res
 
+    def _carica_dizionario(self):
+        """Carica il dizionario dei suggerimenti, solo se c'e' il nuovo Argus Minor (addestrato a
+        usarli). Senza dizionario il modello funziona lo stesso, solo con meno parole."""
+        self._dizionario = {}
+        try:
+            if not self.resolve_model_file(self.PROFILES["slim"]["text"][2]):
+                return
+            p = self.resolve_model_file(DIZIONARIO[2])
+            if p:
+                with open(p, encoding="utf-8") as f:
+                    diz = json.load(f)
+                if isinstance(diz, dict):
+                    self._dizionario = diz
+        except Exception:
+            self._dizionario = {}
+
     def _profile_text_present(self, prof):
         """True se il modello di testo del profilo c'e' (anche col vecchio nome Minor Q2_K)."""
         return bool(self.resolve_model_file(prof["text"][2])
@@ -1212,7 +1337,7 @@ class AIEngine:
         """Modello da usare per i compiti di SOLO TESTO (tassonomia, nomi, album).
         Il profilo leggero carica per le foto Moondream: un captioner, con un template di
         chat pensato per descrivere immagini, che segue male le istruzioni testuali. In quel
-        caso si carica (una volta) il modello di testo Qwen2.5-3B e si usa quello.
+        caso si carica (una volta) il modello di testo Argus Minor e si usa quello.
         Il profilo Pesante usa gia' Qwen2.5-VL, valido anche per il testo."""
         if not (self.is_vision and getattr(self, "_active_handler", None) == "moondream"):
             return self.llm
@@ -1386,7 +1511,9 @@ class AIEngine:
 
         context_str = f"Descrizione: {context}" if context else ""
         taxo_str = f"Tassonomia consigliata: {taxonomy}" if taxonomy else ""
-        
+        sugg = _sugg_riga(context, self._dizionario)
+        sugg_str = f"{sugg}\n" if sugg else ""
+
         # Rimosso qualsiasi elenco numerato per evitare il bug di "1_..._2_..._3_" dei modelli
         messages = [
             {"role": "system", "content": (
@@ -1406,6 +1533,7 @@ class AIEngine:
                 f"Original Name: {original_name}\n"
                 f"File Type: {category}\n"
                 f"{context_str}\n"
+                f"{sugg_str}"
                 f"{taxo_str}\n\n"
                 "Nuovo percorso completo (Categoria/Sottocategoria/Nome_Descrittivo):"
             )}
@@ -1428,6 +1556,7 @@ class AIEngine:
                         f"File: {os.path.splitext(original_name)[0]}\n"
                         f"Tipo: {category}\n"
                         f"{context_str}\n"
+                        f"{sugg_str}"
                         f"{taxo_str}\n\n"
                         "Cartella (Categoria/Sottocategoria):"
                     )}
@@ -1525,14 +1654,16 @@ class AIEngine:
             if context.startswith(prefix):
                 context = context[len(prefix):]
                 break
-                
+        sugg = _sugg_riga(context, self._dizionario)
+        sugg_str = f"{sugg}\n" if sugg else ""
+
         messages = [
             {"role": "system", "content": (
                 "Sei un assistente esperto. Ritorna solo un nome di album o tema estremamente sintetico (massimo 1 o 2 parole in ITALIANO) in base alla descrizione.\n"
                 "Se la descrizione contiene solo il nome del file e le cartelle, deduci il tema da quelli.\n"
                 "Non usare elenchi numerati o spiegazioni. Rispondi solo con il nome del tema."
             )},
-            {"role": "user", "content": f"Descrizione: {context}\nTema/Album:"}
+            {"role": "user", "content": f"Descrizione: {context}\n{sugg_str}Tema/Album:"}
         ]
         
         try:
