@@ -33,7 +33,7 @@ _MODEL_SIZE_HINTS_MB = {
     "Argus-Maior-vision-Q4_K_M.gguf": 4680,
     "Argus-Maior-vision-mmproj.gguf": 1350,
     "Argus-Minor-text.gguf": 1060,
-    "Argus-Minor-vision.gguf": 2840,
+    "Argus-Minor-vision.gguf": 1000,
     "Argus-Minor-vision-mmproj.gguf": 910,
     "dizionario_app.json": 1,
 }
@@ -102,6 +102,30 @@ def _sugg_riga(testo, dizionario):
         return ""
     s = _sugg_trova(testo, dizionario)
     return ("Traduzioni: " + "; ".join(f"{en} = {it.replace('_', ' ').lower()}" for en, it in s)) if s else ""
+
+
+# --- Pulizia della descrizione del modello visivo ---
+# I modelli piccoli a volte ripetono la stessa frase due volte o chiudono con "There are no
+# people" anche quando hanno appena descritto una persona: la frase ripetuta spreca token, la
+# contraddizione confonde il modello di testo che sceglie cartella e nome.
+_DESC_PERSONE = re.compile(r"\b(person|people|man|men|woman|women|boy|girl|child|children|kid|kids|"
+                           r"player|players|guy|lady|someone|family|crowd)\b", re.I)
+_DESC_NEGAZIONE = re.compile(r"\b(no|not|without|nor|none)\b", re.I)
+
+
+def _pulisci_descrizione(testo):
+    frasi = [f.strip() for f in re.split(r"(?<=[.!?])\s+", (testo or "").strip()) if f.strip()]
+    visti, uniche = set(), []
+    for f in frasi:
+        chiave = re.sub(r"^(the image shows|the image is|this image shows)\s+", "",
+                        re.sub(r"[^a-z0-9 ]", "", f.lower())).strip()
+        if chiave and chiave not in visti:
+            visti.add(chiave)
+            uniche.append(f)
+    ci_sono_persone = any(_DESC_PERSONE.search(f) and not _DESC_NEGAZIONE.search(f) for f in uniche)
+    if ci_sono_persone:
+        uniche = [f for f in uniche if not (_DESC_NEGAZIONE.search(f) and _DESC_PERSONE.search(f))]
+    return " ".join(uniche) if uniche else (testo or "").strip()
 
 
 def _incomplete_bytes(dl_dir):
@@ -1062,7 +1086,7 @@ class AIEngine:
             max_tokens=150,
             temperature=0.1
         )
-        return response['choices'][0]['message']['content'].strip()
+        return _pulisci_descrizione(response['choices'][0]['message']['content'])
 
     def _video_hint(self, file_path):
         """Testo descrittivo per un video senza fotogramma: nome file, ultime 2 cartelle e,
