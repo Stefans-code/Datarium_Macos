@@ -50,6 +50,7 @@ import culling
 import move_journal
 import xmp_sidecar
 import raw_preview
+import ffmpeg_tools
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
@@ -902,12 +903,12 @@ class DatariumApp(ctk.CTk):
         # Configurazione FFMPEG Box
         ff_box = ctk.CTkFrame(page, corner_radius=10)
         ff_box.pack(fill="x", padx=10, pady=5)
-        ctk.CTkLabel(ff_box, text="Configurazione FFMPEG (Proxy Video)", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        ctk.CTkLabel(ff_box, text="FFMPEG (proxy e analisi video) — incluso in Datarium, nessuna installazione necessaria", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
         
         ff_row = ctk.CTkFrame(ff_box, fg_color="transparent")
         ff_row.pack(fill="x", padx=20, pady=5)
         
-        self.ffmpeg_path_entry = ctk.CTkEntry(ff_row, width=450, placeholder_text="Lascia vuoto per cercare nel PATH...")
+        self.ffmpeg_path_entry = ctk.CTkEntry(ff_row, width=450, placeholder_text="Lascia vuoto per usare ffmpeg incluso in Datarium")
         if self.ffmpeg_path:
             self.ffmpeg_path_entry.insert(0, self.ffmpeg_path)
         self.ffmpeg_path_entry.pack(side="left", padx=(0, 10), fill="x", expand=True)
@@ -1306,7 +1307,7 @@ class DatariumApp(ctk.CTk):
         
         ok, msg = self.ai.check_ffmpeg(path if path else None)
         if ok:
-            self.ffmpeg_status_lbl.configure(text=f"✓ FFMPEG Rilevato con successo: {msg}", text_color=ergo.SUCCESS)
+            self.ffmpeg_status_lbl.configure(text=("✓ Uso FFMPEG incluso in Datarium" if ffmpeg_tools.is_bundled(msg) else f"✓ FFMPEG rilevato: {msg}"), text_color=ergo.SUCCESS)
             if not silent:
                 # l'esito e' gia' scritto sotto il campo: niente popup modale da chiudere
                 ergo.toast(self, "FFMPEG verificato correttamente")

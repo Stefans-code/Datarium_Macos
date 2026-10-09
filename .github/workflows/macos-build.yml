@@ -106,9 +106,31 @@ jobs:
         ${{ matrix.prefix }} pip install -r requirements.txt --no-cache-dir
         ${{ matrix.prefix }} pip install pyinstaller cython --no-cache-dir
 
+    - name: FFmpeg incluso (build Martin Riedl firmata Developer ID, hash verificato)
+      run: |
+        set -e
+        if [ "${{ matrix.arch }}" = "AppleSilicon" ]; then
+          URL=https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip
+          SHA=c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924
+        else
+          URL=https://ffmpeg.martin-riedl.de/download/macos/amd64/1789931006_9.0.2/ffmpeg.zip
+          SHA=7c6b4125b191cbf773832dc51f424cf2b6bb7da43007d1e066f95909e47cacd4
+        fi
+        curl -fsSL --retry 3 -o "$RUNNER_TEMP/ffmpeg.zip" "$URL"
+        echo "$SHA  $RUNNER_TEMP/ffmpeg.zip" | shasum -a 256 -c -
+        rm -rf ffmpeg && mkdir ffmpeg
+        unzip -o "$RUNNER_TEMP/ffmpeg.zip" -d ffmpeg
+        chmod +x ffmpeg/ffmpeg
+        cp ffmpeg_LICENSE.txt ffmpeg/LICENSE.txt
+        cp ffmpeg_README.txt ffmpeg/README.txt
+        lipo -info ffmpeg/ffmpeg
+        codesign --verify --verbose ffmpeg/ffmpeg
+        ${{ matrix.prefix }} ffmpeg/ffmpeg -hide_banner -encoders | grep -E "libx264|dnxhd"
+
     - name: Build protected app (Cython + PyInstaller)
       env:
         BUILD_ARCH_PREFIX: ${{ matrix.prefix }}
+        DATARIUM_REQUIRE_FFMPEG: "1"
       run: |
         # Compila i moduli core in binari nativi (.so) e impacchetta: codice non decompilabile.
         # Su Intel, build_protected.py antepone "arch -x86_64" via BUILD_ARCH_PREFIX.

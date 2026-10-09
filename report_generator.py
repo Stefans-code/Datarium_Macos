@@ -3,6 +3,7 @@ import platform
 import sys
 import datetime
 import multiprocessing
+import ffmpeg_tools
 
 class ReportGenerator:
     @staticmethod
@@ -614,17 +615,13 @@ class ReportGenerator:
         ne' in ffmpeg ne' altrove — solo l'SDK proprietario RED (a licenza, non incluso
         in Datarium) sa leggerli. In quel caso resta 'N/A': onesto, non un dato inventato.
         """
-        import subprocess
-        import json
+        # ffprobe_path qui e' il percorso di ffmpeg: ffmpeg_tools usa ffprobe se c'e' accanto,
+        # altrimenti ricava gli stessi campi (timecode compreso) da 'ffmpeg -i'
         try:
-            res = subprocess.run(
-                [ffprobe_path, "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", file_path],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20
-            )
-            if res.returncode != 0 or not res.stdout:
-                return None
-            data = json.loads(res.stdout)
+            data = ffmpeg_tools.probe(file_path, ffprobe_path)
         except Exception:
+            data = None
+        if not data:
             return None
 
         fmt = data.get("format", {}) or {}
@@ -734,8 +731,12 @@ class ReportGenerator:
 
         try:
             if ext in video_exts:
-                ffprobe_path = ReportGenerator._resolve_ffprobe(ffmpeg_path)
-                probed = ReportGenerator._ffprobe_media_info(file_path, ffprobe_path) if ffprobe_path else None
+                # prima si cercava ffprobe SOLO nel percorso delle Impostazioni o nel PATH:
+                # con ffmpeg incluso nell'installer non lo trovava mai
+                ok, ff_bin = ffmpeg_tools.find_ffmpeg(ffmpeg_path or None)
+                if not ok and ffmpeg_path:
+                    ok, ff_bin = ffmpeg_tools.find_ffmpeg(None)
+                probed = ReportGenerator._ffprobe_media_info(file_path, ff_bin) if ok else None
                 if probed:
                     return probed
 

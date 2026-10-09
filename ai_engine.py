@@ -23,6 +23,7 @@ except ImportError:
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 from huggingface_hub import hf_hub_download
+import ffmpeg_tools
 import threading
 
 # Dimensioni approssimative (MB) dei file su Stegeno/Nexflamma_Models, solo per mostrare
@@ -1099,20 +1100,12 @@ class AIEngine:
         except Exception:
             pass
         try:
-            import subprocess
             ok, ffmpeg_bin = self.check_ffmpeg()
             if ok:
-                exe = "ffprobe.exe" if os.name == "nt" else "ffprobe"
-                ffprobe = os.path.join(os.path.dirname(ffmpeg_bin), exe)
-                if os.path.exists(ffprobe):
-                    out = subprocess.check_output(
-                        [ffprobe, "-v", "error", "-select_streams", "v:0",
-                         "-show_entries", "stream=codec_name,width,height:format=duration",
-                         "-of", "json", file_path],
-                        stderr=subprocess.DEVNULL, timeout=8,
-                        creationflags=(0x08000000 if os.name == "nt" else 0))
-                    info = json.loads(out.decode("utf-8", errors="ignore"))
-                    st = (info.get("streams") or [{}])[0]
+                # ffprobe se presente, altrimenti gli stessi dati letti da 'ffmpeg -i'
+                info = ffmpeg_tools.probe(file_path, ffmpeg_bin, timeout=8)
+                if info:
+                    st = next((x for x in info.get("streams") or [] if x.get("codec_type") == "video"), {})
                     if st.get("width") and st.get("height"):
                         parts.append(f"risoluzione {st['width']}x{st['height']}")
                     if st.get("codec_name"):
@@ -1135,16 +1128,12 @@ class AIEngine:
         try:
             # Durata del video (per posizionare il frame al 10%, non sempre al frame 0
             # che spesso e' nero/titoli). Se ffprobe non e' disponibile o fallisce, ripiega su 1s.
+            # (prima: ffmpeg_bin.replace("ffmpeg", "ffprobe") sostituiva anche il nome delle
+            # cartelle nel percorso, es. .../ffmpeg/ffmpeg -> .../ffprobe/ffprobe)
             seek = "1.0"
             try:
-                ffprobe_bin = ffmpeg_bin.replace("ffmpeg", "ffprobe")
-                out = subprocess.check_output(
-                    [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
-                     "-of", "default=noprint_wrappers=1:nokey=1", video_path],
-                    stderr=subprocess.DEVNULL, timeout=8
-                ).decode(errors="ignore").strip()
-                duration = float(out)
-                if duration > 0:
+                duration = ffmpeg_tools.duration_seconds(video_path, ffmpeg_bin)
+                if duration and duration > 0:
                     seek = str(min(duration * 0.1, 20.0))
             except Exception:
                 pass
@@ -1732,70 +1721,11 @@ class AIEngine:
 
     def check_ffmpeg(self, custom_path=None):
         """
-        Verifica la presenza di FFMPEG nel sistema.
+        Verifica la presenza di FFMPEG: percorso scelto dall'utente, poi la copia inclusa
+        nell'installer, poi PATH/posizioni comuni (logica unica in ffmpeg_tools.py).
         Ritorna (True, percorso) o (False, messaggio_errore).
         """
-        import subprocess
-        import shutil
-        
-        # 1. Se viene fornito un percorso personalizzato dall'utente
-        if custom_path:
-            custom_path = os.path.abspath(custom_path.strip())
-            if os.path.exists(custom_path):
-                # Se è una cartella che contiene ffmpeg.exe, proviamo a risolverlo
-                if os.path.isdir(custom_path):
-                    executable = os.path.join(custom_path, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
-                else:
-                    executable = custom_path
-                    
-                if os.path.exists(executable) and os.path.isfile(executable):
-                    try:
-                        res = subprocess.run([executable, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-                        if res.returncode == 0:
-                            return True, executable
-                    except Exception as e:
-                        return False, f"Errore esecuzione FFMPEG custom: {e}"
-            return False, "Percorso FFMPEG non valido o inesistente."
-            
-        # 2. Altrimenti cerchiamo nel PATH di sistema
-        ffmpeg_bin = shutil.which("ffmpeg")
-        if ffmpeg_bin:
-            try:
-                res = subprocess.run([ffmpeg_bin, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-                if res.returncode == 0:
-                    return True, ffmpeg_bin
-            except Exception as e:
-                return False, f"Errore esecuzione FFMPEG in PATH: {e}"
-                
-        # 3. Tentativo finale in posizioni comuni.
-        # NB macOS/Linux: le app avviate da Finder/launcher NON ereditano il PATH della
-        # shell (su macOS resta /usr/bin:/bin:/usr/sbin:/sbin), quindi shutil.which() non
-        # vede ffmpeg installato con Homebrew/MacPorts anche quando c'e'.
-        if os.name == "nt":
-            common_paths = [
-                r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-                r"C:\ffmpeg\bin\ffmpeg.exe"
-            ]
-        else:
-            common_paths = [
-                "/opt/homebrew/bin/ffmpeg",   # macOS Apple Silicon (Homebrew)
-                "/usr/local/bin/ffmpeg",      # macOS Intel (Homebrew) / build manuali
-                "/opt/local/bin/ffmpeg",      # macOS MacPorts
-                "/usr/bin/ffmpeg",            # Linux (apt/dnf/pacman)
-                "/snap/bin/ffmpeg",           # Linux snap
-                "/var/lib/flatpak/exports/bin/ffmpeg",
-                os.path.expanduser("~/bin/ffmpeg"),
-            ]
-        for p in common_paths:
-            if os.path.exists(p):
-                try:
-                    res = subprocess.run([p, "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=3)
-                    if res.returncode == 0:
-                        return True, p
-                except Exception:
-                    pass
-                        
-        return False, "FFMPEG non trovato nel sistema. Configuralo nelle Impostazioni."
+        return ffmpeg_tools.find_ffmpeg(custom_path)
 
     # Profili proxy sul modello di DaVinci Resolve: formato (codec) + risoluzione relativa
     # all'originale. La chiave e' il testo mostrato nei menu delle Impostazioni.
@@ -1837,6 +1767,10 @@ class AIEngine:
         import subprocess
 
         ok, executable = self.check_ffmpeg(ffmpeg_path)
+        if not ok and ffmpeg_path:
+            # percorso personalizzato non valido (es. ffmpeg disinstallato): si usa quello
+            # incluso invece di far fallire tutti i proxy
+            ok, executable = self.check_ffmpeg(None)
         if not ok:
             return False, executable
 

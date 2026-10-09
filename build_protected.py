@@ -35,7 +35,7 @@ STAGE = os.path.join(ROOT, "build_src")
 CORE_MODULES = ["ai_engine.py", "license_manager.py", "face_memory.py", "report_generator.py"]
 # Moduli importati da main.py ma senza logica da proteggere: restano .py normali
 # nel bundle (PyInstaller li include comunque grazie agli --hidden-import).
-PLAIN_MODULES = ["disk_benchmark.py", "system_actions.py", "disk_sync.py", "ergonomics.py", "culling.py", "move_journal.py", "xmp_sidecar.py", "raw_preview.py"]
+PLAIN_MODULES = ["disk_benchmark.py", "system_actions.py", "disk_sync.py", "ergonomics.py", "culling.py", "move_journal.py", "xmp_sidecar.py", "raw_preview.py", "ffmpeg_tools.py"]
 APP_SRC = "main.py"
 APP_DST = "datarium_app.py"
 
@@ -127,6 +127,17 @@ def main():
         shutil.copy2(os.path.join(ROOT, "icon.ico"), os.path.join(STAGE, "icon.ico"))
     if os.path.exists(os.path.join(ROOT, "assets")):
         shutil.copytree(os.path.join(ROOT, "assets"), os.path.join(STAGE, "assets"))
+    # FFmpeg incluso (cartella 'ffmpeg' preparata a mano su Windows, scaricata con hash
+    # verificato dalle CI Mac/Linux): senza, proxy e analisi video richiedono che l'utente
+    # installi ffmpeg da se'. copytree conserva i permessi (bit di esecuzione) e le firme.
+    ff_src = os.path.join(ROOT, "ffmpeg")
+    if os.path.isdir(ff_src):
+        shutil.copytree(ff_src, os.path.join(STAGE, "ffmpeg"))
+        print("   ffmpeg incluso:", ", ".join(sorted(os.listdir(ff_src))))
+    elif os.environ.get("DATARIUM_REQUIRE_FFMPEG"):
+        raise SystemExit("ERRORE: cartella 'ffmpeg' mancante (DATARIUM_REQUIRE_FFMPEG impostato)")
+    else:
+        print("   ATTENZIONE: cartella 'ffmpeg' assente, l'app NON includera' ffmpeg")
 
     print("=== [2/4] Compilazione moduli con Cython (binari nativi) ===")
     to_compile = CORE_MODULES + [APP_DST]
@@ -162,6 +173,8 @@ def main():
     print("=== [3/4] Bundling con PyInstaller ===")
     icon_arg = ["--icon=icon.ico"] if os.path.exists(os.path.join(STAGE, "icon.ico")) else []
     add_data = [f"--add-data=icon.ico{sep}.", f"--add-data=assets{sep}assets"]
+    if os.path.isdir(os.path.join(STAGE, "ffmpeg")):
+        add_data.append(f"--add-data=ffmpeg{sep}ffmpeg")
     cmd = [
         py, "-m", "PyInstaller",
         "--noconfirm", "--onedir", "--windowed",
@@ -189,6 +202,7 @@ def main():
         "--hidden-import=move_journal",
         "--hidden-import=xmp_sidecar",
         "--hidden-import=raw_preview",
+        "--hidden-import=ffmpeg_tools",
         "--hidden-import=system_actions",
         "--hidden-import=PIL",
         "--hidden-import=fitz",
