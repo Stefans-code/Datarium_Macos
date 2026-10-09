@@ -32,6 +32,9 @@ if getattr(sys, 'frozen', False):
     sys.stderr = open(os.devnull, 'w')
 
 import customtkinter as ctk
+import ergonomics as ergo
+# Va fatto prima di creare qualunque widget: rende pulsanti/checkbox/menu raggiungibili con Tab.
+ergo.install()
 import re
 import platform
 import threading
@@ -43,10 +46,14 @@ from ai_engine import AIEngine
 from license_manager import LicenseManager
 import cv2
 from face_memory import FaceMemoryManager
+import culling
+import move_journal
+import xmp_sidecar
+import raw_preview
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -124,14 +131,14 @@ class ImageIdentificationDialog(ctk.CTkToplevel):
             self.img_lbl.pack(pady=15)
         except Exception as e:
             # Fallback se non si riesce a caricare
-            self.img_lbl = ctk.CTkLabel(self, text=f"[Anteprima non disponibile]\n{e}", text_color="red")
+            self.img_lbl = ctk.CTkLabel(self, text=f"[Anteprima non disponibile]\n{e}", text_color=ergo.ERROR)
             self.img_lbl.pack(pady=50)
             
         # Domanda
         self.lbl_question = ctk.CTkLabel(self, text=f"Chi c'è nella foto '{filename}'?", font=ctk.CTkFont(size=14, weight="bold"))
         self.lbl_question.pack(pady=5)
         
-        self.lbl_sub = ctk.CTkLabel(self, text="Inserisci i nomi (es. Marco, Maria) o lascia vuoto:", font=ctk.CTkFont(size=11), text_color="gray")
+        self.lbl_sub = ctk.CTkLabel(self, text="Inserisci i nomi (es. Marco, Maria) o lascia vuoto:", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
         self.lbl_sub.pack(pady=2)
         
         # Campo di testo
@@ -151,7 +158,8 @@ class ImageIdentificationDialog(ctk.CTkToplevel):
         
         self.btn_ok = ctk.CTkButton(btn_frame, text="Conferma", width=120, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.on_ok)
         self.btn_ok.pack(side="left", padx=10)
-        
+        ergo.bind_dialog_keys(self, on_ok=self.on_ok, on_cancel=self.on_cancel)
+
         # Blocca l'esecuzione finché non si chiude la finestra
         self.wait_window(self)
         
@@ -184,14 +192,14 @@ class FaceIdentificationDialog(ctk.CTkToplevel):
             self.img_lbl = ctk.CTkLabel(self, text="", image=self.photo)
             self.img_lbl.pack(pady=15)
         except Exception as e:
-            self.img_lbl = ctk.CTkLabel(self, text=f"[Anteprima non disponibile]\n{e}", text_color="red")
+            self.img_lbl = ctk.CTkLabel(self, text=f"[Anteprima non disponibile]\n{e}", text_color=ergo.ERROR)
             self.img_lbl.pack(pady=40)
             
         # Domanda
         self.lbl_question = ctk.CTkLabel(self, text="Chi è questa persona?", font=ctk.CTkFont(size=16, weight="bold"))
         self.lbl_question.pack(pady=5)
         
-        self.lbl_sub = ctk.CTkLabel(self, text=f"Volto rilevato nell'immagine '{filename}'", font=ctk.CTkFont(size=11), text_color="gray")
+        self.lbl_sub = ctk.CTkLabel(self, text=f"Volto rilevato nell'immagine '{filename}'", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
         self.lbl_sub.pack(pady=2)
         
         # Campo di testo
@@ -211,7 +219,8 @@ class FaceIdentificationDialog(ctk.CTkToplevel):
         
         self.btn_ok = ctk.CTkButton(btn_frame, text="Salva in Memoria", width=140, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.on_ok)
         self.btn_ok.pack(side="left", padx=10)
-        
+        ergo.bind_dialog_keys(self, on_ok=self.on_ok, on_cancel=self.on_cancel)
+
         self.wait_window(self)
         
     def on_ok(self):
@@ -273,7 +282,16 @@ class DatariumApp(ctk.CTk):
         self.autotag_dest_folder = ctk.StringVar(value="")
         self.autotag_accept_ai = ctk.BooleanVar(value=True)
         self.autotag_rename = ctk.BooleanVar(value=True)
-        self.organizer_identify_people = ctk.BooleanVar(value=True)
+        # Riconoscimento volti = dato biometrico (GDPR art. 9): spento di default, lo attiva l'utente.
+        self.organizer_identify_people = ctk.BooleanVar(value=False)
+        # Volti sconosciuti: "Chiedi subito" (popup per ogni volto, comportamento storico)
+        # oppure "Nomina dopo" (messi da parte e nominati a gruppi nella pagina Persone).
+        self.organizer_face_mode = ctk.StringVar(value="Chiedi subito")
+        self.organizer_write_xmp = ctk.BooleanVar(value=False)
+        self.autotag_write_xmp = ctk.BooleanVar(value=True)
+        self.cull_folder = ctk.StringVar(value="")
+        self.cull_vars = {}
+        self.people_view = ctk.StringVar(value="known")
         self.organizer_keep_names = ctk.BooleanVar(value=True)
 
         # Offload Feature State
@@ -330,6 +348,10 @@ class DatariumApp(ctk.CTk):
 
         # Settings state
         self.load_settings()
+        # Zoom interfaccia e tema scelti dall'utente: applicati PRIMA di costruire i widget,
+        # cosi' la prima schermata nasce gia' alla dimensione giusta.
+        ctk.set_widget_scaling(self.ui_scaling)
+        ctk.set_appearance_mode({"Scuro": "Dark", "Chiaro": "Light", "Sistema": "System"}[self.appearance_pref])
         self.scan_sidecars_var = ctk.BooleanVar(value=self.scan_sidecars_enabled)
         self.proxy_gen_var = ctk.BooleanVar(value=self.proxy_gen_enabled)
         self.proxy_resolution_var = ctk.StringVar(value=self.proxy_resolution)
@@ -342,6 +364,9 @@ class DatariumApp(ctk.CTk):
 
         self.setup_sidebar()
         self.setup_main_content()
+        self.setup_keyboard_shortcuts()
+        # Chiudere la finestra durante una copia/analisi la interromperebbe a meta': chiedi prima.
+        self.protocol("WM_DELETE_WINDOW", self.on_close_request)
         
         # Default Page
         if self.ai.check_models_missing():
@@ -376,6 +401,8 @@ class DatariumApp(ctk.CTk):
         self.proxy_format = "H.264 (.mp4)"
         self.offload_presets = {}
         self.job_history_max = 50
+        self.ui_scaling = 1.0
+        self.appearance_pref = "Scuro"
 
         if os.path.exists(config_path):
             try:
@@ -389,6 +416,12 @@ class DatariumApp(ctk.CTk):
                     self.proxy_format = self.ai.normalize_proxy_format(data.get("proxy_format"))
                     self.offload_presets = data.get("offload_presets", {})
                     self.job_history_max = data.get("job_history_max", 50)
+                    try:
+                        self.ui_scaling = min(max(float(data.get("ui_scaling", 1.0)), self.UI_SCALE_MIN), self.UI_SCALE_MAX)
+                    except (TypeError, ValueError):
+                        self.ui_scaling = 1.0
+                    if data.get("appearance_mode") in ("Scuro", "Chiaro", "Sistema"):
+                        self.appearance_pref = data["appearance_mode"]
             except Exception as e:
                 print(f"Errore caricamento impostazioni: {e}")
                 
@@ -403,7 +436,9 @@ class DatariumApp(ctk.CTk):
             "proxy_resolution": self.proxy_resolution_var.get(),
             "proxy_format": self.proxy_format_var.get(),
             "offload_presets": self.offload_presets,
-            "job_history_max": self.job_history_max
+            "job_history_max": self.job_history_max,
+            "ui_scaling": self.ui_scaling,
+            "appearance_mode": self.appearance_pref,
         }
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -422,7 +457,7 @@ class DatariumApp(ctk.CTk):
         self.sidebar.grid(row=0, column=0, sticky="nsew")
 
         self.logo_lbl = ctk.CTkLabel(self.sidebar, text="DATARIUM", font=ctk.CTkFont(size=24, weight="bold"))
-        self.logo_lbl.grid(row=0, column=0, padx=20, pady=(30, 40))
+        self.logo_lbl.grid(row=0, column=0, padx=20, pady=(24, 24))
 
         # Voci di navigazione: niente emoji (solo testo), con uno stato attivo
         # visibile (sfondo tonale blu) che prima non esisteva -- l'utente non aveva
@@ -456,16 +491,34 @@ class DatariumApp(ctk.CTk):
         self.btn_sync.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Sync"] = self.btn_sync
 
+        self.btn_cull = ctk.CTkButton(self.sidebar, text="Selezione Foto", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Cull"), **self.NAV_INACTIVE)
+        self.btn_cull.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["Cull"] = self.btn_cull
+
+        self.btn_people = ctk.CTkButton(self.sidebar, text="Persone", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("People"), **self.NAV_INACTIVE)
+        self.btn_people.grid(row=8, column=0, padx=20, pady=5, sticky="ew")
+        self._nav_buttons["People"] = self.btn_people
+
         # Bottom Buttons
-        self.sidebar.grid_rowconfigure(7, weight=1)
+        self.sidebar.grid_rowconfigure(9, weight=1)
 
         self.btn_settings = ctk.CTkButton(self.sidebar, text="Impostazioni", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"), **self.NAV_INACTIVE)
-        self.btn_settings.grid(row=8, column=0, padx=20, pady=10, sticky="ew")
+        self.btn_settings.grid(row=10, column=0, padx=20, pady=10, sticky="ew")
         self._nav_buttons["Settings"] = self.btn_settings
 
-        self.appearance_mode_segmented = ctk.CTkSegmentedButton(self.sidebar, values=["Scuro", "Chiaro"], command=self.change_appearance_mode)
-        self.appearance_mode_segmented.grid(row=9, column=0, padx=20, pady=(10, 30), sticky="ew")
-        self.appearance_mode_segmented.set("Scuro")
+        self.appearance_mode_segmented = ctk.CTkSegmentedButton(self.sidebar, values=["Scuro", "Chiaro", "Sistema"], command=self.change_appearance_mode)
+        self.appearance_mode_segmented.grid(row=11, column=0, padx=20, pady=(10, 4), sticky="ew")
+        self.appearance_mode_segmented.set(self.appearance_pref)
+
+        self.help_btn = ctk.CTkButton(self.sidebar, text="Guida e scorciatoie (F1)", height=28, fg_color="transparent",
+                                      border_width=1, text_color=("gray10", "gray90"), command=self.show_help)
+        self.help_btn.grid(row=12, column=0, padx=20, pady=(4, 24), sticky="ew")
+
+        # Tooltip con la scorciatoia: la navigazione rapida si scopre senza leggere la guida.
+        mod = self._shortcut_mod_label()
+        for (key, label), btn_name in zip(self.NAV_SHORTCUTS, ("btn_home", "btn_organizer", "btn_autotag", "btn_hash", "btn_offload", "btn_sync", "btn_cull", "btn_people")):
+            ergo.tooltip(getattr(self, btn_name), f"{label}  ({mod}+{key})")
+        ergo.tooltip(self.btn_settings, f"Impostazioni  ({mod}+,)")
 
     def setup_main_content(self):
         self.content_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -482,6 +535,8 @@ class DatariumApp(ctk.CTk):
         self.init_autotag_page()
         self.init_offload_pages()
         self.init_sync_page()
+        self.init_cull_page()
+        self.init_people_page()
 
     def init_organizer_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -493,10 +548,15 @@ class DatariumApp(ctk.CTk):
         box.pack(fill="both", expand=True, padx=5, pady=5)
         
         ctk.CTkLabel(box, text="Inizia l'organizzazione", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(30, 5))
-        ctk.CTkLabel(box, text="Seleziona la cartella principale che contiene i file da analizzare e organizzare.", text_color="gray").pack(anchor="w", padx=30)
+        ctk.CTkLabel(box, text="Seleziona la cartella principale che contiene i file da analizzare e organizzare.", text_color=ergo.MUTED).pack(anchor="w", padx=30)
         
         btn_open = ctk.CTkButton(box, text="📂 Seleziona Cartella", font=ctk.CTkFont(size=18, weight="bold"), height=60, width=280, corner_radius=12, command=self.open_source_folder)
         btn_open.place(relx=0.5, rely=0.5, anchor="center")
+
+        # Tolleranza all'errore: l'ultima riorganizzazione si puo' sempre disfare da qui
+        self.btn_org_undo_home = ctk.CTkButton(box, text="↩ Annulla l'ultima organizzazione", fg_color="transparent", border_width=1,
+                                               text_color=("gray10", "gray90"), width=280, command=self.undo_last_organization)
+        self.org_undo_info = ctk.CTkLabel(box, text="", text_color=ergo.MUTED, font=ctk.CTkFont(size=12))
 
     def init_setup_page(self):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -508,7 +568,7 @@ class DatariumApp(ctk.CTk):
         login_box.pack_propagate(False)
         
         ctk.CTkLabel(login_box, text="DATARIUM", font=ctk.CTkFont(size=36, weight="bold")).pack(pady=(30, 10))
-        ctk.CTkLabel(login_box, text="Completamento dell'installazione...", font=ctk.CTkFont(size=18), text_color="gray").pack()
+        ctk.CTkLabel(login_box, text="Completamento dell'installazione...", font=ctk.CTkFont(size=18), text_color=ergo.MUTED).pack()
         
         # Default = profilo GIA' installato (se c'e'), cosi' non si propone uno switch slim<->full
         self.model_choice_var = ctk.StringVar(value=(self.ai.get_installed_quality() or "full"))
@@ -527,7 +587,7 @@ class DatariumApp(ctk.CTk):
         self.setup_progress.pack(pady=10)
         self.setup_progress.set(0)
         
-        ctk.CTkLabel(login_box, text="L'operazione potrebbe richiedere alcuni minuti in base alla connessione.", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=10)
+        ctk.CTkLabel(login_box, text="L'operazione potrebbe richiedere alcuni minuti in base alla connessione.", font=ctk.CTkFont(size=12), text_color=ergo.MUTED).pack(pady=10)
 
     def start_setup_flow(self):
         self.btn_start_setup.configure(state="disabled")
@@ -538,7 +598,7 @@ class DatariumApp(ctk.CTk):
         else:
             self.after(0, lambda: self.setup_status_lbl.configure(
                 text=f"Errore: {error_msg}\nRiprova tra poco.", 
-                text_color="#ef4444"
+                text_color=ergo.ERROR
             ))
             self.after(0, lambda: self.btn_start_setup.configure(state="normal"))
 
@@ -568,7 +628,7 @@ class DatariumApp(ctk.CTk):
         header.pack_propagate(False)
 
         ctk.CTkLabel(header, text="Benvenuto in Datarium", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", padx=30, pady=(25, 2))
-        ctk.CTkLabel(header, text="Il tuo assistente intelligente per l'organizzazione di file, immagini e video basato sull'AI.", font=ctk.CTkFont(size=13), text_color="gray").pack(anchor="w", padx=30)
+        ctk.CTkLabel(header, text="Il tuo assistente intelligente per l'organizzazione di file, immagini e video basato sull'AI.", font=ctk.CTkFont(size=13), text_color=ergo.MUTED).pack(anchor="w", padx=30)
 
         # Quick access grid or container
         cards_container = ctk.CTkFrame(page, fg_color="transparent")
@@ -594,7 +654,7 @@ class DatariumApp(ctk.CTk):
 
         ctk.CTkLabel(c1, text="", image=folder_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c1, text="Organizer AI", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
-        ctk.CTkLabel(c1, text="Scansiona, ordina e rinomina i tuoi file e documenti in base al contenuto.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkLabel(c1, text="Scansiona, ordina e rinomina i tuoi file e documenti in base al contenuto.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
         ctk.CTkButton(c1, text="Apri Organizer", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=self.go_to_organizer).pack(side="bottom", pady=30, padx=20, fill="x")
 
         # Card 3: Auto Tag
@@ -604,7 +664,7 @@ class DatariumApp(ctk.CTk):
 
         ctk.CTkLabel(c3, text="", image=tag_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c3, text="Auto Tag & Album", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
-        ctk.CTkLabel(c3, text="Raggruppa foto e video in album intelligenti generati dall'AI.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkLabel(c3, text="Raggruppa foto e video in album intelligenti generati dall'AI.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
         ctk.CTkButton(c3, text="Vai ad Album", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=lambda: self.show_page("AutoTag")).pack(side="bottom", pady=30, padx=20, fill="x")
 
         # Card 2: Hash Check
@@ -614,7 +674,7 @@ class DatariumApp(ctk.CTk):
 
         ctk.CTkLabel(c2, text="", image=key_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c2, text="Verifica Hash", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
-        ctk.CTkLabel(c2, text="Calcola l'hash dei file e confronta duplicati esatti byte-a-byte.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkLabel(c2, text="Calcola l'hash dei file e confronta duplicati esatti byte-a-byte.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
         ctk.CTkButton(c2, text="Vai ad Hash", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=lambda: self.show_page("HashHome")).pack(side="bottom", pady=30, padx=20, fill="x")
 
         # Card 4: Offload & PDF
@@ -624,7 +684,7 @@ class DatariumApp(ctk.CTk):
 
         ctk.CTkLabel(c4, text="", image=flash_icon).pack(pady=(35, 10))
         ctk.CTkLabel(c4, text="Offload", font=ctk.CTkFont(size=18, weight="bold")).pack(pady=5)
-        ctk.CTkLabel(c4, text="Copia sicura SSD multidisco con verifica checksum ed esportazione report.", text_color="gray", font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
+        ctk.CTkLabel(c4, text="Copia sicura SSD multidisco con verifica checksum ed esportazione report.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=180, justify="center").pack(pady=(5, 15))
         ctk.CTkButton(c4, text="Vai ad Offload", font=ctk.CTkFont(weight="bold"), height=38, corner_radius=8, command=lambda: self.show_page("OffloadHome")).pack(side="bottom", pady=30, padx=20, fill="x")
 
 
@@ -632,10 +692,14 @@ class DatariumApp(ctk.CTk):
         page = ctk.CTkFrame(self.content_container, fg_color="transparent")
         self.pages["Options"] = page
 
-        # Centered Modal-like box
-        modal = ctk.CTkFrame(page, width=750, height=600, corner_radius=20, border_width=2, border_color=("gray80", "gray20"))
-        modal.place(relx=0.5, rely=0.5, anchor="center")
-        modal.pack_propagate(False)
+        # Riquadro che si adatta alla finestra: prima era alto 600px fissi e con la finestra
+        # alla dimensione minima i pulsanti Conferma/Annulla finivano fuori dallo schermo.
+        outer = ctk.CTkFrame(page, corner_radius=20, border_width=2, border_color=("gray80", "gray20"))
+        outer.pack(fill="both", expand=True, padx=30, pady=10)
+        btn_f = ctk.CTkFrame(outer, fg_color="transparent")
+        btn_f.pack(side="bottom", fill="x", padx=40, pady=(10, 24))
+        modal = ctk.CTkScrollableFrame(outer, fg_color="transparent")
+        modal.pack(fill="both", expand=True, padx=6, pady=(6, 0))
 
         ctk.CTkLabel(modal, text="Configurazione Archivio", font=ctk.CTkFont(size=24, weight="bold")).pack(pady=(30, 20))
 
@@ -644,24 +708,30 @@ class DatariumApp(ctk.CTk):
         grid_f.pack(fill="x", padx=40, pady=5)
         grid_f.columnconfigure(1, weight=1)
 
-        # Row 1: Cartella di Controllo
-        ctk.CTkLabel(grid_f, text="Cartella di Controllo:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=(5, 0))
-        ctk.CTkLabel(grid_f, textvariable=self.control_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=400, anchor="w", justify="left").grid(row=0, column=1, padx=20, pady=(5, 0), sticky="ew")
-        ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_dest_folder).grid(row=0, column=2, pady=(5, 0), sticky="e")
-        ctk.CTkLabel(grid_f, text="La cartella che l'AI scansionerà per organizzare i file.", font=ctk.CTkFont(size=11, slant="italic"), text_color="#38bdf8").grid(row=1, column=0, columnspan=3, sticky="w", padx=5, pady=(2, 5))
+        # Row 1: Cartella di destinazione (control_folder: e' dove vengono create le nuove cartelle;
+        # la cartella analizzata e' source_folder). La vecchia etichetta "Cartella di Controllo"
+        # con la descrizione "la cartella che l'AI scansionera'" era fuorviante.
+        ctk.CTkLabel(grid_f, text="Cartella di destinazione:", font=ctk.CTkFont(weight="bold")).grid(row=0, column=0, sticky="w", pady=(5, 0))
+        ctk.CTkLabel(grid_f, textvariable=self.control_folder, text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=400, anchor="w", justify="left").grid(row=0, column=1, padx=20, pady=(5, 0), sticky="ew")
+        b_dest = ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_dest_folder)
+        b_dest.grid(row=0, column=2, pady=(5, 0), sticky="e")
+        ergo.tooltip(b_dest, "Cambia la cartella di destinazione")
+        ctk.CTkLabel(grid_f, text="Dove verranno create le nuove cartelle (di solito la stessa cartella scelta). Prima di spostare qualunque file viene creato un backup ZIP e l'operazione si può annullare.", font=ctk.CTkFont(size=12, slant="italic"), text_color=ergo.INFO, wraplength=620, justify="left").grid(row=1, column=0, columnspan=3, sticky="w", padx=5, pady=(2, 5))
 
         # Row 2: Posto Salvataggio ZIP
         ctk.CTkLabel(grid_f, text="Posto di Salvataggio ZIP:", font=ctk.CTkFont(weight="bold")).grid(row=2, column=0, sticky="w", pady=(5, 0))
-        ctk.CTkLabel(grid_f, textvariable=self.backup_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=400, anchor="w", justify="left").grid(row=2, column=1, padx=20, pady=(5, 0), sticky="ew")
-        ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_backup_folder).grid(row=2, column=2, pady=(5, 0), sticky="e")
-        ctk.CTkLabel(grid_f, text="La cartella in cui verrà salvato l'archivio ZIP di backup di sicurezza dei file originali.", font=ctk.CTkFont(size=11, slant="italic"), text_color="#38bdf8").grid(row=3, column=0, columnspan=3, sticky="w", padx=5, pady=(2, 5))
+        ctk.CTkLabel(grid_f, textvariable=self.backup_folder, text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=400, anchor="w", justify="left").grid(row=2, column=1, padx=20, pady=(5, 0), sticky="ew")
+        b_zip = ctk.CTkButton(grid_f, text="📂", width=40, command=self.open_backup_folder)
+        b_zip.grid(row=2, column=2, pady=(5, 0), sticky="e")
+        ergo.tooltip(b_zip, "Cambia la cartella del backup ZIP")
+        ctk.CTkLabel(grid_f, text="La cartella in cui verrà salvato l'archivio ZIP di backup di sicurezza dei file originali.", font=ctk.CTkFont(size=12, slant="italic"), text_color=ergo.INFO).grid(row=3, column=0, columnspan=3, sticky="w", padx=5, pady=(2, 5))
 
         # --- FILE TYPES ---
         ctk.CTkLabel(modal, text="File da analizzare", font=ctk.CTkFont(weight="bold")).pack(pady=(20, 5))
         self.filter_frame = ctk.CTkFrame(modal, fg_color="transparent")
         self.filter_frame.pack(pady=10)
         
-        self.no_files_lbl = ctk.CTkLabel(self.filter_frame, text="Seleziona una cartella per analizzare i tipi", text_color="gray")
+        self.no_files_lbl = ctk.CTkLabel(self.filter_frame, text="Seleziona una cartella per analizzare i tipi", text_color=ergo.MUTED)
         self.no_files_lbl.pack()
 
         # --- ADVANCED OPTIONS ---
@@ -673,14 +743,35 @@ class DatariumApp(ctk.CTk):
         opts_row1 = ctk.CTkFrame(opts_container, fg_color="transparent")
         opts_row1.pack(pady=3)
         
-        self.check_ai = ctk.CTkCheckBox(opts_row1, text="Scelta AI")
+        self.check_ai = ctk.CTkCheckBox(opts_row1, text="Nomi e cartelle scelti dall'AI")
         self.check_ai.pack(side="left", padx=8); self.check_ai.select()
-        
-        self.check_dup = ctk.CTkCheckBox(opts_row1, text="Check Duplicati")
+        ergo.tooltip(self.check_ai, "Se disattivato, i file vengono solo raccolti in Archivio (o smistati con le tue regole).")
+
+        self.check_dup = ctk.CTkCheckBox(opts_row1, text="Salta i doppioni esatti")
         self.check_dup.pack(side="left", padx=8); self.check_dup.select()
-        
-        self.check_identify_people_cb = ctk.CTkCheckBox(opts_row1, text="Identifica Persone", variable=self.organizer_identify_people)
-        self.check_identify_people_cb.pack(side="left", padx=8); self.check_identify_people_cb.select()
+        ergo.tooltip(self.check_dup, "I file identici byte per byte vengono considerati una volta sola.")
+
+        self.check_identify_people_cb = ctk.CTkCheckBox(opts_row1, text="Identifica Persone", variable=self.organizer_identify_people,
+                                                        command=self._update_face_mode_visibility)
+        self.check_identify_people_cb.pack(side="left", padx=8)
+        ergo.tooltip(self.check_identify_people_cb,
+                     "Riconosce le persone nelle foto per usarne il nome nelle cartelle.\n"
+                     "I volti sono dati biometrici: vengono analizzati e salvati SOLO su questo computer,\n"
+                     "non vengono mai inviati in rete e puoi cancellarli in qualsiasi momento dalla pagina Persone.")
+
+        # Volti sconosciuti: chiedere subito interrompe l'analisi con un popup per ogni volto;
+        # "Nomina dopo" li raccoglie e si nominano a gruppi nella pagina Persone.
+        self.face_mode_row = ctk.CTkFrame(opts_container, fg_color="transparent")
+        self.face_mode_row.pack(pady=3)
+        ctk.CTkLabel(self.face_mode_row, text="Volti sconosciuti:").pack(side="left", padx=(8, 8))
+        self.face_mode_seg = ctk.CTkSegmentedButton(self.face_mode_row, values=["Chiedi subito", "Nomina dopo"], variable=self.organizer_face_mode)
+        self.face_mode_seg.pack(side="left")
+        ctk.CTkLabel(self.face_mode_row, text="«Nomina dopo» non interrompe l'analisi: li ritrovi in Persone.",
+                     text_color=ergo.MUTED, font=ctk.CTkFont(size=12)).pack(side="left", padx=8)
+        ctk.CTkLabel(opts_container, text="Identifica Persone è disattivato di default: i volti sono dati biometrici. "
+                                          "Se lo attivi restano solo su questo computer e li cancelli quando vuoi da Persone.",
+                     text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=620, justify="left").pack(pady=(0, 3))
+        self._update_face_mode_visibility()
         
         opts_row2 = ctk.CTkFrame(opts_container, fg_color="transparent")
         opts_row2.pack(pady=3)
@@ -698,15 +789,16 @@ class DatariumApp(ctk.CTk):
         opts_row3.pack(pady=3)
         self.check_keep_names_cb = ctk.CTkCheckBox(opts_row3, text="Mantieni i nomi originali già descrittivi", variable=self.organizer_keep_names)
         self.check_keep_names_cb.pack(side="left", padx=8)
+        self.check_org_xmp_cb = ctk.CTkCheckBox(opts_row3, text="Parole chiave .xmp per i RAW (Lightroom/Bridge)", variable=self.organizer_write_xmp)
+        self.check_org_xmp_cb.pack(side="left", padx=8)
+        ergo.tooltip(self.check_org_xmp_cb, "Accanto a ogni foto RAW crea un file .xmp con cartella e persone come parole chiave.\n"
+                                            "Il RAW non viene modificato e un .xmp già esistente non viene mai sovrascritto.")
 
-
-
-
-        # --- FOOTER ---
-        btn_f = ctk.CTkFrame(modal, fg_color="transparent")
-        btn_f.pack(side="bottom", fill="x", padx=40, pady=30)
+        # --- FOOTER (sempre visibile, fuori dall'area che scorre) ---
         ctk.CTkButton(btn_f, text="Annulla", fg_color="transparent", text_color=("gray10", "gray90"), border_width=2, width=120, command=lambda: self.show_page("Home")).pack(side="left")
-        ctk.CTkButton(btn_f, text="Conferma", width=140, fg_color="#10b981", hover_color="#059669", command=self.go_to_preview).pack(side="right")
+        ctk.CTkButton(btn_f, text="Analizza e mostra anteprima", width=220, fg_color="#10b981", hover_color="#059669", command=self.go_to_preview).pack(side="right")
+        ctk.CTkLabel(btn_f, text="Nessun file viene spostato finché non confermi l'anteprima.", text_color=ergo.MUTED,
+                     font=ctk.CTkFont(size=12)).pack(side="right", padx=12)
 
     def auto_detect_file_types(self, folder):
         for widget in self.filter_frame.winfo_children():
@@ -756,8 +848,8 @@ class DatariumApp(ctk.CTk):
         # Table Header
         header_f = ctk.CTkFrame(page, fg_color="transparent")
         header_f.pack(fill="x", padx=10)
-        ctk.CTkLabel(header_f, text="Struttura Cartelle / File", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray").pack(side="left")
-        ctk.CTkLabel(header_f, text="Accept", font=ctk.CTkFont(size=12, weight="bold"), text_color="gray").pack(side="right", padx=10)
+        ctk.CTkLabel(header_f, text="Struttura Cartelle / File", font=ctk.CTkFont(size=12, weight="bold"), text_color=ergo.MUTED).pack(side="left")
+        ctk.CTkLabel(header_f, text="Includi", font=ctk.CTkFont(size=12, weight="bold"), text_color=ergo.MUTED).pack(side="right", padx=10)
 
         self.scroll_frame = ctk.CTkScrollableFrame(page, fg_color=("gray95", "gray10"))
         self.scroll_frame.pack(fill="both", expand=True, pady=(5, 10))
@@ -770,14 +862,42 @@ class DatariumApp(ctk.CTk):
         self.status_lbl = ctk.CTkLabel(footer, text="In attesa di avvio...", font=ctk.CTkFont(size=12, weight="bold"))
         self.status_lbl.pack(side="left")
 
-        ctk.CTkButton(footer, text="Conferma", width=120, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.execute_organization).pack(side="right")
-        ctk.CTkButton(footer, text="Annulla", fg_color="transparent", border_width=1, width=100, command=self.cancel_organization).pack(side="right", padx=10)
+        self.btn_apply_org = ctk.CTkButton(footer, text="Applica organizzazione", width=180, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.execute_organization)
+        self.btn_apply_org.pack(side="right")
+        ergo.tooltip(self.btn_apply_org, "Sposta i file spuntati nelle cartelle mostrate. Prima viene creato un backup ZIP;\n"
+                                         "dopo potrai comunque annullare con «Annulla l'ultima organizzazione».")
+        ctk.CTkButton(footer, text="Indietro", fg_color="transparent", border_width=1, width=100, command=self.cancel_organization).pack(side="right", padx=10)
+        self.btn_org_undo = ctk.CTkButton(footer, text="↩ Annulla organizzazione", fg_color="transparent", border_width=1,
+                                          text_color=("gray10", "gray90"), width=190, command=self.undo_last_organization)
 
     def init_settings_page(self):
         page = ctk.CTkScrollableFrame(self.content_container, fg_color="transparent", label_text="", border_width=0)
         self.pages["Settings"] = page
 
         ctk.CTkLabel(page, text="Impostazioni", font=ctk.CTkFont(size=30, weight="bold")).pack(anchor="w", pady=(0, 20))
+
+        # Accessibilita' / ergonomia
+        acc_box = ctk.CTkFrame(page, corner_radius=10)
+        acc_box.pack(fill="x", padx=10, pady=5)
+        ctk.CTkLabel(acc_box, text="Accessibilità e visualizzazione", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
+        acc_row = ctk.CTkFrame(acc_box, fg_color="transparent")
+        acc_row.pack(fill="x", padx=20, pady=5)
+        ctk.CTkLabel(acc_row, text="Dimensione testo e interfaccia:").pack(side="left", padx=(0, 10))
+        steps = [round(self.UI_SCALE_MIN + i * self.UI_SCALE_STEP, 2)
+                 for i in range(int(round((self.UI_SCALE_MAX - self.UI_SCALE_MIN) / self.UI_SCALE_STEP)) + 1)]
+        self.ui_scaling_menu = ctk.CTkOptionMenu(
+            acc_row, width=110, values=[f"{int(round(v * 100))}%" for v in steps],
+            command=lambda v: self.change_ui_scaling(int(v.rstrip("%")) / 100 - self.ui_scaling))
+        self.ui_scaling_menu.set(f"{int(round(self.ui_scaling * 100))}%")
+        self.ui_scaling_menu.pack(side="left")
+        mod = self._shortcut_mod_label()
+        ctk.CTkLabel(
+            acc_box,
+            text=(f"Scorciatoie: {mod}+ + / {mod}+ - per ingrandire o ridurre, {mod}+0 per tornare al 100%. "
+                  "Tutti i comandi sono raggiungibili con Tab e attivabili con Spazio o Invio. "
+                  "Premi F1 per la guida completa."),
+            text_color=ergo.MUTED, wraplength=640, justify="left"
+        ).pack(anchor="w", padx=20, pady=(0, 15))
 
         # Configurazione FFMPEG Box
         ff_box = ctk.CTkFrame(page, corner_radius=10)
@@ -798,7 +918,7 @@ class DatariumApp(ctk.CTk):
         btn_test_ff = ctk.CTkButton(ff_row, text="⚡ Verifica", width=100, fg_color="#10b981", hover_color="#059669", command=self.test_ffmpeg_path)
         btn_test_ff.pack(side="left", padx=5)
         
-        self.ffmpeg_status_lbl = ctk.CTkLabel(ff_box, text="Stato FFMPEG: In attesa di verifica", font=ctk.CTkFont(size=11), text_color="gray")
+        self.ffmpeg_status_lbl = ctk.CTkLabel(ff_box, text="Stato FFMPEG: In attesa di verifica", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
         self.ffmpeg_status_lbl.pack(anchor="w", padx=20, pady=(5, 5))
         # Esegui un controllo silenzioso iniziale
         self.after(500, lambda: self.test_ffmpeg_path(silent=True))
@@ -856,7 +976,7 @@ class DatariumApp(ctk.CTk):
         hw_box = ctk.CTkFrame(page, corner_radius=10)
         hw_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(hw_box, text="Status Hardware", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
-        self.hw_info_lbl = ctk.CTkLabel(hw_box, text=f"Rilevato: {self.ai.hardware_info}", text_color="#38bdf8")
+        self.hw_info_lbl = ctk.CTkLabel(hw_box, text=f"Rilevato: {self.ai.hardware_info}", text_color=ergo.INFO)
         self.hw_info_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
         # License
@@ -872,21 +992,21 @@ class DatariumApp(ctk.CTk):
         btn_file = ctk.CTkButton(lic_box, text="📁 Carica File Licenza (.datarium)", command=self.load_license_file)
         btn_file.pack(anchor="w", padx=20, pady=10)
 
-        self.lic_status_lbl = ctk.CTkLabel(lic_box, text=f"Stato: {self.license_status}", text_color="#10b981" if self.is_licensed else "#ef4444")
+        self.lic_status_lbl = ctk.CTkLabel(lic_box, text=f"Stato: {self.license_status}", text_color=ergo.SUCCESS if self.is_licensed else ergo.ERROR)
         self.lic_status_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
         # Updates
         upd_box = ctk.CTkFrame(page, corner_radius=10)
         upd_box.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(upd_box, text="Aggiornamenti Software", font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=20, pady=(15, 5))
-        ctk.CTkLabel(upd_box, text=f"Versione corrente: v{APP_VERSION}", text_color="gray").pack(anchor="w", padx=20)
+        ctk.CTkLabel(upd_box, text=f"Versione corrente: v{APP_VERSION}", text_color=ergo.MUTED).pack(anchor="w", padx=20)
         self.btn_check_upd = ctk.CTkButton(upd_box, text="Verifica Aggiornamenti", command=self.check_software_updates)
         self.btn_check_upd.pack(anchor="w", padx=20, pady=(10, 5))
 
         self.upd_progress = ctk.CTkProgressBar(upd_box)
         self.upd_progress.set(0)
         self.upd_progress.pack(fill="x", padx=20, pady=(5, 2))
-        self.upd_status_lbl = ctk.CTkLabel(upd_box, text="", font=ctk.CTkFont(size=11), text_color="gray")
+        self.upd_status_lbl = ctk.CTkLabel(upd_box, text="", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
         self.upd_status_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
         # Test velocità disco (diagnosi hardware vs software)
@@ -897,7 +1017,7 @@ class DatariumApp(ctk.CTk):
             bench_box,
             text="Copia dati reali tra due cartelle e misura i MB/s, per capire se un rallentamento\n"
                  "dipende dai dischi/hub o dal software.",
-            justify="left", text_color="gray"
+            justify="left", text_color=ergo.MUTED
         ).pack(anchor="w", padx=20, pady=(0, 10))
 
         bench_row = ctk.CTkFrame(bench_box, fg_color="transparent")
@@ -927,7 +1047,7 @@ class DatariumApp(ctk.CTk):
         self.bench_progress.set(0)
         self.bench_progress.pack(fill="x", padx=20, pady=(14, 2))
 
-        self.bench_eta_lbl = ctk.CTkLabel(bench_box, text="", font=ctk.CTkFont(size=11), text_color="gray")
+        self.bench_eta_lbl = ctk.CTkLabel(bench_box, text="", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
         self.bench_eta_lbl.pack(anchor="w", padx=20, pady=(0, 8))
 
         # Grafico a barre nativo (niente testo a muro): una barra per la lettura pura
@@ -939,7 +1059,7 @@ class DatariumApp(ctk.CTk):
         self._bench_last_result = None
         self.bench_chart_canvas.bind("<Configure>", lambda e: self._redraw_bench_chart())
 
-        self.bench_result_lbl = ctk.CTkLabel(bench_box, text="Nessun test eseguito.", font=ctk.CTkFont(weight="bold"), text_color="gray")
+        self.bench_result_lbl = ctk.CTkLabel(bench_box, text="Nessun test eseguito.", font=ctk.CTkFont(weight="bold"), text_color=ergo.MUTED)
         self.bench_result_lbl.pack(anchor="w", padx=20, pady=(0, 15))
 
         # Disinstallazione / reset dati
@@ -949,7 +1069,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(
             uninstall_box,
             text=f"I dati personali (licenza, modelli AI, cache volti, configurazione) sono in:\n{self.get_config_path().rsplit(os.sep, 1)[0]}",
-            justify="left", text_color="gray"
+            justify="left", text_color=ergo.MUTED
         ).pack(anchor="w", padx=20, pady=(0, 10))
         ctk.CTkButton(
             uninstall_box, text="Disinstalla Datarium completamente...",
@@ -1005,7 +1125,7 @@ class DatariumApp(ctk.CTk):
 
         threshold_x = margin_left + (min(threshold, max_scale) / max_scale) * track_w
         c.create_line(threshold_x, 2, threshold_x, bottom, dash=(3, 2), fill="#ef4444")
-        c.create_text(threshold_x, bottom + 10, text=f"soglia bottleneck ({threshold:.0f} MB/s)", fill="#ef4444", font=("Segoe UI", 9))
+        c.create_text(threshold_x, bottom + 10, text=f"soglia bottleneck ({threshold:.0f} MB/s)", fill="#ef4444", font=("Segoe UI", 10))
 
     def pick_bench_source(self):
         d = filedialog.askdirectory(title="Scegli la cartella sorgente da leggere (es. i tuoi dati su HDD)")
@@ -1035,7 +1155,7 @@ class DatariumApp(ctk.CTk):
         self.btn_run_bench.configure(state="disabled", text="Test in corso...")
         self.bench_progress.set(0)
         self.bench_eta_lbl.configure(text="")
-        self.bench_result_lbl.configure(text="Lettura in corso dalla sorgente...", text_color="gray")
+        self.bench_result_lbl.configure(text="Lettura in corso dalla sorgente...", text_color=ergo.MUTED)
 
         def make_progress_updater():
             # Un cronometro per fase (lettura, poi copia), cosi' la stima del tempo
@@ -1075,13 +1195,13 @@ class DatariumApp(ctk.CTk):
                 copy_mbps = copy_res['mbps'] if copy_res else None
                 verdict_mbps = min(read_res['mbps'], copy_mbps) if copy_mbps is not None else read_res['mbps']
                 verdict_text = disk_benchmark.verdict(verdict_mbps)
-                verdict_color = "#f59e0b" if verdict_mbps < disk_benchmark.SLOW_HARDWARE_THRESHOLD_MBPS else "#10b981"
+                verdict_color = ergo.WARNING if verdict_mbps < disk_benchmark.SLOW_HARDWARE_THRESHOLD_MBPS else ergo.SUCCESS
 
                 self._bench_last_result = (read_res['mbps'], copy_mbps)
                 self.after(0, self._redraw_bench_chart)
                 self.after(0, lambda: self.bench_result_lbl.configure(text=verdict_text, text_color=verdict_color))
             except Exception as e:
-                self.after(0, lambda err=str(e): self.bench_result_lbl.configure(text=f"Errore durante il test: {err}", text_color="#ef4444"))
+                self.after(0, lambda err=str(e): self.bench_result_lbl.configure(text=f"Errore durante il test: {err}", text_color=ergo.ERROR))
             finally:
                 self.after(0, lambda: self.btn_run_bench.configure(state="normal", text="🧪 Avvia Test"))
                 self.after(0, lambda: self.bench_progress.set(1))
@@ -1186,22 +1306,24 @@ class DatariumApp(ctk.CTk):
         
         ok, msg = self.ai.check_ffmpeg(path if path else None)
         if ok:
-            self.ffmpeg_status_lbl.configure(text=f"✓ FFMPEG Rilevato con successo: {msg}", text_color="#10b981")
+            self.ffmpeg_status_lbl.configure(text=f"✓ FFMPEG Rilevato con successo: {msg}", text_color=ergo.SUCCESS)
             if not silent:
-                from tkinter import messagebox
-                messagebox.showinfo("FFMPEG", f"Verifica completata con successo!\nPercorso: {msg}")
+                # l'esito e' gia' scritto sotto il campo: niente popup modale da chiudere
+                ergo.toast(self, "FFMPEG verificato correttamente")
         else:
-            self.ffmpeg_status_lbl.configure(text=f"❌ Errore FFMPEG: {msg}", text_color="#ef4444")
+            # Qui siamo GIA' nelle Impostazioni: il generico "configuralo nelle Impostazioni"
+            # diventa l'azione concreta da fare in questa schermata.
+            msg = msg.replace("Configuralo nelle Impostazioni.", "Usa «Sfoglia» per indicare ffmpeg, poi «Verifica».")
+            self.ffmpeg_status_lbl.configure(text=f"❌ Errore FFMPEG: {msg}", text_color=ergo.ERROR)
             if not silent:
-                from tkinter import messagebox
-                messagebox.showerror("Errore FFMPEG", f"Impossibile avviare FFMPEG:\n{msg}")
+                ergo.toast(self, "FFMPEG non trovato: vedi il messaggio sotto il campo", kind="error", duration_ms=3500)
 
     def render_rules_list(self):
         for w in self.rules_list_frame.winfo_children():
             w.destroy()
             
         if not self.custom_rules:
-            ctk.CTkLabel(self.rules_list_frame, text="Nessuna regola definita. I file useranno la catalogazione AI.", text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=10)
+            ctk.CTkLabel(self.rules_list_frame, text="Nessuna regola definita. I file useranno la catalogazione AI.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12, slant="italic")).pack(pady=10)
             return
             
         for idx, rule in enumerate(self.custom_rules):
@@ -1209,9 +1331,9 @@ class DatariumApp(ctk.CTk):
             row.pack(fill="x", pady=2)
             
             rule_text = f"SE {rule['type']} è '{rule['value']}' ➜ SPOSTA IN '{rule['folder']}'"
-            ctk.CTkLabel(row, text=rule_text, font=ctk.CTkFont(size=11), anchor="w").pack(side="left", padx=10, fill="x", expand=True)
+            ctk.CTkLabel(row, text=rule_text, font=ctk.CTkFont(size=12), anchor="w").pack(side="left", padx=10, fill="x", expand=True)
             
-            btn_del = ctk.CTkButton(row, text="❌", width=30, height=22, fg_color="transparent", text_color="#ef4444", font=ctk.CTkFont(size=10, weight="bold"), command=lambda i=idx: self.delete_custom_rule(i))
+            btn_del = ctk.CTkButton(row, text="❌", width=30, height=22, fg_color="transparent", text_color=ergo.ERROR, font=ctk.CTkFont(size=12, weight="bold"), command=lambda i=idx: self.delete_custom_rule(i))
             btn_del.pack(side="right", padx=10)
             
     def add_custom_rule(self):
@@ -1292,9 +1414,9 @@ class DatariumApp(ctk.CTk):
                 self.license.save_license(token)
                 self.is_licensed = True
                 self.license_status = msg
-                self.lic_status_lbl.configure(text=f"Licenza Attiva: {msg}", text_color="#10b981")
+                self.lic_status_lbl.configure(text=f"Licenza Attiva: {msg}", text_color=ergo.SUCCESS)
             else:
-                self.lic_status_lbl.configure(text=f"Errore: {msg}", text_color="#ef4444")
+                self.lic_status_lbl.configure(text=f"Errore: {msg}", text_color=ergo.ERROR)
 
     def _fetch_remote_version_info(self):
         """Interroga version.json. Ritorna il dict remoto o solleva un'eccezione."""
@@ -1513,7 +1635,7 @@ class DatariumApp(ctk.CTk):
         if not self.is_licensed and name not in ["Setup", "Settings"]:
             name = "Settings"
             if hasattr(self, 'lic_status_lbl'):
-                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color="#ef4444")
+                self.lic_status_lbl.configure(text=f"Stato: {self.license_status} - Licenza necessaria per accedere ai servizi", text_color=ergo.ERROR)
 
         # Se siamo in Setup, nascondiamo la sidebar per farlo sembrare un installer
         if name == "Setup":
@@ -1525,6 +1647,10 @@ class DatariumApp(ctk.CTk):
             
         if name == "HashHome":
             self._reset_hash_selection()
+        if name == "People":
+            self.refresh_people_page()
+        if name == "OrganizerHome":
+            self._refresh_org_undo_button()
         for p in self.pages.values(): p.pack_forget()
         self.pages[name].pack(fill="both", expand=True)
         self._update_nav_active(name)
@@ -1539,6 +1665,8 @@ class DatariumApp(ctk.CTk):
         "OffloadHome": "Offload", "OffloadResults": "Offload",
         "Sync": "Sync",
         "Settings": "Settings",
+        "Cull": "Cull",
+        "People": "People",
     }
 
     def _update_nav_active(self, page_name):
@@ -1550,11 +1678,88 @@ class DatariumApp(ctk.CTk):
                 pass
 
     def change_appearance_mode(self, mode_str):
-        mode = "Dark" if mode_str == "Scuro" else "Light"
+        mode = {"Scuro": "Dark", "Chiaro": "Light", "Sistema": "System"}.get(mode_str, "Dark")
         ctk.set_appearance_mode(mode)
+        self.appearance_pref = mode_str
+        self.save_settings()
+
+    # --- ERGONOMIA: tastiera, zoom, guida, chiusura sicura ---
+    UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_STEP = 0.8, 1.6, 0.1
+    NAV_SHORTCUTS = [("1", "Home"), ("2", "Organizer"), ("3", "Auto Tag"), ("4", "Hash Check"),
+                     ("5", "Offload"), ("6", "Sincronizza Dischi"), ("7", "Selezione Foto"), ("8", "Persone")]
+
+    @staticmethod
+    def _shortcut_mod_label():
+        return "Cmd" if platform.system() == "Darwin" else "Ctrl"
+
+    def setup_keyboard_shortcuts(self):
+        mod = "Command" if platform.system() == "Darwin" else "Control"
+        targets = {"1": lambda: self.show_page("Home"), "2": self.go_to_organizer,
+                   "3": lambda: self.show_page("AutoTag"), "4": lambda: self.show_page("HashHome"),
+                   "5": lambda: self.show_page("OffloadHome"), "6": lambda: self.show_page("Sync"),
+                   "7": lambda: self.show_page("Cull"), "8": lambda: self.show_page("People")}
+
+        def nav(action):
+            # stessa regola dei pulsanti della sidebar: niente cambio pagina a lavoro in corso
+            if getattr(self, "is_scanning", False) or not self.sidebar.winfo_ismapped():
+                return "break"
+            action()
+            return "break"
+
+        for key, action in targets.items():
+            self.bind_all(f"<{mod}-Key-{key}>", lambda e, a=action: nav(a))
+        self.bind_all(f"<{mod}-comma>", lambda e: nav(lambda: self.show_page("Settings")))
+        for seq in ("plus", "equal", "KP_Add"):
+            self.bind_all(f"<{mod}-{seq}>", lambda e: self.change_ui_scaling(+self.UI_SCALE_STEP))
+        for seq in ("minus", "KP_Subtract"):
+            self.bind_all(f"<{mod}-{seq}>", lambda e: self.change_ui_scaling(-self.UI_SCALE_STEP))
+        self.bind_all(f"<{mod}-Key-0>", lambda e: self.change_ui_scaling(None))
+        self.bind_all("<F1>", lambda e: self.show_help())
+
+    def show_help(self):
+        m = self._shortcut_mod_label()
+        ergo.show_help(self, [
+            ("Tab / Maiusc+Tab", "Passa al controllo successivo / precedente"),
+            ("Spazio / Invio", "Attiva il pulsante, la casella o il menu selezionato"),
+            ("Esc", "Chiude la finestra di dialogo (equivale ad Annulla/Salta)"),
+            *[(f"{m}+{k}", f"Vai a {label}") for k, label in self.NAV_SHORTCUTS],
+            (f"{m}+,", "Apri le Impostazioni"),
+            (f"{m}+ +  /  {m}+ -", "Ingrandisci / riduci testo e interfaccia"),
+            (f"{m}+0", "Ripristina la dimensione predefinita (100%)"),
+            ("F1", "Mostra questa guida"),
+        ])
+
+    def change_ui_scaling(self, delta):
+        """delta=None ripristina il 100%. Lo zoom e' salvato e riapplicato al prossimo avvio."""
+        if delta is None:
+            new = 1.0
+        else:
+            new = min(max(round(self.ui_scaling + delta, 2), self.UI_SCALE_MIN), self.UI_SCALE_MAX)
+        if abs(new - self.ui_scaling) < 1e-6:
+            return "break"
+        self.ui_scaling = new
+        ctk.set_widget_scaling(new)
+        self.save_settings()
+        if hasattr(self, "ui_scaling_menu"):
+            self.ui_scaling_menu.set(f"{int(round(new * 100))}%")
+        ergo.toast(self, f"Dimensione interfaccia: {int(round(new * 100))}%", kind="info", duration_ms=1400)
+        return "break"
+
+    def on_close_request(self):
+        if getattr(self, "is_scanning", False):
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                "Operazione in corso",
+                "C'è un'operazione in corso (analisi, copia o verifica).\n\n"
+                "Se chiudi adesso verrà interrotta a metà e i file di destinazione "
+                "potrebbero risultare incompleti.\n\nVuoi chiudere comunque?",
+                icon="warning", default="no"):
+                return
+        self.destroy()
 
     def set_sidebar_state(self, state="normal"):
-        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_sync, self.btn_settings]
+        buttons = [self.btn_home, self.btn_organizer, self.btn_hash, self.btn_autotag, self.btn_offload, self.btn_sync,
+                   self.btn_cull, self.btn_people, self.btn_settings]
         for btn in buttons:
             btn.configure(state=state)
         if hasattr(self, 'appearance_mode_segmented'):
@@ -1583,7 +1788,7 @@ class DatariumApp(ctk.CTk):
         self.is_licensed, self.license_status = self.license.verify_license()
         if not self.is_licensed:
             self.show_page("Settings")
-            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color="#ef4444")
+            self.lic_status_lbl.configure(text=f"Stato: {self.license_status}", text_color=ergo.ERROR)
             return
             
         self.show_page("Preview")
@@ -1631,6 +1836,7 @@ class DatariumApp(ctk.CTk):
 
             self._organize_start_time = time.time()
             self._review_count = 0
+            self._faces_deferred = 0
             self.set_progress(0)
             text_items = []
             vision_items = []
@@ -1638,6 +1844,8 @@ class DatariumApp(ctk.CTk):
             for root, _, files in os.walk(src):
                 if "Backup_Datarium_" in root: continue
                 for f in files:
+                    if f.startswith("Backup_Datarium_"):
+                        continue  # i backup ZIP di Datarium non sono file da riordinare
                     ext = os.path.splitext(f)[1].lower()
                     skip = False
                     if ext in [
@@ -1667,6 +1875,8 @@ class DatariumApp(ctk.CTk):
                     else: 
                         text_items.append({"old": f, "path": os.path.join(root, f), "type": "Other"})
             
+            all_lower = {it['path'].lower() for it in text_items + vision_items}
+            text_items = [it for it in text_items if not move_journal.is_sidecar_of_something(it['path'], all_lower)]
             all_items = text_items + vision_items
             valid_items = []
             
@@ -1740,6 +1950,11 @@ class DatariumApp(ctk.CTk):
                                 if predicted_name:
                                     identified_names.append(predicted_name)
                                     print(f"[FaceMemory] Volto {f_idx+1}/{len(faces)} riconosciuto: {predicted_name} (conf: {conf:.1f})")
+                                elif self.organizer_face_mode.get() == "Nomina dopo":
+                                    # Messo da parte: si nomina a gruppi nella pagina Persone, senza
+                                    # interrompere l'analisi con un popup per ogni volto.
+                                    self.face_mem.add_pending(gray_crop, bgr_crop, item['path'])
+                                    self._faces_deferred = getattr(self, "_faces_deferred", 0) + 1
                                 else:
                                     # Non riconosciuto, chiedi all'utente ritagliando il volto
                                     from PIL import Image
@@ -1760,12 +1975,13 @@ class DatariumApp(ctk.CTk):
                                     if user_input and user_input.strip():
                                         new_name = user_input.strip()
                                         identified_names.append(new_name)
-                                        self.face_mem.add_face(new_name, gray_crop)
+                                        self.face_mem.add_face(new_name, gray_crop, bgr_crop)
                                         print(f"[FaceMemory] Nuovo volto registrato in memoria: '{new_name}'")
                                         
                             if identified_names:
                                 # Rimuovi eventuali duplicati mantenendo l'ordine
                                 unique_names = list(dict.fromkeys(identified_names))
+                                item['_people'] = unique_names
                                 names_str = ", ".join(unique_names)
                                 item['context'] = (item.get('context', '') + f" Persone identificate dall'utente: {names_str}").strip()
                     except Exception as fe:
@@ -1847,7 +2063,9 @@ class DatariumApp(ctk.CTk):
                 self.last_groups = groups
 
             n_rev = getattr(self, "_review_count", 0)
-            self.update_status("✨ Analisi completata!" + (f" {n_rev} file in 'Da_Rivedere' (l'AI non era sicura)." if n_rev else ""))
+            n_faces = getattr(self, "_faces_deferred", 0)
+            self.update_status("✨ Analisi completata!" + (f" {n_rev} file in 'Da_Rivedere' (l'AI non era sicura)." if n_rev else "")
+                               + (f" {n_faces} volti da nominare in Persone." if n_faces else ""))
             self.after(0, lambda: self.render_groups(self.last_groups))
             self.send_local_notification("Datarium - Analisi Completata", f"Analizzati con successo {len(valid_items)} file.")
         finally:
@@ -1943,7 +2161,7 @@ class DatariumApp(ctk.CTk):
                                      command=lambda f=content_frame: self.toggle_accordion(f))
             toggle_btn.pack(fill="x", side="left", expand=True)
             
-            count_lbl = ctk.CTkLabel(cat_frame, text=f"{len(items)} file", font=ctk.CTkFont(size=11), text_color="gray")
+            count_lbl = ctk.CTkLabel(cat_frame, text=f"{len(items)} file", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
             count_lbl.pack(side="right", padx=10)
 
             # Sottogruppi (Subcategories)
@@ -1990,7 +2208,10 @@ class DatariumApp(ctk.CTk):
             try:
                 dest = self.control_folder.get()
                 src = self.source_folder.get()
-                zip_dest_dir = src
+                # prima il backup finiva SEMPRE nella sorgente, ignorando la cartella scelta in
+                # "Posto di Salvataggio ZIP"
+                zip_dest_dir = self.backup_folder.get() or src
+                os.makedirs(zip_dest_dir, exist_ok=True)
                 
                 if not dest: return
 
@@ -2043,6 +2264,8 @@ class DatariumApp(ctk.CTk):
                     return
 
                 self.update_status("🚀 Riorganizzazione in corso...")
+                journal = move_journal.MoveJournal(self.get_journal_dir(), "organizer", src)
+                write_xmp = self.organizer_write_xmp.get()
                 to_proc = []
                 for cat in self.last_groups.values():
                     for it in cat:
@@ -2059,7 +2282,7 @@ class DatariumApp(ctk.CTk):
                     if os.path.abspath(it['path']) == os.path.abspath(target):
                         continue
                         
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    # le cartelle le crea il registro (journal.move), cosi' sa quali rimuovere se annulli
                     
                     base_target = target
                     counter = 1
@@ -2069,7 +2292,16 @@ class DatariumApp(ctk.CTk):
                         counter += 1
                     
                     try:
-                        shutil.move(it['path'], target)
+                        # registrato: "Annulla l'ultima organizzazione" lo rimette dov'era
+                        # (insieme ai suoi sidecar, che ora lo seguono)
+                        target = journal.move(it['path'], target)
+                        if write_xmp:
+                            parts = [p_ for p_ in it['new'].split('/')[1:-1] if p_]
+                            created = xmp_sidecar.write_sidecar(
+                                target, parts, it.get('_people', []),
+                                ["|".join(["Datarium"] + parts)] if parts else [])
+                            if created:
+                                journal.record_created_file(created)
                         
                         # Generazione video proxy se abilitata
                         if self.proxy_gen_var.get() and it['type'] == "Video":
@@ -2088,7 +2320,8 @@ class DatariumApp(ctk.CTk):
                     self.set_progress(0.1 + 0.9 * ((i+1)/max(1, len(to_proc))))
 
                 self.set_progress(1.0)
-                self.update_status(f"✨ Completato! Folder riorganizzato e ZIP creato.")
+                self.update_status(f"✨ Completato! Cartella riorganizzata e ZIP creato. Puoi annullare con «Annulla organizzazione».")
+                self.after(0, self._refresh_org_undo_button)
                 self.send_local_notification("Datarium - Riorganizzazione Completata", f"Elaborati con successo {len(to_proc)} file.")
             finally:
                 self.is_scanning = False
@@ -2096,6 +2329,564 @@ class DatariumApp(ctk.CTk):
 
         import threading
         threading.Thread(target=run_org_bg, daemon=True).start()
+
+    # =====================================================================================
+    # ANNULLA ORGANIZZAZIONE (registro spostamenti, vedi move_journal.py)
+    # =====================================================================================
+    def get_journal_dir(self):
+        return os.path.join(os.path.dirname(self.get_config_path()), "journal")
+
+    def _refresh_org_undo_button(self):
+        data = move_journal.latest(self.get_journal_dir(), "organizer")
+        for btn in (getattr(self, "btn_org_undo", None), getattr(self, "btn_org_undo_home", None)):
+            if btn is None:
+                continue
+            if data:
+                if btn is self.btn_org_undo:
+                    btn.pack(side="right", padx=10)
+                else:
+                    btn.place(relx=0.5, rely=0.5, y=70, anchor="center")
+            else:
+                btn.pack_forget() if btn is self.btn_org_undo else btn.place_forget()
+        if hasattr(self, "org_undo_info"):
+            if data:
+                n = sum(1 for _ in data.get("moves", []))
+                when = str(data.get("created", "")).replace("T", " alle ")
+                self.org_undo_info.configure(text=f"Ultima organizzazione: {n} file, {when}  ·  cartella {data.get('root', '')}")
+                self.org_undo_info.place(relx=0.5, rely=0.5, y=106, anchor="center")
+            else:
+                self.org_undo_info.place_forget()
+
+    def undo_last_organization(self):
+        from tkinter import messagebox
+        data = move_journal.latest(self.get_journal_dir(), "organizer")
+        if not data:
+            ergo.toast(self, "Non c'è nessuna organizzazione da annullare", kind="info")
+            self._refresh_org_undo_button()
+            return
+        n = len(data.get("moves", []))
+        if not messagebox.askyesno(
+                "Annulla organizzazione",
+                f"Rimetto {n} file nella posizione che avevano prima dell'organizzazione del "
+                f"{str(data.get('created', '')).replace('T', ' alle ')}?\n\n"
+                "Le cartelle create da Datarium vengono rimosse solo se restano vuote. "
+                "Il backup ZIP non viene toccato.", default="yes"):
+            return
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
+
+        def run():
+            try:
+                restored, failed = move_journal.undo(
+                    data, progress_cb=lambda i, t: self.update_status(f"↩ Ripristino {i + 1}/{t}…") if i % 10 == 0 else None)
+            finally:
+                self.is_scanning = False
+
+            def done():
+                self.set_sidebar_state("normal")
+                self._refresh_org_undo_button()
+                self.update_status(f"↩ Organizzazione annullata: {restored} file rimessi al loro posto.")
+                if failed:
+                    details = "\n".join(f"• {os.path.basename(f)}: {why}" for f, why in failed[:10])
+                    messagebox.showwarning("Annullamento parziale",
+                                           f"{restored} file ripristinati, {len(failed)} no:\n{details}"
+                                           + ("\n…" if len(failed) > 10 else ""))
+                else:
+                    ergo.toast(self, f"Fatto: {restored} file rimessi al loro posto")
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _update_face_mode_visibility(self):
+        if not hasattr(self, "face_mode_row"):
+            return
+        state = "normal" if self.organizer_identify_people.get() else "disabled"
+        self.face_mode_seg.configure(state=state)
+
+    # =====================================================================================
+    # UTILITA' COMUNI ALLE PAGINE CON MINIATURE
+    # =====================================================================================
+    @staticmethod
+    def _load_thumb(path, size):
+        """Miniatura (orientata secondo l'EXIF) come CTkImage, o None se illeggibile."""
+        try:
+            from PIL import Image, ImageOps
+            if raw_preview.is_raw(path):
+                im = raw_preview.extract_pil(path)
+                if im is None:
+                    return None
+            else:
+                with Image.open(path) as src:
+                    im = ImageOps.exif_transpose(src)
+                    im.load()
+            im.thumbnail((size, size))
+            im = im.convert("RGB")
+            return ctk.CTkImage(light_image=im, size=im.size)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _open_with_system(path):
+        try:
+            if platform.system() == "Windows":
+                os.startfile(path)
+            elif platform.system() == "Darwin":
+                import subprocess
+                subprocess.Popen(["open", path])
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            print(f"Impossibile aprire {path}: {e}")
+
+    def _page_header(self, page, title, subtitle):
+        ctk.CTkLabel(page, text=title, font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 4))
+        ctk.CTkLabel(page, text=subtitle, text_color=ergo.MUTED, justify="left", wraplength=760).pack(anchor="w", pady=(0, 14))
+
+    # =====================================================================================
+    # PERSONE (ispirata alla vista People di Lightroom/LightCraft)
+    # =====================================================================================
+    def init_people_page(self):
+        page = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["People"] = page
+        self._page_header(page, "Persone",
+                          "Le persone che Datarium sa riconoscere nelle foto. I volti sono dati personali: "
+                          "restano solo su questo computer e puoi cancellarli in qualsiasi momento.")
+
+        bar = ctk.CTkFrame(page, fg_color="transparent")
+        bar.pack(fill="x", pady=(0, 8))
+        self.people_seg = ctk.CTkSegmentedButton(bar, values=["Persone conosciute", "Volti da identificare"],
+                                                 command=lambda v: self._people_switch(v))
+        self.people_seg.pack(side="left")
+        self.people_seg.set("Persone conosciute")
+        self.btn_people_scan = ctk.CTkButton(bar, text="Cerca volti in una cartella…", command=self.people_scan_folder)
+        self.btn_people_scan.pack(side="left", padx=12)
+        ergo.tooltip(self.btn_people_scan, "Trova i volti nelle foto di una cartella. Quelli che Datarium non conosce\n"
+                                           "finiscono in «Volti da identificare», raggruppati per somiglianza.")
+        ctk.CTkButton(bar, text="Cancella tutti i dati dei volti…", fg_color="transparent", border_width=1,
+                      border_color=("#b91c1c", "#f87171"), text_color=ergo.ERROR, hover_color=("#fee2e2", "#3f1d1d"),
+                      command=self.people_delete_all).pack(side="right")
+
+        self.people_status = ctk.CTkLabel(page, text="", text_color=ergo.MUTED, anchor="w")
+        self.people_status.pack(fill="x")
+        self.people_progress = ctk.CTkProgressBar(page, height=8)
+        self.people_progress.set(0)
+
+        self.people_scroll = ctk.CTkScrollableFrame(page, fg_color=("gray95", "gray10"))
+        self.people_scroll.pack(fill="both", expand=True, pady=(6, 0))
+        self._people_images = []
+
+    def _people_switch(self, value):
+        self.people_view.set("pending" if value.startswith("Volti") else "known")
+        self.refresh_people_page()
+
+    def refresh_people_page(self):
+        if not hasattr(self, "people_scroll"):
+            return
+        n_pending = self.face_mem.pending_count()
+        n_people = len(self.face_mem.list_people())
+        self.people_seg.configure(values=[f"Persone conosciute ({n_people})", f"Volti da identificare ({n_pending})"])
+        self.people_seg.set(f"Volti da identificare ({n_pending})" if self.people_view.get() == "pending"
+                            else f"Persone conosciute ({n_people})")
+        for w in self.people_scroll.winfo_children():
+            w.destroy()
+        self._people_images = []
+        if self.people_view.get() == "pending":
+            self._render_people_pending()
+        else:
+            self._render_people_known()
+
+    def _empty_state(self, parent, title, text):
+        box = ctk.CTkFrame(parent, fg_color="transparent")
+        box.pack(fill="x", pady=40)
+        ctk.CTkLabel(box, text=title, font=ctk.CTkFont(size=16, weight="bold")).pack()
+        ctk.CTkLabel(box, text=text, text_color=ergo.MUTED, wraplength=520, justify="center").pack(pady=6)
+
+    def _render_people_known(self):
+        people = self.face_mem.list_people()
+        if not people:
+            self._empty_state(self.people_scroll, "Nessuna persona ancora",
+                              "Usa «Cerca volti in una cartella…» oppure attiva «Identifica Persone» nell'Organizer: "
+                              "i volti che nomini compariranno qui.")
+            return
+        grid = ctk.CTkFrame(self.people_scroll, fg_color="transparent")
+        grid.pack(fill="both", expand=True)
+        cols = 4
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1, uniform="people")
+        for i, (name, n_samples, thumb) in enumerate(people):
+            card = ctk.CTkFrame(grid, corner_radius=12, border_width=1, border_color=("gray85", "gray20"))
+            card.grid(row=i // cols, column=i % cols, padx=8, pady=8, sticky="nsew")
+            img = self._load_thumb(thumb, 96) if thumb else None
+            if img:
+                self._people_images.append(img)
+                ctk.CTkLabel(card, text="", image=img).pack(pady=(14, 6))
+            else:
+                initials = "".join(w[0] for w in name.split()[:2]).upper() or "?"
+                ctk.CTkLabel(card, text=initials, width=96, height=96, corner_radius=48,
+                             fg_color=("#dbeafe", "#1e3a5f"), text_color=("#1d4ed8", "#7dd3fc"),
+                             font=ctk.CTkFont(size=30, weight="bold")).pack(pady=(14, 6))
+            ctk.CTkLabel(card, text=name, font=ctk.CTkFont(size=14, weight="bold"), wraplength=170).pack(padx=8)
+            ctk.CTkLabel(card, text=f"{n_samples} {'campione' if n_samples == 1 else 'campioni'} di volto",
+                         text_color=ergo.MUTED, font=ctk.CTkFont(size=12)).pack()
+            row = ctk.CTkFrame(card, fg_color="transparent")
+            row.pack(pady=(8, 12))
+            b_ren = ctk.CTkButton(row, text="Rinomina", width=84, height=28, fg_color="transparent", border_width=1,
+                                  text_color=("gray10", "gray90"), command=lambda n=name: self.people_rename(n))
+            b_ren.pack(side="left", padx=3)
+            ergo.tooltip(b_ren, "Scrivendo il nome di un'altra persona già presente, le due vengono unite.")
+            ctk.CTkButton(row, text="Elimina", width=70, height=28, fg_color="transparent", border_width=1,
+                          border_color=("#b91c1c", "#f87171"), text_color=ergo.ERROR, hover_color=("#fee2e2", "#3f1d1d"),
+                          command=lambda n=name: self.people_delete(n)).pack(side="left", padx=3)
+
+    def _render_people_pending(self):
+        groups = self.face_mem.pending_groups()
+        if not groups:
+            self._empty_state(self.people_scroll, "Nessun volto da identificare",
+                              "Qui arrivano i volti che Datarium non conosce: dalla ricerca in una cartella o "
+                              "dall'Organizer con l'opzione «Nomina dopo». I volti simili vengono raggruppati, "
+                              "così basta scrivere il nome una volta sola.")
+            return
+        known = [p[0] for p in self.face_mem.list_people()]
+        ctk.CTkLabel(self.people_scroll, text="Scrivi il nome e premi Invio. Ogni riga raccoglie volti che si somigliano: "
+                                              "se un volto non c'entra, scartalo prima con «Ignora».",
+                     text_color=ergo.MUTED, wraplength=760, justify="left").pack(anchor="w", padx=10, pady=(6, 4))
+        max_groups = 40
+        for g in groups[:max_groups]:
+            row = ctk.CTkFrame(self.people_scroll, corner_radius=10)
+            row.pack(fill="x", padx=6, pady=5)
+            faces = ctk.CTkFrame(row, fg_color="transparent")
+            faces.pack(side="left", padx=10, pady=10)
+            for t in g["thumbs"][:6]:
+                img = self._load_thumb(t, 64)
+                if img:
+                    self._people_images.append(img)
+                    ctk.CTkLabel(faces, text="", image=img).pack(side="left", padx=2)
+            if len(g["ids"]) > 6:
+                ctk.CTkLabel(faces, text=f"+{len(g['ids']) - 6}", text_color=ergo.MUTED).pack(side="left", padx=6)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="x", expand=True, padx=8)
+            n_ph = len(g["sources"])
+            ctk.CTkLabel(info, text=f"{len(g['ids'])} {'volto' if len(g['ids']) == 1 else 'volti'} in {n_ph} {'foto' if n_ph == 1 else 'foto diverse'}",
+                         font=ctk.CTkFont(weight="bold"), anchor="w").pack(anchor="w")
+            if g["suggested"]:
+                ctk.CTkLabel(info, text=f"Sembra {g['suggested']}: conferma o correggi il nome.",
+                             text_color=ergo.INFO, anchor="w").pack(anchor="w")
+            actions = ctk.CTkFrame(row, fg_color="transparent")
+            actions.pack(side="right", padx=10)
+            combo = ctk.CTkComboBox(actions, values=known or [""], width=190)
+            combo.set(g["suggested"] or "")
+            combo.pack(side="left", padx=4)
+            ids = g["ids"]
+            save = lambda e=None, c=combo, i=ids: self.people_name_group(i, c.get())
+            combo.bind("<Return>", save)
+            ctk.CTkButton(actions, text="Salva nome", width=96, command=save).pack(side="left", padx=4)
+            ctk.CTkButton(actions, text="Ignora", width=70, fg_color="transparent", border_width=1,
+                          text_color=("gray10", "gray90"),
+                          command=lambda i=ids: (self.face_mem.discard_pending(i), self.refresh_people_page())).pack(side="left", padx=4)
+        if len(groups) > max_groups:
+            ctk.CTkLabel(self.people_scroll, text=f"Mostrati i primi {max_groups} gruppi su {len(groups)}: "
+                                                  "nominali e gli altri compariranno qui.",
+                         text_color=ergo.MUTED).pack(pady=10)
+
+    def people_name_group(self, ids, name):
+        name = (name or "").strip()
+        if not name:
+            ergo.toast(self, "Scrivi un nome prima di salvare", kind="warning")
+            return
+        n = self.face_mem.name_pending(ids, name)
+        self.refresh_people_page()
+        ergo.toast(self, f"{n} {'volto associato' if n == 1 else 'volti associati'} a {name}")
+
+    def people_rename(self, name):
+        dlg = ctk.CTkInputDialog(title="Rinomina persona",
+                                 text=f"Nuovo nome per «{name}».\nSe scrivi il nome di un'altra persona già presente, le due verranno unite.")
+        new = (dlg.get_input() or "").strip()
+        if not new or new == name:
+            return
+        merged = new in [p[0] for p in self.face_mem.list_people()]
+        if self.face_mem.rename_person(name, new):
+            ergo.toast(self, f"{name} unita a {new}" if merged else f"Rinominata in {new}")
+        self.refresh_people_page()
+
+    def people_delete(self, name):
+        from tkinter import messagebox
+        if messagebox.askyesno("Elimina persona",
+                               f"Eliminare «{name}» e i suoi campioni di volto?\n\n"
+                               "Le foto non vengono toccate: Datarium semplicemente non la riconoscerà più.",
+                               icon="warning", default="no"):
+            self.face_mem.delete_person(name)
+            self.refresh_people_page()
+            ergo.toast(self, f"{name} eliminata")
+
+    def people_delete_all(self):
+        from tkinter import messagebox
+        if messagebox.askyesno("Cancella tutti i dati dei volti",
+                               "Vengono cancellati da questo computer tutte le persone, i campioni di volto, "
+                               "le miniature e i volti da identificare.\n\nLe foto non vengono toccate. "
+                               "L'operazione non si può annullare. Procedere?", icon="warning", default="no"):
+            self.face_mem.delete_all_face_data()
+            self.refresh_people_page()
+            ergo.toast(self, "Dati dei volti cancellati")
+
+    def people_scan_folder(self):
+        folder = filedialog.askdirectory(title="Cartella in cui cercare i volti")
+        if not folder:
+            return
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
+        self.btn_people_scan.configure(state="disabled")
+        self.people_progress.pack(fill="x", pady=(4, 0), after=self.people_status)
+
+        def progress(i, total, name):
+            if i % 3 == 0 or i == total:
+                frac = i / max(1, total)
+                self.after(0, lambda: (self.people_progress.set(frac),
+                                       self.people_status.configure(text=f"Cerco volti: foto {i}/{total}  {name}")))
+
+        def run():
+            result = (0, 0, 0)
+            try:
+                result = self.face_mem.scan_folder(folder, progress_cb=progress)
+            except Exception as e:
+                print(f"Ricerca volti fallita: {e}")
+            finally:
+                self.is_scanning = False
+
+            def done():
+                photos, known, new = result
+                self.set_sidebar_state("normal")
+                self.btn_people_scan.configure(state="normal")
+                self.people_progress.pack_forget()
+                self.people_status.configure(
+                    text=f"{photos} foto analizzate: {known} volti riconosciuti, {new} nuovi da identificare.")
+                if new:
+                    self.people_view.set("pending")
+                self.refresh_people_page()
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # =====================================================================================
+    # SELEZIONE FOTO (culling assistito: raffiche, doppioni, foto mosse)
+    # =====================================================================================
+    def init_cull_page(self):
+        page = ctk.CTkFrame(self.content_container, fg_color="transparent")
+        self.pages["Cull"] = page
+        self._page_header(page, "Selezione Foto",
+                          "Trova raffiche, quasi-doppioni e foto mosse e ti propone di tenere solo le migliori. "
+                          f"Le scartate vengono spostate nella cartella «{culling.REJECT_DIR_NAME}», mai cancellate, "
+                          "e lo spostamento si può annullare.")
+
+        row = ctk.CTkFrame(page, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text="Cartella:").pack(side="left", padx=(0, 8))
+        ctk.CTkEntry(row, textvariable=self.cull_folder, placeholder_text="Scegli la cartella con le foto").pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(row, text="Scegli…", width=90, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"),
+                      command=lambda: self._pick_into(self.cull_folder, "Cartella con le foto da selezionare")).pack(side="left", padx=8)
+        self.btn_cull_run = ctk.CTkButton(row, text="Analizza", width=110, command=self.cull_analyze)
+        self.btn_cull_run.pack(side="left")
+
+        self.cull_status = ctk.CTkLabel(page, text="", text_color=ergo.MUTED, anchor="w")
+        self.cull_status.pack(fill="x", pady=(6, 0))
+        self.cull_progress = ctk.CTkProgressBar(page, height=8)
+        self.cull_progress.set(0)
+
+        self.cull_scroll = ctk.CTkScrollableFrame(page, fg_color=("gray95", "gray10"))
+        self.cull_scroll.pack(fill="both", expand=True, pady=(6, 8))
+        self._empty_state(self.cull_scroll, "Scegli una cartella e premi «Analizza»",
+                          "Legge JPEG, PNG, TIFF, WebP, HEIC e i RAW delle fotocamere (dall'anteprima incorporata). Per ogni gruppo di scatti simili la più nitida è segnata "
+                          "come «Migliore»; le altre sono già spuntate per essere scartate, ma puoi cambiare ogni scelta. "
+                          "Doppio clic su una foto per vederla a schermo intero.")
+
+        foot = ctk.CTkFrame(page, fg_color="transparent")
+        foot.pack(fill="x")
+        self.cull_summary = ctk.CTkLabel(foot, text="", font=ctk.CTkFont(weight="bold"))
+        self.cull_summary.pack(side="left")
+        self.btn_cull_move = ctk.CTkButton(foot, text="Sposta le scartate", width=170, fg_color="#10b981", hover_color="#059669",
+                                           state="disabled", command=self.cull_move_selected)
+        self.btn_cull_move.pack(side="right")
+        self.btn_cull_undo = ctk.CTkButton(foot, text="↩ Annulla ultimo spostamento", fg_color="transparent", border_width=1,
+                                           text_color=("gray10", "gray90"), command=self.cull_undo)
+        self.btn_cull_undo.pack(side="right", padx=10)
+        self._cull_images = []
+        self._cull_items = []
+
+    def _pick_into(self, var, title):
+        folder = filedialog.askdirectory(title=title)
+        if folder:
+            var.set(folder)
+
+    def cull_analyze(self):
+        folder = self.cull_folder.get().strip()
+        if not folder or not os.path.isdir(folder):
+            from tkinter import messagebox
+            messagebox.showwarning("Cartella mancante", "Scegli una cartella esistente con le foto da analizzare.")
+            return
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
+        self.btn_cull_run.configure(state="disabled")
+        self.btn_cull_move.configure(state="disabled")
+        self.cull_progress.pack(fill="x", pady=(4, 0), after=self.cull_status)
+        stop = {"v": False}
+
+        def progress(i, total, name):
+            if i % 4 == 0 or i == total:
+                frac = i / max(1, total)
+                self.after(0, lambda: (self.cull_progress.set(frac),
+                                       self.cull_status.configure(text=f"Analisi {i}/{total}  {name}")))
+
+        def run():
+            result = None
+            try:
+                items, unreadable = culling.analyze(folder, progress, lambda: stop["v"])
+                groups = culling.group_similar(items)
+                in_groups = {it["path"] for g in groups for it in g}
+                blurry = culling.find_blurry(items, in_groups)
+                result = (items, unreadable, groups, blurry)
+            except Exception as e:
+                print(f"Selezione foto fallita: {e}")
+            finally:
+                self.is_scanning = False
+            self.after(0, lambda: self._cull_render(result))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _cull_render(self, result):
+        self.set_sidebar_state("normal")
+        self.btn_cull_run.configure(state="normal")
+        self.cull_progress.pack_forget()
+        for w in self.cull_scroll.winfo_children():
+            w.destroy()
+        self._cull_images, self.cull_vars = [], {}
+        if result is None:
+            self.cull_status.configure(text="Analisi non riuscita: controlla che la cartella sia leggibile.", text_color=ergo.ERROR)
+            return
+        items, unreadable, groups, blurry = result
+        import statistics
+        med = statistics.median([it["sharp"] for it in items]) if items else 0
+        msg = f"{len(items)} foto analizzate: {len(groups)} gruppi di scatti simili, {len(blurry)} foto probabilmente mosse."
+        if unreadable:
+            msg += f" {len(unreadable)} file non leggibili ignorati."
+        self.cull_status.configure(text=msg, text_color=ergo.MUTED)
+        if not groups and not blurry:
+            self._empty_state(self.cull_scroll, "Niente da scartare",
+                              "Nessuna raffica, doppione o foto mossa trovata in questa cartella.")
+            self._cull_update_summary()
+            return
+
+        max_tiles, shown = 240, 0
+
+        def tile(parent, it, label, label_color, preselect):
+            nonlocal shown
+            shown += 1
+            box = ctk.CTkFrame(parent, corner_radius=8, fg_color=("gray90", "gray17"))
+            box.pack(side="left", padx=4, pady=4)
+            img = self._load_thumb(it["path"], 150)
+            lbl = ctk.CTkLabel(box, text="" if img else os.path.basename(it["path"]), image=img, width=150, height=110)
+            if img:
+                self._cull_images.append(img)
+            lbl.pack(padx=6, pady=(6, 2))
+            ctk.CTkLabel(box, text=os.path.basename(it["path"]), font=ctk.CTkFont(size=12), wraplength=150).pack(padx=6)
+            ctk.CTkLabel(box, text=label, text_color=label_color, font=ctk.CTkFont(size=12, weight="bold")).pack()
+            var = ctk.BooleanVar(value=preselect)
+            self.cull_vars[it["path"]] = var
+            ctk.CTkCheckBox(box, text="Scarta", variable=var, command=self._cull_update_summary).pack(pady=(2, 8))
+            # clic = cambia scelta, doppio clic = apri la foto
+            lbl.bind("<Button-1>", lambda e, v=var: (v.set(not v.get()), self._cull_update_summary()))
+            lbl.bind("<Double-Button-1>", lambda e, p=it["path"]: self._open_with_system(p))
+
+        if groups:
+            ctk.CTkLabel(self.cull_scroll, text=f"Raffiche e quasi-doppioni ({len(groups)})",
+                         font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=8, pady=(8, 2))
+            for g in groups:
+                if shown >= max_tiles:
+                    break
+                row = ctk.CTkFrame(self.cull_scroll, fg_color="transparent")
+                row.pack(fill="x", padx=4)
+                for k, it in enumerate(g[:8]):
+                    if k == 0:
+                        tile(row, it, "★ Migliore", ergo.SUCCESS, False)
+                    else:
+                        tile(row, it, culling.sharpness_label(it["sharp"], med), ergo.MUTED, True)
+                if len(g) > 8:
+                    ctk.CTkLabel(row, text=f"+{len(g) - 8} simili non mostrate", text_color=ergo.MUTED).pack(side="left", padx=8)
+        if blurry and shown < max_tiles:
+            ctk.CTkLabel(self.cull_scroll, text=f"Foto probabilmente mosse o sfocate ({len(blurry)})",
+                         font=ctk.CTkFont(size=16, weight="bold")).pack(anchor="w", padx=8, pady=(14, 2))
+            row = None
+            for k, it in enumerate(blurry):
+                if shown >= max_tiles:
+                    break
+                if k % 5 == 0:
+                    row = ctk.CTkFrame(self.cull_scroll, fg_color="transparent")
+                    row.pack(fill="x", padx=4)
+                tile(row, it, culling.sharpness_label(it["sharp"], med), ergo.WARNING, True)
+        if shown >= max_tiles:
+            ctk.CTkLabel(self.cull_scroll, text=f"Mostrate le prime {max_tiles} foto: sposta queste e rianalizza per vedere le altre.",
+                         text_color=ergo.MUTED).pack(pady=10)
+        self._cull_update_summary()
+
+    def _cull_update_summary(self):
+        n = sum(1 for v in self.cull_vars.values() if v.get())
+        self.cull_summary.configure(text=f"{n} {'foto da scartare' if n != 1 else 'foto da scartare'}" if self.cull_vars else "")
+        self.btn_cull_move.configure(state="normal" if n else "disabled",
+                                     text=f"Sposta {n} scartate" if n else "Sposta le scartate")
+
+    def cull_move_selected(self):
+        folder = self.cull_folder.get().strip()
+        paths = [p for p, v in self.cull_vars.items() if v.get()]
+        if not paths or not folder:
+            return
+        reject_root = os.path.join(folder, culling.REJECT_DIR_NAME)
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
+        self.btn_cull_move.configure(state="disabled")
+
+        def run():
+            moved, failed = 0, []
+            journal = move_journal.MoveJournal(self.get_journal_dir(), "cull", folder)
+            try:
+                for p in paths:
+                    try:
+                        journal.move(p, os.path.join(reject_root, os.path.relpath(p, folder)))
+                        moved += 1
+                    except Exception as e:
+                        failed.append((p, str(e)))
+            finally:
+                self.is_scanning = False
+
+            def done():
+                self.set_sidebar_state("normal")
+                for w in self.cull_scroll.winfo_children():
+                    w.destroy()
+                self.cull_vars = {}
+                self._cull_update_summary()
+                self._empty_state(self.cull_scroll, f"{moved} foto spostate in «{culling.REJECT_DIR_NAME}»",
+                                  "Puoi riportarle indietro con «Annulla ultimo spostamento», oppure rianalizzare la cartella.")
+                if failed:
+                    from tkinter import messagebox
+                    details = "\n".join(f"• {os.path.basename(f)}: {e}" for f, e in failed[:8])
+                    messagebox.showwarning("Alcune foto non spostate", f"{len(failed)} foto non spostate:\n{details}")
+                else:
+                    ergo.toast(self, f"{moved} foto spostate in {culling.REJECT_DIR_NAME}")
+            self.after(0, done)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def cull_undo(self):
+        data = move_journal.latest(self.get_journal_dir(), "cull")
+        if not data:
+            ergo.toast(self, "Nessuno spostamento da annullare", kind="info")
+            return
+        restored, failed = move_journal.undo(data)
+        if failed:
+            from tkinter import messagebox
+            details = "\n".join(f"• {os.path.basename(f)}: {why}" for f, why in failed[:8])
+            messagebox.showwarning("Annullamento parziale", f"{restored} foto ripristinate, {len(failed)} no:\n{details}")
+        else:
+            ergo.toast(self, f"{restored} foto rimesse al loro posto")
+        self.cull_status.configure(text="Spostamento annullato. Premi «Analizza» per aggiornare i risultati.", text_color=ergo.MUTED)
 
     def init_hash_pages(self):
         # 1. Page: HashHome (Drawing 2 updated)
@@ -2137,7 +2928,7 @@ class DatariumApp(ctk.CTk):
         f_row = ctk.CTkFrame(modal, fg_color="transparent")
         f_row.pack(fill="x", padx=40, pady=10)
         ctk.CTkLabel(f_row, text="File:", font=ctk.CTkFont(weight="bold")).pack(side="left")
-        ctk.CTkLabel(f_row, textvariable=self.hash_source_file, text_color="gray", font=ctk.CTkFont(size=11), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
+        ctk.CTkLabel(f_row, textvariable=self.hash_source_file, text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
         ctk.CTkButton(f_row, text="📁", width=40, command=self.pick_hash_file).pack(side="right")
         ctk.CTkButton(f_row, text="✖", width=32, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self._clear_hash_field("file")).pack(side="right", padx=(0, 6))
 
@@ -2145,7 +2936,7 @@ class DatariumApp(ctk.CTk):
         fold_row = ctk.CTkFrame(modal, fg_color="transparent")
         fold_row.pack(fill="x", padx=40, pady=10)
         ctk.CTkLabel(fold_row, text="Cartella:", font=ctk.CTkFont(weight="bold")).pack(side="left")
-        ctk.CTkLabel(fold_row, textvariable=self.hash_source_folder, text_color="gray", font=ctk.CTkFont(size=11), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
+        ctk.CTkLabel(fold_row, textvariable=self.hash_source_folder, text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=320, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
         ctk.CTkButton(fold_row, text="📂", width=40, command=self.pick_hash_folder).pack(side="right")
         ctk.CTkButton(fold_row, text="✖", width=32, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self._clear_hash_field("folder")).pack(side="right", padx=(0, 6))
 
@@ -2153,7 +2944,7 @@ class DatariumApp(ctk.CTk):
         fold_row_2 = ctk.CTkFrame(modal, fg_color="transparent")
         fold_row_2.pack(fill="x", padx=40, pady=10)
         ctk.CTkLabel(fold_row_2, text="Cartella 2 (Confronto):", font=ctk.CTkFont(weight="bold")).pack(side="left")
-        ctk.CTkLabel(fold_row_2, textvariable=self.hash_source_folder_2, text_color="gray", font=ctk.CTkFont(size=11), wraplength=250, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
+        ctk.CTkLabel(fold_row_2, textvariable=self.hash_source_folder_2, text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=250, anchor="w", justify="left").pack(side="left", padx=10, fill="x", expand=True)
         ctk.CTkButton(fold_row_2, text="📂", width=40, command=self.pick_hash_folder_2).pack(side="right")
         ctk.CTkButton(fold_row_2, text="✖", width=32, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self._clear_hash_field("folder2")).pack(side="right", padx=(0, 6))
 
@@ -2199,7 +2990,7 @@ class DatariumApp(ctk.CTk):
         self.hash_progress_bar = ctk.CTkProgressBar(self.hash_progress_frame, height=10)
         self.hash_progress_bar.pack(fill="x", padx=5, pady=(2, 0))
         ctk.CTkLabel(self.hash_progress_frame, text="Passo 1: calcolo l'hash di ogni file, uno alla volta. Il confronto tra le cartelle avviene alla fine, per percorso.",
-                     font=ctk.CTkFont(size=11), text_color="gray", anchor="w", justify="left", wraplength=700).pack(anchor="w", padx=5, pady=(2, 0))
+                     font=ctk.CTkFont(size=12), text_color=ergo.MUTED, anchor="w", justify="left", wraplength=700).pack(anchor="w", padx=5, pady=(2, 0))
         self.hash_progress_bar.set(0)
 
         # A single master scrollable frame to hold all tables/sections
@@ -2285,16 +3076,16 @@ class DatariumApp(ctk.CTk):
             w.destroy()
         
         if not self.recent_hash_files:
-            ctk.CTkLabel(self.recent_hash_scroll, text="Nessun file aperto di recente.", text_color="gray", font=ctk.CTkFont(size=11)).pack(pady=10)
+            ctk.CTkLabel(self.recent_hash_scroll, text="Nessun file aperto di recente.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12)).pack(pady=10)
         else:
             for item in self.recent_hash_files:
                 row = ctk.CTkFrame(self.recent_hash_scroll, fg_color="transparent")
                 row.pack(fill="x", pady=2)
                 
-                lbl = ctk.CTkLabel(row, text=os.path.basename(item), font=ctk.CTkFont(size=11), anchor="w", justify="left")
+                lbl = ctk.CTkLabel(row, text=os.path.basename(item), font=ctk.CTkFont(size=12), anchor="w", justify="left")
                 lbl.pack(side="left", padx=5, fill="x", expand=True)
                 
-                btn = ctk.CTkButton(row, text="🔍 Scansiona", width=70, height=22, font=ctk.CTkFont(size=10), command=lambda p=item: self.select_recent_file(p))
+                btn = ctk.CTkButton(row, text="🔍 Scansiona", width=70, height=22, font=ctk.CTkFont(size=12), command=lambda p=item: self.select_recent_file(p))
                 btn.pack(side="right", padx=5)
 
     def select_recent_file(self, path):
@@ -2699,19 +3490,19 @@ class DatariumApp(ctk.CTk):
         tbl_hdr.columnconfigure(2, weight=5)
         tbl_hdr.columnconfigure(3, weight=1)
         
-        ctk.CTkLabel(tbl_hdr, text="Nome File", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, sticky="ew")
-        ctk.CTkLabel(tbl_hdr, text="Tipo", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=1, padx=10, sticky="ew")
-        ctk.CTkLabel(tbl_hdr, text="Hash", font=ctk.CTkFont(size=11, weight="bold"), anchor="w").grid(row=0, column=2, padx=10, sticky="ew")
-        ctk.CTkLabel(tbl_hdr, text="Dimensione", font=ctk.CTkFont(size=11, weight="bold"), anchor="e").grid(row=0, column=3, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Nome File", font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(row=0, column=0, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Tipo", font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(row=0, column=1, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Hash", font=ctk.CTkFont(size=12, weight="bold"), anchor="w").grid(row=0, column=2, padx=10, sticky="ew")
+        ctk.CTkLabel(tbl_hdr, text="Dimensione", font=ctk.CTkFont(size=12, weight="bold"), anchor="e").grid(row=0, column=3, padx=10, sticky="ew")
 
     def populate_section(self, parent, items, bg_color="transparent", text_color=None, limit=500):
         if not items:
-            ctk.CTkLabel(parent, text="Nessun file trovato in questa sezione.", text_color="gray", font=ctk.CTkFont(size=12, slant="italic")).pack(pady=15)
+            ctk.CTkLabel(parent, text="Nessun file trovato in questa sezione.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12, slant="italic")).pack(pady=15)
             return
 
         if len(items) > limit:
             ctk.CTkLabel(parent, text=f"Mostrati i primi {limit} di {len(items)} file (l'elenco completo e' nel report PDF).",
-                         text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=(4, 2))
+                         text_color=ergo.MUTED, font=ctk.CTkFont(size=12, slant="italic")).pack(pady=(4, 2))
         for it in items[:limit]:
             row_frame = ctk.CTkFrame(parent, fg_color=bg_color, corner_radius=5)
             row_frame.pack(fill="x", pady=2)
@@ -2723,11 +3514,11 @@ class DatariumApp(ctk.CTk):
             ctk.CTkLabel(row_frame, text=it['name'], text_color=text_color, font=ctk.CTkFont(size=12, weight="bold" if it.get('is_source') else "normal"), anchor="w", justify="left").grid(row=0, column=0, padx=10, pady=4, sticky="ew")
             ctk.CTkLabel(row_frame, text=it['type'], text_color=text_color, font=ctk.CTkFont(size=12), anchor="w", justify="left").grid(row=0, column=1, padx=10, pady=4, sticky="ew")
             
-            lbl_hash = ctk.CTkLabel(row_frame, text=it['hash'], text_color=text_color, font=ctk.CTkFont(size=11), anchor="w", justify="left", wraplength=350)
+            lbl_hash = ctk.CTkLabel(row_frame, text=it['hash'], text_color=text_color, font=ctk.CTkFont(size=12), anchor="w", justify="left", wraplength=350)
             lbl_hash.grid(row=0, column=2, padx=10, pady=4, sticky="ew")
             lbl_hash.bind("<Button-1>", lambda e, hv=it['hash']: self.copy_to_clipboard(hv))
 
-            ctk.CTkLabel(row_frame, text=it['size'], text_color=text_color, font=ctk.CTkFont(size=11), anchor="e", justify="right").grid(row=0, column=3, padx=10, pady=4, sticky="ew")
+            ctk.CTkLabel(row_frame, text=it['size'], text_color=text_color, font=ctk.CTkFont(size=12), anchor="e", justify="right").grid(row=0, column=3, padx=10, pady=4, sticky="ew")
 
     def run_hash_verification(self):
         for w in self.hash_results_scroll.winfo_children():
@@ -3071,7 +3862,7 @@ class DatariumApp(ctk.CTk):
         self.create_section_header(self.hash_results_scroll, "⚖️ Confronto Cartella 1 ↔ Cartella 2")
         verdict = "✅ Le due cartelle sono IDENTICHE" if all_ok else "⚠️ Le due cartelle NON coincidono"
         ctk.CTkLabel(self.hash_results_scroll, text=verdict, font=ctk.CTkFont(size=16, weight="bold"),
-                     text_color="#10b981" if all_ok else "#ef4444").pack(anchor="w", padx=10, pady=(2, 2))
+                     text_color=ergo.SUCCESS if all_ok else ergo.ERROR).pack(anchor="w", padx=10, pady=(2, 2))
         ctk.CTkLabel(self.hash_results_scroll,
                      text=f"{n_ok} identici · {n_diff} diversi · {n_a} solo in Cartella 1 · {n_b} solo in Cartella 2 · {n_mv} stesso contenuto/percorso diverso",
                      font=ctk.CTkFont(size=12), anchor="w").pack(anchor="w", padx=10, pady=(0, 6))
@@ -3089,7 +3880,7 @@ class DatariumApp(ctk.CTk):
                 else:
                     txt, sub = item['rel'], f"{note}  ({item['size']})"
                 ctk.CTkLabel(row, text=txt, font=ctk.CTkFont(size=12, weight="bold"), anchor="w", justify="left", wraplength=700).pack(anchor="w", padx=10, pady=(4, 0))
-                ctk.CTkLabel(row, text=sub, font=ctk.CTkFont(size=11), anchor="w", text_color="gray").pack(anchor="w", padx=10, pady=(0, 4))
+                ctk.CTkLabel(row, text=sub, font=ctk.CTkFont(size=12), anchor="w", text_color=ergo.MUTED).pack(anchor="w", padx=10, pady=(0, 4))
 
         red = ("#fee2e2", "#7f1d1d")
         amber = ("#ffedd5", "#7c2d12")
@@ -3101,8 +3892,7 @@ class DatariumApp(ctk.CTk):
     def copy_to_clipboard(self, text):
         self.clipboard_clear()
         self.clipboard_append(text)
-        from tkinter import messagebox
-        messagebox.showinfo("Copiato", "Valore Hash copiato negli appunti!")
+        ergo.toast(self, "Hash copiato negli appunti")
 
     def export_hash_report(self):
         if not hasattr(self, 'last_hash_results') or not self.last_hash_results:
@@ -3152,8 +3942,12 @@ class DatariumApp(ctk.CTk):
         recent_box = ctk.CTkFrame(v_home, corner_radius=15, border_width=1, border_color=("gray85", "gray15"))
         recent_box.pack(fill="both", expand=True, padx=5, pady=5)
         
-        ctk.CTkLabel(recent_box, text="Progetti recenti", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(30, 5))
-        ctk.CTkLabel(recent_box, text="I tuoi album digitali e progetti organizzati appariranno qui.", text_color="gray", font=ctk.CTkFont(slant="italic")).pack(anchor="w", padx=30)
+        # Il vecchio testo prometteva "progetti recenti" che non comparivano mai: ora la
+        # schermata dice cosa succede davvero (conformita' alle aspettative).
+        ctk.CTkLabel(recent_box, text="Album intelligenti", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(30, 5))
+        ctk.CTkLabel(recent_box, text="Datarium guarda foto e video, li raggruppa per soggetto e ti propone gli album: puoi rinominarli prima di crearli.\n"
+                                      "Gli album sono COPIE: i file originali non vengono spostati né modificati.",
+                     text_color=ergo.MUTED, justify="left", wraplength=640).pack(anchor="w", padx=30)
 
         # Center Crea Album button
         btn_crea = ctk.CTkButton(recent_box, text="➕ Crea Album", font=ctk.CTkFont(size=16, weight="bold"), width=220, height=55, corner_radius=10, fg_color="#10b981", hover_color="#059669", command=lambda: self.show_autotag_subpage("Config"))
@@ -3196,6 +3990,11 @@ class DatariumApp(ctk.CTk):
         self.chk_at_rename = ctk.CTkCheckBox(chk_frame, text="Rinomina e organizza in Album", variable=self.autotag_rename, font=ctk.CTkFont(size=13))
         self.chk_at_rename.pack(anchor="w", pady=8)
 
+        self.chk_at_xmp = ctk.CTkCheckBox(chk_frame, text="Scrivi l'album come parola chiave XMP (Lightroom, Bridge)", variable=self.autotag_write_xmp, font=ctk.CTkFont(size=13))
+        self.chk_at_xmp.pack(anchor="w", pady=8)
+        ergo.tooltip(self.chk_at_xmp, "Nelle copie JPEG la parola chiave viene incorporata; per i RAW si crea un file .xmp accanto.\n"
+                                      "Gli originali non vengono mai modificati.")
+
         # Actions
         act_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
         act_frame.pack(fill="x", side="bottom", padx=40, pady=35)
@@ -3215,7 +4014,8 @@ class DatariumApp(ctk.CTk):
         res_foot = ctk.CTkFrame(v_results, fg_color="transparent")
         res_foot.pack(fill="x", side="bottom", pady=(10, 0))
         ctk.CTkButton(res_foot, text="Indietro", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_autotag_subpage("Config")).pack(side="left")
-        ctk.CTkButton(res_foot, text="Salva e Organizza", fg_color="#10b981", hover_color="#059669", width=160, font=ctk.CTkFont(weight="bold"), command=self.rename_and_create_albums).pack(side="right")
+        self.btn_save_albums = ctk.CTkButton(res_foot, text="Crea gli album", fg_color="#10b981", hover_color="#059669", width=180, font=ctk.CTkFont(weight="bold"), command=self.rename_and_create_albums)
+        self.btn_save_albums.pack(side="right")
 
         # Start on Home view
         self.show_autotag_subpage("Home")
@@ -3411,9 +4211,9 @@ class DatariumApp(ctk.CTk):
             lbl_name = ctk.CTkLabel(card, text=f"Album {album}", font=ctk.CTkFont(size=14, weight="bold"))
             lbl_name.pack(padx=10)
 
-            ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=11), text_color="gray").pack(pady=(2, 10))
+            ctk.CTkLabel(card, text=f"{len(files)} elementi", font=ctk.CTkFont(size=12), text_color=ergo.MUTED).pack(pady=(2, 10))
 
-            btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=11), command=lambda a=album: self.edit_album_name(a))
+            btn_edit = ctk.CTkButton(card, text="Personalizza Nome", height=30, fg_color="transparent", border_width=1, font=ctk.CTkFont(size=12), command=lambda a=album: self.edit_album_name(a))
             btn_edit.pack(pady=(0, 20), padx=15, fill="x")
 
     def edit_album_name(self, old_name):
@@ -3438,33 +4238,64 @@ class DatariumApp(ctk.CTk):
             else:
                 final_albums.setdefault(clean_album_name, []).extend(files)
 
-        for album, files in final_albums.items():
-            album_dir = os.path.join(dst, album)
-            os.makedirs(album_dir, exist_ok=True)
-            for idx, f in enumerate(files):
-                try:
-                    ext = os.path.splitext(f)[1].lower()
-                    orig_base = os.path.splitext(os.path.basename(f))[0]
-                    new_filename = f"{album}_{orig_base}{ext}" if self.autotag_rename.get() else os.path.basename(f)
-                    dest_path = os.path.join(album_dir, new_filename)
-                    
-                    base_dest = dest_path
-                    counter = 1
-                    while os.path.exists(dest_path) and os.path.abspath(f) != os.path.abspath(dest_path):
-                        name, e = os.path.splitext(base_dest)
-                        dest_path = f"{name}_{counter}{e}"
-                        counter += 1
+        rename = self.autotag_rename.get()
+        write_xmp = self.autotag_write_xmp.get()
+        total = sum(len(v) for v in final_albums.values())
+        self.is_scanning = True
+        self.set_sidebar_state("disabled")
+        self.btn_save_albums.configure(state="disabled")
 
-                    try:
-                        shutil.copy2(f, dest_path)
-                    except OSError:
-                        shutil.copy(f, dest_path)
-                except Exception:
-                    pass
+        def copy_bg():
+            done, failed = 0, []
+            try:
+                for album, files in final_albums.items():
+                    album_dir = os.path.join(dst, album)
+                    os.makedirs(album_dir, exist_ok=True)
+                    keyword = album.replace("_", " ")
+                    for f in files:
+                        try:
+                            ext = os.path.splitext(f)[1].lower()
+                            orig_base = os.path.splitext(os.path.basename(f))[0]
+                            new_filename = f"{album}_{orig_base}{ext}" if rename else os.path.basename(f)
+                            dest_path = move_journal.unique_target(os.path.join(album_dir, new_filename))
+                            try:
+                                shutil.copy2(f, dest_path)
+                            except OSError:
+                                shutil.copy(f, dest_path)
+                            # i file compagni (es. .xmp di Lightroom) vanno con la loro foto
+                            has_sidecar = False
+                            for sc in move_journal.find_sidecars(f):
+                                sc_name = os.path.basename(sc)
+                                full_style = bool(os.path.splitext(os.path.splitext(sc_name)[0])[1])
+                                sc_dest = (dest_path if full_style else os.path.splitext(dest_path)[0]) + os.path.splitext(sc_name)[1]
+                                shutil.copy2(sc, move_journal.unique_target(sc_dest))
+                                has_sidecar = has_sidecar or sc_name.lower().endswith(".xmp")
+                            if write_xmp:
+                                hierarchy = [f"Datarium|Album|{keyword}"]
+                                if not xmp_sidecar.embed_in_jpeg(dest_path, [keyword], hierarchy=hierarchy) and not has_sidecar:
+                                    xmp_sidecar.write_sidecar(dest_path, [keyword], hierarchy=hierarchy)
+                        except Exception as e:
+                            failed.append((os.path.basename(f), str(e)))
+                        done += 1
+                        if done % 3 == 0 or done == total:
+                            self.after(0, lambda d=done: self.btn_save_albums.configure(text=f"Copia {d}/{total}…"))
+            finally:
+                self.is_scanning = False
 
-        from tkinter import messagebox
-        messagebox.showinfo("Successo", "Tutti gli elementi sono stati organizzati e gli album intelligenti sono stati creati con successo!")
-        self.show_autotag_subpage("Home")
+                def finish():
+                    self.set_sidebar_state("normal")
+                    self.btn_save_albums.configure(state="normal", text="Crea gli album")
+                    if failed:
+                        from tkinter import messagebox
+                        details = "\n".join(f"• {n}: {e}" for n, e in failed[:8])
+                        messagebox.showwarning("Album creati con errori",
+                                               f"{total - len(failed)} file copiati, {len(failed)} non copiati:\n{details}")
+                    else:
+                        ergo.toast(self, f"Album creati: {total} file copiati in {len(final_albums)} album")
+                    self.show_autotag_subpage("Home")
+                self.after(0, finish)
+
+        threading.Thread(target=copy_bg, daemon=True).start()
 
     def init_offload_pages(self):
         self.offload_master_frame = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -3483,7 +4314,7 @@ class DatariumApp(ctk.CTk):
         cfg_box.pack(fill="both", expand=True, padx=5, pady=5)
 
         ctk.CTkLabel(cfg_box, text="Configura Backup e Verifica MHL", font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w", padx=30, pady=(20, 5))
-        ctk.CTkLabel(cfg_box, text="Copia i file multimediali dalle tue SSD/Card verso più volumi simultaneamente, verificando l'integrità byte-a-byte.", text_color="gray", font=ctk.CTkFont(size=12)).pack(anchor="w", padx=30, pady=(0, 20))
+        ctk.CTkLabel(cfg_box, text="Copia i file multimediali dalle tue SSD/Card verso più volumi simultaneamente, verificando l'integrità byte-a-byte.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12)).pack(anchor="w", padx=30, pady=(0, 20))
 
         # Inputs grid
         g = ctk.CTkFrame(cfg_box, fg_color="transparent")
@@ -3543,7 +4374,7 @@ class DatariumApp(ctk.CTk):
         meta_header = ctk.CTkFrame(cfg_box, fg_color="transparent")
         meta_header.pack(fill="x", padx=30, pady=(20, 0))
         ctk.CTkLabel(meta_header, text="🎬 Metadati Produzione", font=ctk.CTkFont(size=16, weight="bold")).pack(side="left")
-        ctk.CTkLabel(meta_header, text="(opzionali - inclusi nel report MHL)", font=ctk.CTkFont(size=11, slant="italic"), text_color="gray").pack(side="left", padx=10)
+        ctk.CTkLabel(meta_header, text="(opzionali - inclusi nel report MHL)", font=ctk.CTkFont(size=12, slant="italic"), text_color=ergo.MUTED).pack(side="left", padx=10)
 
         meta_grid = ctk.CTkFrame(cfg_box, fg_color="transparent")
         meta_grid.pack(fill="x", padx=30, pady=(5, 0))
@@ -3553,12 +4384,12 @@ class DatariumApp(ctk.CTk):
         for idx, (key, label) in enumerate(self.offload_meta_fields):
             r = idx // 3
             c = (idx % 3) * 2
-            ctk.CTkLabel(meta_grid, text=f"{label}:", font=ctk.CTkFont(size=11)).grid(row=r, column=c, sticky="w", padx=(0, 6), pady=5)
+            ctk.CTkLabel(meta_grid, text=f"{label}:", font=ctk.CTkFont(size=12)).grid(row=r, column=c, sticky="w", padx=(0, 6), pady=5)
             ctk.CTkEntry(meta_grid, textvariable=self.offload_meta_vars[key], height=30).grid(row=r, column=c + 1, sticky="ew", padx=(0, 15), pady=5)
 
         notes_row = ctk.CTkFrame(cfg_box, fg_color="transparent")
         notes_row.pack(fill="x", padx=30, pady=(8, 0))
-        ctk.CTkLabel(notes_row, text="Note:", font=ctk.CTkFont(size=11)).pack(anchor="w")
+        ctk.CTkLabel(notes_row, text="Note:", font=ctk.CTkFont(size=12)).pack(anchor="w")
         self.offload_notes_text = ctk.CTkTextbox(notes_row, height=60)
         self.offload_notes_text.pack(fill="x", pady=(2, 0))
 
@@ -3591,7 +4422,7 @@ class DatariumApp(ctk.CTk):
         # Log live: una riga per ogni file all'avvio/fine copia, in modo che l'utente
         # veda sempre "sta succedendo qualcosa" (soprattutto con pochi file enormi,
         # dove la sola label di stato può restare ferma a lungo tra un file e l'altro).
-        self.offload_log_text = ctk.CTkTextbox(v_results, height=140, font=ctk.CTkFont(family="Consolas", size=11))
+        self.offload_log_text = ctk.CTkTextbox(v_results, height=140, font=ctk.CTkFont(family="Consolas", size=12))
         self.offload_log_text.pack(fill="x", padx=5, pady=(0, 5))
         self.offload_log_text.configure(state="disabled")
 
@@ -3632,20 +4463,20 @@ class DatariumApp(ctk.CTk):
             w.destroy()
             
         if not self.offload_destinations:
-            lbl_empty = ctk.CTkLabel(self.dest_list_frame, text="Nessuna destinazione aggiunta. Clicca Aggiungi per inserire una cartella.", text_color="gray", font=ctk.CTkFont(size=12, slant="italic"))
+            lbl_empty = ctk.CTkLabel(self.dest_list_frame, text="Nessuna destinazione aggiunta. Clicca Aggiungi per inserire una cartella.", text_color=ergo.MUTED, font=ctk.CTkFont(size=12, slant="italic"))
             lbl_empty.pack(anchor="w", pady=5)
         else:
             for idx, path in enumerate(self.offload_destinations):
                 row = ctk.CTkFrame(self.dest_list_frame, fg_color=("gray90", "gray15"), corner_radius=6)
                 row.pack(fill="x", pady=2)
                 
-                lbl = ctk.CTkLabel(row, text=path, font=ctk.CTkFont(size=11), anchor="w", justify="left")
+                lbl = ctk.CTkLabel(row, text=path, font=ctk.CTkFont(size=12), anchor="w", justify="left")
                 lbl.pack(side="left", padx=10, fill="x", expand=True, pady=5)
                 
-                btn_del = ctk.CTkButton(row, text="❌", width=30, height=25, fg_color="transparent", text_color="#ef4444", hover_color=("gray80", "gray25"), font=ctk.CTkFont(size=10, weight="bold"), command=lambda i=idx: self.remove_offload_destination(i))
+                btn_del = ctk.CTkButton(row, text="❌", width=30, height=25, fg_color="transparent", text_color=ergo.ERROR, hover_color=("gray80", "gray25"), font=ctk.CTkFont(size=12, weight="bold"), command=lambda i=idx: self.remove_offload_destination(i))
                 btn_del.pack(side="right", padx=5)
                 
-        btn_add = ctk.CTkButton(self.dest_list_frame, text="➕ Aggiungi Destinazione", height=30, width=180, font=ctk.CTkFont(size=11, weight="bold"), command=self.add_offload_destination)
+        btn_add = ctk.CTkButton(self.dest_list_frame, text="➕ Aggiungi Destinazione", height=30, width=180, font=ctk.CTkFont(size=12, weight="bold"), command=self.add_offload_destination)
         btn_add.pack(anchor="w", pady=(10, 5))
 
     def add_offload_destination(self):
@@ -3738,7 +4569,7 @@ class DatariumApp(ctk.CTk):
         self.save_settings()
         self._refresh_offload_presets_ui()
         self.offload_selected_preset.set(name)
-        messagebox.showinfo("Preset salvato", f"Preset \"{name}\" salvato con successo.")
+        ergo.toast(self, f"Preset \"{name}\" salvato")
 
     def _apply_offload_preset(self, name):
         """Richiama un preset salvato: sostituisce destinazioni/algoritmo/naming correnti."""
@@ -3823,7 +4654,7 @@ class DatariumApp(ctk.CTk):
                         files_to_copy.append({"name": f, "path": p, "rel": rel})
 
                 if not files_to_copy:
-                    self.after(0, lambda: self.offload_status_lbl.configure(text="❌ Nessun file trovato nella sorgente.", text_color="#ef4444"))
+                    self.after(0, lambda: self.offload_status_lbl.configure(text="❌ Nessun file trovato nella sorgente.", text_color=ergo.ERROR))
                     return
 
                 total_files = len(files_to_copy)
@@ -3847,7 +4678,7 @@ class DatariumApp(ctk.CTk):
                     msg = "Spazio insufficiente su: " + ", ".join(
                         f"{os.path.basename(x[0]) or x[0]} ({self.format_file_size(x[1])} liberi / {self.format_file_size(total_bytes)} necessari)"
                         for x in low_space)
-                    self.after(0, lambda m=msg: self.offload_status_lbl.configure(text="❌ " + m, text_color="#ef4444"))
+                    self.after(0, lambda m=msg: self.offload_status_lbl.configure(text="❌ " + m, text_color=ergo.ERROR))
                     return
 
                 processed_files = 0
@@ -4162,15 +4993,15 @@ class DatariumApp(ctk.CTk):
                         self.offload_status_lbl.configure(
                             text=f"⚠ Incongruenza di checksum su {len(checksum_mismatches)} file: il contenuto copiato "
                                  f"NON corrisponde al sorgente. Controlla il report prima di considerare il backup valido.",
-                            text_color="#ef4444"
+                            text_color=ergo.ERROR
                         )
                     elif write_failures:
                         self.offload_status_lbl.configure(
                             text=f"⚠ Offload completato con {len(write_failures)} errori di scrittura. Controlla il report.",
-                            text_color="#f59e0b"
+                            text_color=ergo.WARNING
                         )
                     else:
-                        self.offload_status_lbl.configure(text="✓ Offload completato con successo, checksum verificato su ogni file.", text_color="#10b981")
+                        self.offload_status_lbl.configure(text="✓ Offload completato con successo, checksum verificato su ogni file.", text_color=ergo.SUCCESS)
                     self.btn_open_report.configure(state="normal")
 
                     for res in results:
@@ -4178,7 +5009,7 @@ class DatariumApp(ctk.CTk):
                         row.pack(fill="x", pady=2)
 
                         icon = "✓" if res["status"] == "Verified" else ("⚠" if res.get("fail_reason") == "checksum" else "❌")
-                        icon_color = "#10b981" if res["status"] == "Verified" else "#ef4444"
+                        icon_color = ergo.SUCCESS if res["status"] == "Verified" else ergo.ERROR
                         lbl_icon = ctk.CTkLabel(row, text=icon, text_color=icon_color, font=ctk.CTkFont(size=14, weight="bold"))
                         lbl_icon.pack(side="left", padx=10)
 
@@ -4187,9 +5018,9 @@ class DatariumApp(ctk.CTk):
 
                         if res.get("fail_reason"):
                             reason_txt = {"checksum": "checksum non corrispondente", "scrittura": "errore di scrittura", "errore": "errore"}.get(res["fail_reason"], "")
-                            ctk.CTkLabel(row, text=reason_txt, font=ctk.CTkFont(size=11), text_color="#ef4444").pack(side="right", padx=15)
+                            ctk.CTkLabel(row, text=reason_txt, font=ctk.CTkFont(size=12), text_color=ergo.ERROR).pack(side="right", padx=15)
 
-                        lbl_sz = ctk.CTkLabel(row, text=res["size_str"], font=ctk.CTkFont(size=11), text_color="gray")
+                        lbl_sz = ctk.CTkLabel(row, text=res["size_str"], font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
                         lbl_sz.pack(side="right", padx=15)
 
                     # Un'incongruenza di checksum in un tool di backup e' un problema di integrita'
@@ -4280,7 +5111,7 @@ class DatariumApp(ctk.CTk):
 
         ctk.CTkLabel(page, text="Sincronizza Dischi", font=ctk.CTkFont(size=28, weight="bold")).pack(anchor="w", pady=(0, 2))
         ctk.CTkLabel(page, text="Confronta due dischi o cartelle, controlla l'anteprima e sincronizza. Niente viene cancellato davvero: i file eliminati o sostituiti vanno nella cartella _Datarium_Sync_Cestino del disco e si possono recuperare.",
-                     text_color="gray", font=ctk.CTkFont(size=12), wraplength=820, justify="left").pack(anchor="w", pady=(0, 8))
+                     text_color=ergo.MUTED, font=ctk.CTkFont(size=12), wraplength=820, justify="left").pack(anchor="w", pady=(0, 8))
 
         top = ctk.CTkFrame(page, corner_radius=10)
         top.pack(fill="x", pady=(0, 6))
@@ -4327,7 +5158,7 @@ class DatariumApp(ctk.CTk):
         hdr.columnconfigure(0, weight=1, uniform="s")
         hdr.columnconfigure(2, weight=1, uniform="s")
         ctk.CTkLabel(hdr, text="DISCO A", font=ctk.CTkFont(weight="bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=6, pady=4)
-        ctk.CTkLabel(hdr, text="Azione", width=70, font=ctk.CTkFont(size=11)).grid(row=0, column=1)
+        ctk.CTkLabel(hdr, text="Azione", width=70, font=ctk.CTkFont(size=12)).grid(row=0, column=1)
         ctk.CTkLabel(hdr, text="DISCO B", font=ctk.CTkFont(weight="bold"), anchor="w").grid(row=0, column=2, sticky="ew", padx=6, pady=4)
 
         self.sync_scroll = ctk.CTkScrollableFrame(page, fg_color=("gray95", "gray10"))
@@ -4457,7 +5288,7 @@ class DatariumApp(ctk.CTk):
             self._sync_refresh_summary()
             return
         if not (c["only_a"] or c["only_b"] or c["different"]):
-            self.sync_status_lbl.configure(text=f"✅ I due dischi sono identici ({c['identical']} file).", text_color="#10b981")
+            self.sync_status_lbl.configure(text=f"✅ I due dischi sono identici ({c['identical']} file).", text_color=ergo.SUCCESS)
         else:
             self.sync_status_lbl.configure(
                 text=f"{c['only_a']} solo in A · {c['only_b']} solo in B · {c['different']} diversi · {c['identical']} identici",
@@ -4477,8 +5308,8 @@ class DatariumApp(ctk.CTk):
                 else:
                     txt, sub = "— manca —", ""
                 ctk.CTkLabel(row, text=txt, font=ctk.CTkFont(size=12, weight="bold" if info else "normal"),
-                             text_color=None if info else "gray", anchor="w", justify="left", wraplength=300).grid(row=0, column=col, sticky="ew", padx=6, pady=(3, 0))
-                ctk.CTkLabel(row, text=sub or r["note"], font=ctk.CTkFont(size=10), text_color="gray", anchor="w").grid(row=1, column=col, sticky="ew", padx=6, pady=(0, 3))
+                             text_color=None if info else ergo.MUTED, anchor="w", justify="left", wraplength=300).grid(row=0, column=col, sticky="ew", padx=6, pady=(3, 0))
+                ctk.CTkLabel(row, text=sub or r["note"], font=ctk.CTkFont(size=12), text_color=ergo.MUTED, anchor="w").grid(row=1, column=col, sticky="ew", padx=6, pady=(0, 3))
             _side(r["a"], 0)
             _side(r["b"], 2)
 
@@ -4492,7 +5323,7 @@ class DatariumApp(ctk.CTk):
 
         if len(shown) > self.SYNC_MAX_ROWS:
             ctk.CTkLabel(self.sync_scroll, text=f"... e altri {len(shown) - self.SYNC_MAX_ROWS} file non mostrati (la sincronizzazione li include comunque).",
-                         text_color="gray", font=ctk.CTkFont(size=11, slant="italic")).pack(pady=8)
+                         text_color=ergo.MUTED, font=ctk.CTkFont(size=12, slant="italic")).pack(pady=8)
         self._sync_refresh_summary()
 
     def _sync_bulk(self, direction):
