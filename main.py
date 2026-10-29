@@ -9,8 +9,9 @@ except Exception:
 # Dummy imports block to prevent linter errors and force PyInstaller to statically package C-extensions
 if False:
     import xxhash
-    import pillow_heif
-    import fitz
+    import pi_heif
+    import pypdf
+    import reportlab
     import docx
     import llama_cpp
     import llama_cpp.llama_chat_format
@@ -54,7 +55,7 @@ import ffmpeg_tools
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'

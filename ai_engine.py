@@ -12,8 +12,9 @@ from PIL import Image, ExifTags
 Image.MAX_IMAGE_PIXELS = 500_000_000  # scansioni ad alta risoluzione (default PIL ~179M px)
 try:
     import importlib
-    pillow_heif = importlib.import_module("pillow_heif")
-    pillow_heif.register_heif_opener()
+    # pi-heif = solo decodifica HEIC/HEIF, senza l'encoder x265 (GPL) incluso in pillow-heif
+    pi_heif = importlib.import_module("pi_heif")
+    pi_heif.register_heif_opener()
 except ImportError:
     pass
 # --- Xet OFF: DEVE stare PRIMA dell'import di huggingface_hub ---
@@ -30,7 +31,6 @@ import threading
 # "fatti X/Y MB" nella UI durante il download (vedi _start_progress_monitor). Se HF cambia
 # le dimensioni non e' un problema: e' solo un'etichetta informativa, non un controllo.
 _MODEL_SIZE_HINTS_MB = {
-    "Argus-Maior-text-Q4_K_M.gguf": 2100,
     "Argus-Maior-vision-Q4_K_M.gguf": 4680,
     "Argus-Maior-vision-mmproj.gguf": 1350,
     "Argus-Minor-text.gguf": 1060,
@@ -40,7 +40,9 @@ _MODEL_SIZE_HINTS_MB = {
 }
 
 # File di modelli precedenti da cancellare quando il sostituto e' installato e verificato
-_FILE_OBSOLETI = {"Argus-Minor-text-Q2_K.gguf": "Argus-Minor-text.gguf"}
+# File ritirati, cancellati appena si caricano i modelli. Entrambi erano Qwen2.5-3B-Instruct
+# (licenza Qwen Research, uso commerciale vietato): non devono restare ne' essere caricati.
+_FILE_OBSOLETI = ("Argus-Minor-text-Q2_K.gguf", "Argus-Maior-text-Q4_K_M.gguf")
 # Dizionario inglese -> italiano usato per suggerire le traduzioni al modello di testo
 DIZIONARIO = ("Stegeno/Nexflamma_Models", "dizionario_app.json", "dizionario_app.json")
 
@@ -410,16 +412,18 @@ class AIEngine:
             # ARGUS MINOR - Leggero. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
             "slim": {
                 "text":   ("Stegeno/Nexflamma_Models", "Argus-Minor-text.gguf",          "Argus-Minor-text.gguf"),
-                # Vecchio nome: un'installazione esistente resta riconosciuta come "slim"
-                # finche' il nuovo modello non viene scaricato (poi il vecchio viene cancellato)
-                "text_legacy": "Argus-Minor-text-Q2_K.gguf",
+                # Niente piu' "text_legacy": il vecchio Argus-Minor-text-Q2_K era Qwen2.5-3B, con
+                # licenza Qwen Research (uso commerciale vietato). Non va MAI caricato.
                 "vision": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision.gguf",        "Argus-Minor-vision.gguf"),
                 "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Minor-vision-mmproj.gguf", "Argus-Minor-vision-mmproj.gguf"),
                 "handler": "moondream",
             },
             # ARGUS MAIOR - Pesante. Modelli ospitati su HuggingFace: Stegeno/Nexflamma_Models.
+            # Il testo usa lo STESSO file della visione (Qwen2.5-VL-7B, Apache-2.0) caricato senza
+            # proiettore: il vecchio Argus-Maior-text era Qwen2.5-3B (licenza Qwen Research, uso
+            # commerciale vietato). Un download in meno (~2,1 GB) e lo stesso modello per tutto.
             "full": {
-                "text":   ("Stegeno/Nexflamma_Models", "Argus-Maior-text-Q4_K_M.gguf",   "Argus-Maior-text-Q4_K_M.gguf"),
+                "text":   ("Stegeno/Nexflamma_Models", "Argus-Maior-vision-Q4_K_M.gguf", "Argus-Maior-vision-Q4_K_M.gguf"),
                 "vision": ("Stegeno/Nexflamma_Models", "Argus-Maior-vision-Q4_K_M.gguf", "Argus-Maior-vision-Q4_K_M.gguf"),
                 "mmproj": ("Stegeno/Nexflamma_Models", "Argus-Maior-vision-mmproj.gguf", "Argus-Maior-vision-mmproj.gguf"),
                 "handler": "qwen2.5-vl",
@@ -687,6 +691,11 @@ class AIEngine:
                         and self.resolve_model_file(prof["vision"][2])
                         and self.resolve_model_file(prof["mmproj"][2])):
                     return q
+            # Profilo incompleto (es. Leggero col vecchio testo Qwen2.5-3B ormai ritirato): si
+            # riconosce dalla visione, cosi' si riscarica solo il pezzo mancante e non si passa a full
+            for q in ("full", "slim"):
+                if self.resolve_model_file(self.PROFILES[q]["vision"][2]):
+                    return q
         except Exception:
             pass
         return None
@@ -807,17 +816,15 @@ class AIEngine:
             if vision_mode:
                 tasks.append(prof["vision"])
                 tasks.append(prof["mmproj"])
+            tasks = list(dict.fromkeys(tasks))  # Maior: testo e visione sono lo stesso file
 
             # Xet e progress-bar gia' disabilitati a livello di modulo (prima dell'import)
 
             manifest = self._fetch_models_manifest()
 
             for repo, src_name, argus_name in tasks:
-                # Se non si riesce a scaricare si va avanti lo stesso: il dizionario e' un aiuto,
-                # e al posto del nuovo Minor si usa il vecchio finche' non arriva
-                opzionale = (argus_name == DIZIONARIO[2]
-                             or (argus_name == prof["text"][2] and prof.get("text_legacy")
-                                 and self.resolve_model_file(prof["text_legacy"])))
+                # Se non si riesce a scaricare il dizionario si va avanti lo stesso: e' solo un aiuto
+                opzionale = argus_name == DIZIONARIO[2]
                 expected_sha = (manifest.get(argus_name) or {}).get("sha256")
                 existing = self.resolve_model_file(argus_name)
                 if existing:
@@ -917,20 +924,19 @@ class AIEngine:
                         continue
                     return False, f"Il file scaricato ({argus_name}) non corrisponde al checksum atteso: download corrotto."
 
-            # Il nuovo modello e' installato e verificato: il vecchio non serve piu'
-            for vecchio, nuovo in _FILE_OBSOLETI.items():
-                if self.resolve_model_file(nuovo):
-                    for cartella in {self.get_models_dir(), self.get_models_dir(force_writable=True)}:
-                        p = os.path.join(cartella, vecchio)
-                        try:
-                            if os.path.exists(p):
-                                os.remove(p)
-                                if os.path.exists(p + ".verified.json"):
-                                    os.remove(p + ".verified.json")
-                                if progress_callback:
-                                    progress_callback(f"Rimosso il vecchio modello {vecchio}")
-                        except Exception:
-                            pass  # cartella non scrivibile (es. Program Files): si riprova al prossimo avvio
+            # I file ritirati non vengono piu' caricati in nessun caso: si cancellano subito
+            for vecchio in _FILE_OBSOLETI:
+                for cartella in {self.get_models_dir(), self.get_models_dir(force_writable=True)}:
+                    p = os.path.join(cartella, vecchio)
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                            if os.path.exists(p + ".verified.json"):
+                                os.remove(p + ".verified.json")
+                            if progress_callback:
+                                progress_callback(f"Rimosso il vecchio modello {vecchio}")
+                    except Exception:
+                        pass  # cartella non scrivibile (es. Program Files): si riprova al prossimo avvio
             if quality == "slim":
                 self._carica_dizionario()
             else:
@@ -945,9 +951,7 @@ class AIEngine:
 
                 n_threads = os.cpu_count() or 4
                 final_dir = self.get_models_dir()
-                t_path = (self.resolve_model_file(prof["text"][2])
-                          or (prof.get("text_legacy") and self.resolve_model_file(prof["text_legacy"]))
-                          or os.path.join(final_dir, prof["text"][2]))
+                t_path = self.resolve_model_file(prof["text"][2]) or os.path.join(final_dir, prof["text"][2])
                 v_path = self.resolve_model_file(prof["vision"][2]) or os.path.join(final_dir, prof["vision"][2])
                 p_path = self.resolve_model_file(prof["mmproj"][2]) or os.path.join(final_dir, prof["mmproj"][2])
 
@@ -1202,11 +1206,11 @@ class AIEngine:
         try:
             if ext == ".pdf":
                 import importlib
-                fitz = importlib.import_module("fitz")
-                doc = fitz.open(file_path)
+                pypdf = importlib.import_module("pypdf")
+                doc = pypdf.PdfReader(file_path)
                 text = ""
-                for i in range(min(5, len(doc))):
-                    text += doc[i].get_text()
+                for i in range(min(5, len(doc.pages))):
+                    text += doc.pages[i].extract_text() or ""
                     if len(text) >= chunk:
                         break
                 context_res = f"DOC_CONTENT: {text[:chunk]}"
@@ -1310,9 +1314,8 @@ class AIEngine:
             self._dizionario = {}
 
     def _profile_text_present(self, prof):
-        """True se il modello di testo del profilo c'e' (anche col vecchio nome Minor Q2_K)."""
-        return bool(self.resolve_model_file(prof["text"][2])
-                    or (prof.get("text_legacy") and self.resolve_model_file(prof["text_legacy"])))
+        """True se il modello di testo del profilo c'e'."""
+        return bool(self.resolve_model_file(prof["text"][2]))
 
     # Grammatiche GBNF: il modello (3B) puo' produrre SOLO testo nel formato atteso. Niente piu'
     # spiegazioni, virgolette, elenchi numerati o percorsi a meta'. Se la libreria non le
@@ -1363,8 +1366,7 @@ class AIEngine:
             import importlib
             Llama = importlib.import_module("llama_cpp").Llama
             prof = self.PROFILES["slim"]
-            t_path = (self.resolve_model_file(prof["text"][2])
-                      or (prof.get("text_legacy") and self.resolve_model_file(prof["text_legacy"])))
+            t_path = self.resolve_model_file(prof["text"][2])
             if not t_path:
                 self._text_llm_failed = True
                 return self.llm

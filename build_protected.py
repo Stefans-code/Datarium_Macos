@@ -64,8 +64,9 @@ if getattr(sys, "frozen", False):
 # Import forzati per far includere a PyInstaller le C-extension e i moduli compilati.
 if False:
     import xxhash
-    import pillow_heif
-    import fitz
+    import pi_heif
+    import pypdf
+    import reportlab
     import docx
     import llama_cpp
     import llama_cpp.llama_chat_format
@@ -127,6 +128,13 @@ def main():
         shutil.copy2(os.path.join(ROOT, "icon.ico"), os.path.join(STAGE, "icon.ico"))
     if os.path.exists(os.path.join(ROOT, "assets")):
         shutil.copytree(os.path.join(ROOT, "assets"), os.path.join(STAGE, "assets"))
+    # Attribuzioni e licenze dei componenti di terze parti: obbligatorie (MIT/BSD/Apache/LGPL)
+    # in ogni copia distribuita, su tutte le piattaforme.
+    if not os.path.exists(os.path.join(ROOT, "THIRD_PARTY_NOTICES.txt")):
+        raise SystemExit("ERRORE: THIRD_PARTY_NOTICES.txt mancante: non si distribuisce senza")
+    shutil.copy2(os.path.join(ROOT, "THIRD_PARTY_NOTICES.txt"), os.path.join(STAGE, "THIRD_PARTY_NOTICES.txt"))
+    # La EULA va anche dentro l'app: su Mac/Linux non c'e' un installer che la mostri
+    shutil.copy2(os.path.join(ROOT, "EULA.rtf"), os.path.join(STAGE, "EULA.rtf"))
     # FFmpeg incluso (cartella 'ffmpeg' preparata a mano su Windows, scaricata con hash
     # verificato dalle CI Mac/Linux): senza, proxy e analisi video richiedono che l'utente
     # installi ffmpeg da se'. copytree conserva i permessi (bit di esecuzione) e le firme.
@@ -172,7 +180,8 @@ def main():
 
     print("=== [3/4] Bundling con PyInstaller ===")
     icon_arg = ["--icon=icon.ico"] if os.path.exists(os.path.join(STAGE, "icon.ico")) else []
-    add_data = [f"--add-data=icon.ico{sep}.", f"--add-data=assets{sep}assets"]
+    add_data = [f"--add-data=icon.ico{sep}.", f"--add-data=assets{sep}assets",
+                f"--add-data=THIRD_PARTY_NOTICES.txt{sep}.", f"--add-data=EULA.rtf{sep}."]
     if os.path.isdir(os.path.join(STAGE, "ffmpeg")):
         add_data.append(f"--add-data=ffmpeg{sep}ffmpeg")
     cmd = [
@@ -205,12 +214,33 @@ def main():
         "--hidden-import=ffmpeg_tools",
         "--hidden-import=system_actions",
         "--hidden-import=PIL",
-        "--hidden-import=fitz",
+        "--hidden-import=pypdf",
+        # Licenze incompatibili con un software chiuso: non devono MAI finire nel bundle
+        # anche se presenti nel venv (PyMuPDF = AGPL-3.0, pillow-heif = encoder x265 GPL).
+        "--exclude-module=fitz",
+        "--exclude-module=pymupdf",
+        "--exclude-module=pillow_heif",
+        "--collect-all=reportlab",
         "--hidden-import=docx",
         "--hidden-import=jwt",
         "--hidden-import=cryptography",
     ] + icon_arg + add_data + ["main.py"]
     run(cmd, cwd=STAGE)
+
+    # PyInstaller analizza anche le DLL dentro i dati e ricopia quelle di FFmpeg (GPL) nella
+    # radice del bundle, accanto ai moduli di Datarium. Nessun modulo le usa: FFmpeg gira solo
+    # come programma separato dalla sua cartella. Si tolgono le copie duplicate.
+    bundle = os.path.join(ROOT, "dist", "Datarium")
+    internal = os.path.join(bundle, "_internal")
+    if not os.path.isdir(internal):
+        internal = bundle
+    ff_dir = os.path.join(internal, "ffmpeg")
+    if os.path.isdir(ff_dir):
+        for name in os.listdir(ff_dir):
+            dup = os.path.join(internal, name)
+            if name.lower().endswith((".dll", ".so", ".dylib")) and os.path.isfile(dup):
+                os.remove(dup)
+                print("   rimossa copia duplicata di FFmpeg:", name)
 
     print("=== [4/4] Completato ===")
     print(f"Bundle protetto in: {os.path.join(ROOT, 'dist', 'Datarium')}")

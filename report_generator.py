@@ -5,6 +5,124 @@ import datetime
 import multiprocessing
 import ffmpeg_tools
 
+
+# ==========================================================
+#  Mini-adattatore PDF su reportlab (BSD) con la stessa interfaccia di PyMuPDF
+#  usata dai report: PyMuPDF e' AGPL-3.0, incompatibile con un software chiuso.
+#  Coordinate come PyMuPDF: origine in alto a sinistra, y verso il basso;
+#  insert_text riceve il punto della linea di base, insert_textbox un rettangolo.
+# ==========================================================
+class _Rect:
+    def __init__(self, x0, y0, x1, y1):
+        self.x0, self.y0, self.x1, self.y1 = x0, y0, x1, y1
+        self.width = x1 - x0
+        self.height = y1 - y0
+
+
+_PDF_FONTS = {"helvetica": "Helvetica", "helvetica-bold": "Helvetica-Bold", "courier": "Courier"}
+
+
+class _PdfPage:
+    def __init__(self, canvas, height):
+        self._c = canvas
+        self._h = height
+
+    def _font(self, fontname):
+        return _PDF_FONTS.get(fontname, "Helvetica")
+
+    def draw_rect(self, rect, color=None, fill=None, width=1, radius=None):
+        c = self._c
+        if fill is not None:
+            c.setFillColorRGB(*fill)
+        if color is not None:
+            c.setStrokeColorRGB(*color)
+            c.setLineWidth(width)
+        y = self._h - rect.y1
+        stroke = 1 if color is not None and width else 0
+        do_fill = 1 if fill is not None else 0
+        if radius:
+            r = radius * min(rect.width, rect.height) if radius <= 1 else radius
+            c.roundRect(rect.x0, y, rect.width, rect.height, r, stroke=stroke, fill=do_fill)
+        else:
+            c.rect(rect.x0, y, rect.width, rect.height, stroke=stroke, fill=do_fill)
+
+    def draw_line(self, p1, p2, color=(0, 0, 0), width=1):
+        c = self._c
+        c.setStrokeColorRGB(*color)
+        c.setLineWidth(width)
+        c.line(p1[0], self._h - p1[1], p2[0], self._h - p2[1])
+
+    def insert_text(self, point, text, fontsize=11, fontname="helvetica", color=(0, 0, 0)):
+        c = self._c
+        c.setFont(self._font(fontname), fontsize)
+        c.setFillColorRGB(*color)
+        c.drawString(point[0], self._h - point[1], text)
+
+    def insert_textbox(self, rect, text, fontsize=11, fontname="helvetica", color=(0, 0, 0), align=0):
+        """Testo a capo automatico dentro `rect`; le righe che non ci stanno vengono omesse."""
+        from reportlab.pdfbase.pdfmetrics import stringWidth
+        font = self._font(fontname)
+        lines = []
+        for para in text.split("\n"):
+            words = para.split(" ")
+            cur = ""
+            for w in words:
+                cand = w if not cur else cur + " " + w
+                if cur and stringWidth(cand, font, fontsize) > rect.width:
+                    lines.append(cur)
+                    cur = w
+                else:
+                    cur = cand
+            lines.append(cur)
+        c = self._c
+        c.setFont(font, fontsize)
+        c.setFillColorRGB(*color)
+        leading = fontsize * 1.2
+        baseline = rect.y0 + fontsize
+        for line in lines:
+            if baseline > rect.y1:
+                break
+            y = self._h - baseline
+            if align == 1:
+                c.drawCentredString(rect.x0 + rect.width / 2, y, line)
+            else:
+                c.drawString(rect.x0, y, line)
+            baseline += leading
+
+    def insert_image(self, rect, stream):
+        import io
+        from reportlab.lib.utils import ImageReader
+        self._c.drawImage(ImageReader(io.BytesIO(stream)), rect.x0, self._h - rect.y1,
+                          width=rect.width, height=rect.height,
+                          preserveAspectRatio=True, anchor="nw", mask="auto")
+
+
+class _PdfDocument:
+    def __init__(self):
+        import io
+        from reportlab.pdfgen import canvas
+        self._buf = io.BytesIO()
+        self._c = canvas.Canvas(self._buf)
+        self._pages = 0
+
+    def new_page(self, width=595, height=842):
+        if self._pages:
+            self._c.showPage()
+        self._c.setPageSize((width, height))
+        self._pages += 1
+        return _PdfPage(self._c, height)
+
+    def save(self, path):
+        if self._c is not None:
+            self._c.save()
+            self._c = None
+        with open(path, "wb") as fh:
+            fh.write(self._buf.getvalue())
+
+    def close(self):
+        pass
+
+
 class ReportGenerator:
     @staticmethod
     def get_hardware_specs():
@@ -806,7 +924,7 @@ class ReportGenerator:
 
     @classmethod
     def save_report(cls, output_dir, report_id, source_dir, files_list, algo, dest_dirs, production_meta=None, timing=None):
-        """Genera e salva un vero e proprio file PDF di verifica Offload usando PyMuPDF.
+        """Genera e salva un vero e proprio file PDF di verifica Offload (reportlab).
         production_meta: dizionario opzionale {etichetta: valore} di metadati produzione (stile Silverstack).
         timing: dizionario opzionale {"start": datetime, "finish": datetime, "elapsed_str": str} con la
         durata del job, cosi' il report mostra quando e' iniziato/finito l'Offload (non solo quando e'
@@ -814,8 +932,7 @@ class ReportGenerator:
         os.makedirs(output_dir, exist_ok=True)
         report_path = os.path.join(output_dir, f"{report_id}_MHL_Report.pdf")
         
-        import fitz
-        doc = fitz.open()
+        doc = _PdfDocument()
         
         # Stile e Font
         font_name = "helvetica"
@@ -826,9 +943,9 @@ class ReportGenerator:
         page = doc.new_page(width=page_width, height=page_height)
         
         # Disegna Intestazione
-        page.draw_rect(fitz.Rect(0, 0, page_width, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
-        page.insert_textbox(fitz.Rect(20, 15, 600, 70), "DATARIUM - MHL VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
-        page.insert_textbox(fitz.Rect(20, 45, 600, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
+        page.draw_rect(_Rect(0, 0, page_width, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
+        page.insert_textbox(_Rect(20, 15, 600, 70), "DATARIUM - MHL VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
+        page.insert_textbox(_Rect(20, 45, 600, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
         
         # Badge di stato
         overall_status = "VERIFIED"
@@ -836,12 +953,12 @@ class ReportGenerator:
             overall_status = "FAILED"
             
         status_color = (0.06, 0.72, 0.5) if overall_status == "VERIFIED" else (0.93, 0.26, 0.26)
-        page.draw_rect(fitz.Rect(page_width - 150, 20, page_width - 20, 60), color=None, fill=status_color, width=0, radius=0.25)
-        page.insert_textbox(fitz.Rect(page_width - 150, 28, page_width - 20, 55), overall_status, fontsize=12, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
+        page.draw_rect(_Rect(page_width - 150, 20, page_width - 20, 60), color=None, fill=status_color, width=0, radius=0.25)
+        page.insert_textbox(_Rect(page_width - 150, 28, page_width - 20, 55), overall_status, fontsize=12, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
         
         # Specifiche Hardware e Dettagli
         specs = cls.get_hardware_specs()
-        page.insert_textbox(fitz.Rect(20, 100, 280, 200), 
+        page.insert_textbox(_Rect(20, 100, 280, 200), 
                              cls.safe_text(f"Specifiche PC:\n- OS: {specs['os']}\n- CPU/RAM: {specs['processors']} CPUs, {specs['ram']}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
@@ -862,25 +979,25 @@ class ReportGenerator:
             finish_str = timing.get("finish").strftime("%d/%m/%Y %H:%M:%S") if timing.get("finish") else "N/D"
             elapsed_str = timing.get("elapsed_str", "N/D")
             timing_lines = f"\n- Inizio: {start_str}\n- Fine: {finish_str}\n- Durata: {elapsed_str}"
-        page.insert_textbox(fitz.Rect(300, 100, page_width - 20, 244),
+        page.insert_textbox(_Rect(300, 100, page_width - 20, 244),
                              cls.safe_text(f"Riepilogo Offload:\n- File Totali: {len(files_list)}\n- File Video: {video_count}\n- Dimensione Totale: {total_size_str}\n- Algoritmo: {algo}{timing_lines}\n- Destinazioni:\n{dests_str}"),
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
 
         # Sezione Metadati Produzione (stile Silverstack), se forniti
         y = 254
         if production_meta:
-            page.draw_rect(fitz.Rect(20, y, page_width - 20, y + 18), color=None, fill=(0.85, 0.87, 0.92))
+            page.draw_rect(_Rect(20, y, page_width - 20, y + 18), color=None, fill=(0.85, 0.87, 0.92))
             page.insert_text((25, y + 13), "METADATI PRODUZIONE", fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
             y += 24
             meta_pairs = [(k, v) for k, v in production_meta.items() if k != "Note"]
             meta_str = "    ".join(f"{k}: {v}" for k, v in meta_pairs)
             if meta_str:
-                page.insert_textbox(fitz.Rect(25, y, page_width - 25, y + 45),
+                page.insert_textbox(_Rect(25, y, page_width - 25, y + 45),
                                     cls.safe_text(meta_str), fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
                 y += 48
             note_val = production_meta.get("Note")
             if note_val:
-                page.insert_textbox(fitz.Rect(25, y, page_width - 25, y + 40),
+                page.insert_textbox(_Rect(25, y, page_width - 25, y + 40),
                                     cls.safe_text(f"Note: {note_val}"), fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
                 y += 42
             y += 8
@@ -892,7 +1009,7 @@ class ReportGenerator:
                 y = 40
             
             # File Header (grigio chiaro)
-            page.draw_rect(fitz.Rect(20, y, page_width - 20, y+20), color=None, fill=(0.92, 0.93, 0.95))
+            page.draw_rect(_Rect(20, y, page_width - 20, y+20), color=None, fill=(0.92, 0.93, 0.95))
             name_disp = f["name"]
             page.insert_text((25, y+14), cls.safe_text(name_disp), fontsize=10, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
             
@@ -943,22 +1060,23 @@ class ReportGenerator:
                 thumb_h = 48
                 for i, t in enumerate(thumbs):
                     thumb_x = 280 + i * (thumb_w + 5)
-                    rect = fitz.Rect(thumb_x, thumb_start_y, thumb_x + thumb_w, thumb_start_y + thumb_h)
+                    rect = _Rect(thumb_x, thumb_start_y, thumb_x + thumb_w, thumb_start_y + thumb_h)
                     page.insert_image(rect, stream=t)
                 max_y_for_entry = max(y, thumb_start_y + thumb_h + 10)
             elif media_fmt == "Image":
                 try:
                     import io
                     from PIL import Image
-                    img = Image.open(f["path"])
-                    if img.mode in ("RGBA", "P"):
-                        img = img.convert("RGB")
+                    # convert() sempre (non solo per RGBA/P): crea una copia staccata dal file, senza
+                    # la quale un HEIC multi-immagine viene ridecodificato a piena risoluzione dopo il
+                    # thumbnail() e il salvataggio fallisce ("tile cannot extend outside image")
+                    img = Image.open(f["path"]).convert("RGB")
                     img.thumbnail((120, 85))
                     bio = io.BytesIO()
                     img.save(bio, format="JPEG")
                     # Calcola altezza proporzionale (max 85)
                     tw, th = img.size
-                    rect = fitz.Rect(280, thumb_start_y, 280 + tw, thumb_start_y + th)
+                    rect = _Rect(280, thumb_start_y, 280 + tw, thumb_start_y + th)
                     page.insert_image(rect, stream=bio.getvalue())
                     max_y_for_entry = max(y, thumb_start_y + th + 10)
                 except Exception as e:
@@ -1145,32 +1263,31 @@ class ReportGenerator:
 
     @classmethod
     def save_hash_report(cls, output_dir, report_id, files_list, algo, comparison=None):
-        """Genera e salva un vero e proprio file PDF di verifica Hash usando PyMuPDF."""
+        """Genera e salva un vero e proprio file PDF di verifica Hash (reportlab)."""
         os.makedirs(output_dir, exist_ok=True)
         report_path = os.path.join(output_dir, f"{report_id}_Hash_Report.pdf")
         
-        import fitz
-        doc = fitz.open()
+        doc = _PdfDocument()
         
         font_name = "helvetica"
         page = doc.new_page(width=595, height=842) # A4
         
         # Disegna Intestazione
-        page.draw_rect(fitz.Rect(0, 0, 595, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
-        page.insert_textbox(fitz.Rect(20, 15, 400, 70), "DATARIUM - HASH VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
-        page.insert_textbox(fitz.Rect(20, 45, 400, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
+        page.draw_rect(_Rect(0, 0, 595, 80), color=None, fill=(0.1, 0.1, 0.1)) # Grigio scuro
+        page.insert_textbox(_Rect(20, 15, 400, 70), "DATARIUM - HASH VERIFICATION REPORT", fontsize=16, fontname=f"{font_name}-bold", color=(1, 1, 1))
+        page.insert_textbox(_Rect(20, 45, 400, 75), f"ID: {report_id}  |  Generato il: {datetime.datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", fontsize=9, fontname=font_name, color=(0.8, 0.8, 0.8))
         
         # Badge di stato (sempre verified per hash check completato)
-        page.draw_rect(fitz.Rect(450, 20, 570, 60), color=None, fill=(0.06, 0.72, 0.5), width=0, radius=0.25)
-        page.insert_textbox(fitz.Rect(450, 28, 570, 55), "COMPLETED", fontsize=11, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
+        page.draw_rect(_Rect(450, 20, 570, 60), color=None, fill=(0.06, 0.72, 0.5), width=0, radius=0.25)
+        page.insert_textbox(_Rect(450, 28, 570, 55), "COMPLETED", fontsize=11, fontname=f"{font_name}-bold", color=(1, 1, 1), align=1)
         
         # Specifiche Hardware e Riepilogo
         specs = cls.get_hardware_specs()
-        page.insert_textbox(fitz.Rect(20, 100, 280, 180), 
+        page.insert_textbox(_Rect(20, 100, 280, 180), 
                              cls.safe_text(f"Specifiche PC:\n- OS: {specs['os']}\n- CPU/RAM: {specs['processors']} CPUs, {specs['ram']}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
-        page.insert_textbox(fitz.Rect(300, 100, 570, 180), 
+        page.insert_textbox(_Rect(300, 100, 570, 180), 
                              cls.safe_text(f"Riepilogo Scansione:\n- File Analizzati: {len(files_list)}\n- Algoritmo Checksum: {algo}"), 
                              fontsize=9, fontname=font_name, color=(0.2, 0.2, 0.2))
         
@@ -1203,7 +1320,7 @@ class ReportGenerator:
                 y = 40
 
         # Tabella dei File
-        page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
+        page.draw_rect(_Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
         page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
         page.insert_text((220, y+14), "Tipo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
         page.insert_text((280, y+14), f"Valore Checksum ({algo})", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
@@ -1214,7 +1331,7 @@ class ReportGenerator:
             if y > 800:
                 page = doc.new_page(width=595, height=842)
                 y = 40
-                page.draw_rect(fitz.Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
+                page.draw_rect(_Rect(20, y, 575, y+20), color=None, fill=(0.95, 0.95, 0.95))
                 page.insert_text((25, y+14), "Nome File", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
                 page.insert_text((220, y+14), "Tipo", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))
                 page.insert_text((280, y+14), f"Valore Checksum ({algo})", fontsize=9, fontname=f"{font_name}-bold", color=(0.1, 0.1, 0.1))

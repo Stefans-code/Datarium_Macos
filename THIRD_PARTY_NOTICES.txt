@@ -1,0 +1,94 @@
+DATARIUM - THIRD-PARTY NOTICES / AVVISI SU COMPONENTI DI TERZE PARTI
+=====================================================================
+
+Datarium include o scarica componenti software e modelli di terze parti.
+Ciascun componente resta di proprieta' dei rispettivi autori ed e' distribuito
+secondo la propria licenza, riportata sotto. Le licenze di terze parti
+prevalgono sulla EULA di Datarium per quanto riguarda tali componenti: le
+restrizioni della EULA (es. divieto di reverse engineering) NON si applicano
+ai componenti qui elencati.
+
+Datarium includes or downloads third-party software and models. Each component
+remains the property of its authors and is licensed under its own terms, listed
+below. Third-party licenses take precedence over the Datarium EULA for those
+components.
+
+---------------------------------------------------------------------
+A. COMPONENTI INCLUSI NELL'INSTALLER
+---------------------------------------------------------------------
+
+Runtime
+- Python 3.11 ............................ PSF License 2.0
+  https://docs.python.org/3/license.html
+- Tcl/Tk 8.6 ............................. Tcl/Tk License (BSD-style)
+  https://www.tcl.tk/software/tcltk/license.html
+- OpenSSL 3 (libcrypto, libssl) .......... Apache License 2.0
+  https://www.openssl.org/source/license.html
+- SQLite ................................. Public Domain
+- libffi ................................. MIT
+- Microsoft Visual C++ Runtime (Windows) . Microsoft redistributable license
+- GCC runtime (libgcc_s, libstdc++) ...... GPL-3.0 with GCC Runtime Library Exception
+- libwinpthread (mingw-w64, Windows) ..... MIT / ZPL-2.1
+
+Librerie Python
+- CustomTkinter (Tom Schimansky) ......... MIT
+- Pillow ................................. MIT-CMU (HPND)
+- pi-heif ................................ BSD-3-Clause
+    include: libheif ...................... LGPL-3.0 (libreria dinamica, sostituibile)
+             libde265 ..................... LGPL-3.0 (libreria dinamica, sostituibile)
+- NumPy .................................. BSD-3-Clause (+ 0BSD, MIT, Zlib, CC0-1.0)
+- OpenCV (opencv-contrib-python) ......... Apache License 2.0
+    include: opencv_videoio_ffmpeg ........ LGPL-2.1 (build FFmpeg di OpenCV)
+- llama-cpp-python (Andrei Betlen) ....... MIT
+    include: llama.cpp / ggml ............. MIT
+- huggingface_hub, hf-xet ................ Apache License 2.0
+- certifi ................................ MPL-2.0 (non modificato; sorgente: https://github.com/certifi/python-certifi)
+- cryptography ........................... Apache-2.0 OR BSD-3-Clause
+- PyJWT .................................. MIT
+- python-docx ............................ MIT
+- lxml ................................... BSD-3-Clause (include libxml2, libxslt: MIT)
+- xxhash ................................. BSD-2-Clause
+- orjson ................................. Apache-2.0 OR MIT
+- ujson .................................. BSD-3-Clause
+- pydantic-core .......................... MIT
+- PyYAML ................................. MIT
+- MarkupSafe ............................. BSD-3-Clause
+- click .................................. BSD-3-Clause
+- tqdm ................................... MPL-2.0 AND MIT (non modificato; sorgente: https://github.com/tqdm/tqdm)
+- email-validator ........................ Unlicense
+- setuptools ............................. MIT
+- ReportLab Toolkit ...................... BSD-3-Clause
+- pypdf .................................. BSD-3-Clause
+
+Programmi separati
+- FFmpeg 9.0 (ffmpeg, ffprobe e relative librerie) ...... GNU GPL-3.0
+  Usato come programma esterno, non modificato. Dettagli, provenienza dei
+  binari e codice sorgente: ffmpeg\README.txt e ffmpeg\LICENSE.txt.
+
+---------------------------------------------------------------------
+B. MODELLI SCARICATI AL PRIMO UTILIZZO
+---------------------------------------------------------------------
+
+Riconoscimento volti (OpenCV Zoo)
+- YuNet (face_detection_yunet_2023mar) ... MIT
+  https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+- SFace (face_recognition_sface_2021dec) . Apache License 2.0
+  https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface
+
+Argus Minor (profilo Leggero)
+- Argus-Minor-text: fine-tuning Nexflamma di Qwen3-1.7B (Alibaba Cloud / Qwen Team)
+  ........................................ Apache License 2.0
+  https://huggingface.co/Qwen/Qwen3-1.7B
+- Argus-Minor-vision / mmproj: moondream2 (vikhyatk) ... Apache License 2.0
+  https://huggingface.co/vikhyatk/moondream2
+
+Argus Maior (profilo Pesante; lo stesso modello per testo e immagini)
+- Argus-Maior-vision / mmproj: Qwen2.5-VL-7B-Instruct (Alibaba Cloud / Qwen Team)
+  ........................................ Apache License 2.0
+  https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct
+
+---------------------------------------------------------------------
+I testi completi delle licenze sono disponibili agli indirizzi indicati e
+nelle cartelle *.dist-info dei pacchetti inclusi. Per richiedere il codice
+sorgente dei componenti GPL/LGPL/MPL inclusi, contattare il supporto
+Nexflamma indicando la versione di Datarium.
