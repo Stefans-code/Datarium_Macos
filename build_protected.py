@@ -248,11 +248,6 @@ def main():
     print(f"Bundle protetto in: {os.path.join(ROOT, 'dist', 'Datarium')}")
     print("I moduli core sono binari compilati (.pyd/.so), non decompilabili.")
 
-
-if __name__ == "__main__":
-    main()
-
-
 def bundle_vulkan_loader(internal):
     """llama.cpp compilato con Vulkan e' collegato al loader Vulkan (vulkan-1.dll / libvulkan.so.1):
     se manca sul PC dell'utente il motore non si carica nemmeno in modalita' CPU. Lo si include
@@ -276,3 +271,7 @@ def bundle_vulkan_loader(internal):
                          "sulla macchina di build (serve per includerlo nel pacchetto).")
     shutil.copy2(os.path.realpath(loader), os.path.join(lib_dir, target))
     print("   incluso il loader Vulkan:", target)
+
+
+if __name__ == "__main__":
+    main()
