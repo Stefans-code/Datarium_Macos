@@ -354,6 +354,117 @@ def _download_parallel(url, dest_path, label, total_size, progress_callback, con
 # nomi di file/persone: prima venivano tutte cancellate (es. "Città" -> "Citt").
 _IT_ACCENTS = "àèéìíîòóùúÀÈÉÌÍÎÒÓÙÚçÇ"
 
+# Progetti software: i loro file vanno lasciati dove sono e col loro nome, altrimenti il
+# progetto smette di funzionare (import, percorsi, build). Misurato su una cartella vera:
+# l'Organizer spostava i sorgenti di app Android/Java/PHP in "Archivio/Backup".
+_CODE_PROJECT_FILES = frozenset([
+    "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", "gradlew", "pom.xml",
+    "package.json", "composer.json", "cargo.toml", "go.mod", "pyproject.toml", "setup.py", "cmakelists.txt",
+    "makefile", "androidmanifest.xml", "gemfile", "pubspec.yaml", "project.godot", "manage.py",
+])
+_CODE_PROJECT_DIRS = frozenset([".git", ".svn", ".hg", ".idea", ".vscode", ".gradle", "node_modules", "__pycache__", ".venv", "venv"])
+_CODE_PROJECT_SUFFIXES = (".iml", ".sln", ".csproj", ".vcxproj", ".xcodeproj", ".uproject", ".pbxproj")
+_CODE_EXTS = frozenset([
+    ".py", ".java", ".kt", ".c", ".h", ".cpp", ".hpp", ".cs", ".js", ".ts", ".jsx", ".tsx", ".php", ".html", ".htm",
+    ".css", ".scss", ".go", ".rs", ".rb", ".swift", ".m", ".sh", ".bat", ".ps1", ".class", ".dex", ".jar",
+    ".o", ".obj", ".pyc", ".flat", ".iml", ".gradle", ".properties", ".lock", ".map",
+])
+
+
+def is_code_project_dir(dirnames, filenames):
+    """True se la cartella e' (la radice di) un progetto software: file di progetto noti,
+    cartelle di strumenti (.git, .idea, node_modules...) o soprattutto file di codice
+    (almeno 3 e piu' della meta': una cartella mista con un .java sparso non e' un progetto)."""
+    names = [f.lower() for f in filenames]
+    if any(n in _CODE_PROJECT_FILES or n.endswith(_CODE_PROJECT_SUFFIXES) for n in names):
+        return True
+    if any(d.lower() in _CODE_PROJECT_DIRS or d.lower().endswith(_CODE_PROJECT_SUFFIXES) for d in dirnames):
+        return True
+    code = sum(1 for n in names if os.path.splitext(n)[1] in _CODE_EXTS)
+    return code >= 3 and code * 2 > len(names)
+
+
+def _vulkan_gpus():
+    """Elenca le GPU viste da Vulkan come (indice, tipo, nome), tipo 1=integrata 2=dedicata.
+    Interroga direttamente il loader Vulkan del sistema (ctypes): [] se manca o fallisce."""
+    import ctypes
+    import platform
+    if platform.system() == "Windows":
+        lib_names = ["vulkan-1.dll"]
+    elif platform.system() == "Linux":
+        lib_names = ["libvulkan.so.1", "libvulkan.so"]
+    else:
+        return []  # macOS: llama.cpp usa Metal, non Vulkan
+    vk = None
+    for name in lib_names:
+        try:
+            vk = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if vk is None:
+        return []
+
+    class VkInstanceCreateInfo(ctypes.Structure):
+        _fields_ = [("sType", ctypes.c_uint32), ("pNext", ctypes.c_void_p), ("flags", ctypes.c_uint32),
+                    ("pApplicationInfo", ctypes.c_void_p), ("enabledLayerCount", ctypes.c_uint32),
+                    ("ppEnabledLayerNames", ctypes.c_void_p), ("enabledExtensionCount", ctypes.c_uint32),
+                    ("ppEnabledExtensionNames", ctypes.c_void_p)]
+
+    instance = ctypes.c_void_p()
+    info = VkInstanceCreateInfo(sType=1)  # VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO
+    if vk.vkCreateInstance(ctypes.byref(info), None, ctypes.byref(instance)) != 0:
+        return []
+    gpus = []
+    try:
+        count = ctypes.c_uint32(0)
+        vk.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), None)
+        devices = (ctypes.c_void_p * count.value)()
+        vk.vkEnumeratePhysicalDevices(instance, ctypes.byref(count), devices)
+        for i in range(count.value):
+            # VkPhysicalDeviceProperties: 4 uint32 (api, driver, vendor, device), deviceType, deviceName[256]...
+            props = ctypes.create_string_buffer(2048)
+            vk.vkGetPhysicalDeviceProperties(ctypes.c_void_p(devices[i]), props)
+            dev_type = int.from_bytes(props.raw[16:20], "little")
+            name = props.raw[20:276].split(b"\0", 1)[0].decode(errors="ignore")
+            gpus.append((i, dev_type, name))
+    finally:
+        vk.vkDestroyInstance(instance, None)
+    return gpus
+
+
+def _prefer_discrete_vulkan_gpu():
+    """Se ci sono sia una GPU dedicata sia una integrata, fa usare a llama.cpp (backend Vulkan)
+    solo le dedicate: di default le usa tutte e divide il modello anche sull'integrata, che
+    rallenta tutto (misurato su RTX 5050 + Intel: 4,1 s/file con entrambe, 1,9 con la sola NVIDIA).
+    Va chiamata prima di importare llama_cpp; non tocca nulla se l'utente ha gia' scelto."""
+    if os.environ.get("GGML_VK_VISIBLE_DEVICES"):
+        return None
+    try:
+        gpus = _vulkan_gpus()
+    except Exception:
+        return None
+    discrete = [g for g in gpus if g[1] == 2]
+    if discrete and len(discrete) < len(gpus):
+        os.environ["GGML_VK_VISIBLE_DEVICES"] = ",".join(str(g[0]) for g in discrete)
+        return discrete[0][2]
+    return None
+
+
+_PREFERRED_GPU = _prefer_discrete_vulkan_gpu()
+
+
+def walk_organizable(src, skipped=None):
+    """Come os.walk(src) ma salta interi i progetti software (vedi is_code_project_dir):
+    restituisce (root, files). Le cartelle saltate finiscono nella lista `skipped`."""
+    for root, dirnames, filenames in os.walk(src):
+        if is_code_project_dir(dirnames, filenames):
+            if skipped is not None:
+                skipped.append(root)
+            dirnames[:] = []
+            continue
+        yield root, filenames
+
 
 def _parse_taxonomy(taxonomy_str):
     """Converte 'Cat1(Sub1, Sub2), Cat2(Sub1)' in [(Cat1, [Sub1, Sub2]), (Cat2, [Sub1])].
@@ -496,7 +607,9 @@ class AIEngine:
         if info["lib_gpu_support"] and strong_gpu:
             info["use_gpu"] = True
             info["n_gpu_layers"] = -1  # offload completo: llama.cpp scarica tutti i layer possibili
-            gpu_name = info["gpus"][0] if info["gpus"] else info["gpu_vendor"]
+            gpu_name = _PREFERRED_GPU or next(
+                (g for g in info["gpus"] if info["gpu_vendor"].lower() in g.lower()),
+                info["gpus"][0] if info["gpus"] else info["gpu_vendor"])
             info["label"] = f"GPU: {gpu_name}"
         else:
             info["use_gpu"] = False
@@ -804,8 +917,9 @@ class AIEngine:
         (Organizer/AutoTag) non passano mai da slim a full ne' riscaricano il modello sbagliato."""
         try:
             if quality not in ("full", "slim"):
-                quality = self.get_installed_quality() or "full"
+                quality = self.get_installed_quality() or "slim"  # dalla 1.4.3 si installa solo il Leggero
             prof = self.PROFILES["slim"] if quality == "slim" else self.PROFILES["full"]
+            self._quality = quality
 
             # Ogni voce = (repo, nome_originale_HF, nome_ARGUS_locale)
             tasks = [prof["text"]]
@@ -1388,6 +1502,7 @@ class AIEngine:
 
     def identify_global_themes(self, all_contexts):
         """Brainstorming: Analyse all contexts to find macro-themes and sub-themes."""
+        self._seen_folders = {}  # nuova analisi: le cartelle del giro precedente non contano
         if not self.llm or not all_contexts: return "Generale, Varie"
         
         cleaned_contexts = []
@@ -1424,12 +1539,44 @@ class AIEngine:
             {"role": "user", "content": f"Files to analyze:\n{summaries}"}
         ]
         
+        # Profilo Pesante (Qwen2.5-VL-7B) SENZA grammatica: vincolato dalla grammatica ricopiava il
+        # formato dell'istruzione ("Category1(Sub1, Sub2)") o degenerava in cifre, ed era 5 volte piu'
+        # lento su CPU; libero segue bene l'istruzione. Il Minor (addestrato con la grammatica) la tiene.
+        maior = getattr(self, "_quality", "full") == "full"
+        if maior:
+            # Il formato "Category1(Sub1, Sub2)" il 7B lo ricopia alla lettera anche senza grammatica
+            # (misurato su test_precisione): gli si descrive il formato a parole, senza segnaposto.
+            messages[0]["content"] = messages[0]["content"].replace(
+                "Format: Category1(Sub1, Sub2), Category2(Sub1)... Only return the taxonomy words.",
+                "Write each Category followed by its Subcategories in parentheses, separated by commas. "
+                "Use short names of one or two words. Only return the taxonomy words.")
         try:
-            response = self._chat(self._naming_llm(), messages, max_tokens=100, temperature=0.2, grammar=self._GBNF_TAXO)
-            return response['choices'][0]['message']['content'].strip()
+            response = self._chat(self._naming_llm(), messages, max_tokens=(160 if maior else 100), temperature=0.2,
+                                  grammar=(None if maior else self._GBNF_TAXO))
+            taxonomy = response['choices'][0]['message']['content'].strip()
+            if maior:
+                # Normalizza: niente numerazioni ("1. Scuola"), sottocategorie corte (max 3 parole, max 3)
+                taxo = [(re.sub(r"^\W*\d+[.)]\s*", "", c), [s for s in subs if len(s.split()) <= 3][:3])
+                        for c, subs in _parse_taxonomy(taxonomy)]
+                taxonomy = ", ".join(f"{c}({', '.join(s)})" for c, s in taxo if c and s)
+            if self._valid_taxonomy(taxonomy):
+                return taxonomy
+            print(f"[AIEngine] Tassonomia non valida ({taxonomy[:60]!r}): uso la tassonomia di ripiego")
+            return self._FALLBACK_TAXONOMY
         except Exception as e:
             print(f"[AIEngine] Tassonomia globale fallita ({e}): uso la tassonomia di ripiego")
             return self._FALLBACK_TAXONOMY
+
+    @staticmethod
+    def _valid_taxonomy(taxonomy):
+        """False se la tassonomia ha meno di 2 categorie, nomi senza lettere o segnaposto ricopiati
+        dall'istruzione (Category1, Sub1...): agganciare le cartelle a una tassonomia cosi' le peggiora."""
+        taxo = _parse_taxonomy(taxonomy)
+        names = [n.lower() for c, subs in taxo for n in [c] + subs]
+        if len(taxo) < 2 or any(not re.search(r"[a-zà-ù]{3}", n) for n in names):
+            return False
+        segnaposto = sum(1 for n in names if re.fullmatch(r"(category|categoria|sub|subcategory|sottocategoria)\s*\d*", n))
+        return segnaposto < len(names) / 2
 
     def _snap_to_taxonomy(self, parts, taxonomy):
         """Corregge piccole variazioni/instabilita' del LLM tra file simili (es. 'Documento'
@@ -1454,6 +1601,53 @@ class AIEngine:
                     parts[1] = sub_match[0]
         return parts
 
+    def _snap_to_seen_folders(self, parts):
+        """Riusa una cartella gia' creata in questo giro se quella nuova e' quasi uguale
+        ('Referti_medici' -> 'Referti_Medici', 'Recette' -> 'Ricette', 'Conti_Bancari' -> 'Conti_Banca'):
+        il modello non e' stabile da un file all'altro e la tassonomia globale non sempre riesce.
+        L'elenco si azzera a ogni nuova tassonomia (identify_global_themes = nuova analisi)."""
+        seen = getattr(self, "_seen_folders", None)
+        if seen is None:
+            seen = self._seen_folders = {}
+        if len(parts) < 3:
+            return parts
+
+        def norm(s):
+            return re.sub(r"[\s_]+", "_", s).strip("_").lower()
+
+        def head(s):
+            # Parola principale: 'MaterialeDidattico'/'Materiale_Scuola' -> 'materiale',
+            # 'e_Reti_Lezioni' -> 'reti' (il modello a volte spezza "Sistemi e Reti" sullo slash)
+            words = re.sub(r"([a-z" + _IT_ACCENTS + r"])([A-Z])", r"\1_\2", s).lower()
+            words = [w for w in re.split(r"[\s_\-]+", words) if w and w not in self._FOLDER_STOPWORDS]
+            return words[0] if words else ""
+
+        def same(new, existing):
+            """Nome esistente equivalente a 'new': quasi uguale, o stessa parola principale."""
+            m = difflib.get_close_matches(norm(new), [norm(x) for x in existing], n=1, cutoff=0.8)
+            if m:
+                return next(x for x in existing if norm(x) == m[0])
+            h = head(new)
+            if len(h) >= 4:
+                for x in existing:
+                    hx = head(x)
+                    if len(hx) >= 4 and difflib.SequenceMatcher(None, h, hx).ratio() >= 0.75:
+                        return x
+            return None
+
+        cat = same(parts[0], list(seen)) or parts[0]
+        subs = seen.setdefault(cat, [])
+        sub = same(parts[1], subs)
+        if sub:
+            parts[1] = sub
+        else:
+            subs.append(parts[1])
+        parts[0] = cat
+        return parts
+
+    _FOLDER_STOPWORDS = frozenset(["e", "ed", "di", "del", "della", "dei", "delle", "da", "il", "lo", "la", "i",
+                                   "gli", "le", "per", "con", "and", "of", "the", "for"])
+
     # Parole "vuote" tipiche dei nomi generati da camera/telefono/screenshot: un nome fatto
     # solo di queste NON e' descrittivo e va rinominato.
     _GENERIC_NAME_WORDS = frozenset([
@@ -1461,6 +1655,15 @@ class AIEngine:
         "image", "immagine", "video", "scan", "scansione", "foto", "photo", "picture", "untitled",
         "senza", "titolo", "copy", "copia", "documento", "document", "nuovo", "new", "file", "download",
         "mov", "mp4", "clip", "audio", "recording", "registrazione", "alle", "at", "del", "the",
+        # giorni e mesi: nomi-data automatici (webcam, dataset: "Mon_May_06_2024_08_13_58.jpg")
+        # non descrivono il contenuto; prima contavano come 2 parole "significative"
+        "mon", "tue", "wed", "thu", "fri", "sat", "sun", "monday", "tuesday", "wednesday", "thursday",
+        "friday", "saturday", "sunday", "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+        "sept", "oct", "nov", "dec", "january", "february", "march", "april", "june", "july", "august",
+        "september", "october", "november", "december", "lun", "gio", "ven", "sab", "dom", "lunedi",
+        "martedi", "mercoledi", "giovedi", "venerdi", "sabato", "domenica", "gen", "mag", "giu", "lug",
+        "ago", "set", "ott", "dic", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio",
+        "agosto", "settembre", "ottobre", "novembre", "dicembre",
     ])
 
     @staticmethod
@@ -1485,7 +1688,11 @@ class AIEngine:
     def get_smart_name(self, original_name, category, context="", taxonomy=""):
         """Generates a smart name using deep context and hierarchical taxonomy."""
         if not self.llm: return f"{category}/{original_name}"
-        
+        if taxonomy == self._FALLBACK_TAXONOMY:
+            # Tassonomia di ripiego (quella vera non e' riuscita): suggerirla al modello lo spinge a
+            # mettere tutto in poche cartelle generiche ("Documentazione/Lavoro"); meglio nessuna.
+            taxonomy = ""
+
         people_prefix = ""
         subcat_override = None
         
@@ -1521,8 +1728,11 @@ class AIEngine:
         # Nome originale gia' descrittivo (e conservato): al modello si chiede SOLO la cartella
         # (Categoria/Sottocategoria). Compito piu' corto e semplice = meno errori e meno
         # invenzioni, importante con il modello leggero a 2 bit.
-        folders_only = bool(not people_prefix and getattr(self, "keep_descriptive_names", True)
-                            and self._is_descriptive_name(original_name))
+        # File di codice sparsi: si sceglie solo la cartella, mai il nome (in Java il nome del file
+        # deve coincidere con la classe; script e query sono richiamati per nome).
+        code_file = os.path.splitext(original_name)[1].lower() in _CODE_EXTS | {".sql"}
+        folders_only = bool(not people_prefix and (code_file or (getattr(self, "keep_descriptive_names", True)
+                                                                 and self._is_descriptive_name(original_name))))
 
         context_str = f"Descrizione: {context}" if context else ""
         taxo_str = f"Tassonomia consigliata: {taxonomy}" if taxonomy else ""
@@ -1564,7 +1774,7 @@ class AIEngine:
                         "Esempi:\n"
                         "File: Fattura Enel marzo 2023 -> Documenti/Fatture\n"
                         "File: Pubblicazioni film 1973 Il Tempo articolo -> Archivio/Giornali\n"
-                        "File: Intervista regista Roma 2019 -> Interviste/Registi\n"
+                        "File: Viaggio Lisbona agosto 2023 -> Viaggi/Portogallo\n"
                         "Rispondi SOLO con la stringa Categoria/Sottocategoria."
                     )},
                     {"role": "user", "content": (
@@ -1616,13 +1826,13 @@ class AIEngine:
                 
             if not subcat_override:
                 parts = self._snap_to_taxonomy(parts, taxonomy)
+                parts = self._snap_to_seen_folders(parts)
 
             if subcat_override:
                 parts[1] = subcat_override
 
             orig_stem = os.path.splitext(original_name)[0]
-            keep_name = (not people_prefix and getattr(self, "keep_descriptive_names", True)
-                         and self._is_descriptive_name(original_name))
+            keep_name = folders_only
             if keep_name:
                 # Nome originale gia' descrittivo: l'AI decide solo le cartelle
                 parts[-1] = "KEEPNAMEPLACEHOLDER"

@@ -41,6 +41,8 @@ Librerie Python
     include: opencv_videoio_ffmpeg ........ LGPL-2.1 (build FFmpeg di OpenCV)
 - llama-cpp-python (Andrei Betlen) ....... MIT
     include: llama.cpp / ggml ............. MIT
+- Vulkan Loader (Khronos Group, LunarG) .. Apache-2.0  (Windows e Linux, accelerazione GPU)
+    https://github.com/KhronosGroup/Vulkan-Loader
 - huggingface_hub, hf-xet ................ Apache License 2.0
 - certifi ................................ MPL-2.0 (non modificato; sorgente: https://github.com/certifi/python-certifi)
 - cryptography ........................... Apache-2.0 OR BSD-3-Clause

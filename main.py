@@ -43,7 +43,7 @@ import shutil
 import pathlib
 from tkinter import filedialog
 import disk_benchmark
-from ai_engine import AIEngine
+from ai_engine import AIEngine, walk_organizable
 from license_manager import LicenseManager
 import cv2
 from face_memory import FaceMemoryManager
@@ -55,7 +55,7 @@ import ffmpeg_tools
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -573,16 +573,15 @@ class DatariumApp(ctk.CTk):
         ctk.CTkLabel(login_box, text="Completamento dell'installazione...", font=ctk.CTkFont(size=18), text_color=ergo.MUTED).pack()
         
         # Default = profilo GIA' installato (se c'e'), cosi' non si propone uno switch slim<->full
-        self.model_choice_var = ctk.StringVar(value=(self.ai.get_installed_quality() or "full"))
-        opt_f = ctk.CTkFrame(login_box, fg_color="transparent")
-        opt_f.pack(pady=10)
-        ctk.CTkRadioButton(opt_f, text="Qualità Massima AI (Consigliato - 6GB)", variable=self.model_choice_var, value="full").pack(anchor="w", pady=5)
-        ctk.CTkRadioButton(opt_f, text="Installazione Leggera (Modelli Compressi - 4GB)", variable=self.model_choice_var, value="slim").pack(anchor="w", pady=5)
+        # Dalla 1.4.3 si scarica solo il profilo Leggero (piu' preciso nei test e meta' peso);
+        # chi ha gia' il Pesante completo non arriva qui, e uno incompleto lo completa.
+        self.model_choice_var = ctk.StringVar(value=(self.ai.get_installed_quality() or "slim"))
+        ctk.CTkLabel(login_box, text="Verranno scaricati i modelli AI (circa 3 GB).", font=ctk.CTkFont(size=14)).pack(pady=10)
 
         self.btn_start_setup = ctk.CTkButton(login_box, text="Inizia Download", command=lambda: threading.Thread(target=self.start_setup_flow, daemon=True).start())
         self.btn_start_setup.pack(pady=10)
 
-        self.setup_status_lbl = ctk.CTkLabel(login_box, text="Scegli il modello e clicca Inizia", font=ctk.CTkFont(size=14, weight="bold"))
+        self.setup_status_lbl = ctk.CTkLabel(login_box, text="Clicca Inizia Download", font=ctk.CTkFont(size=14, weight="bold"))
         self.setup_status_lbl.pack(pady=(10, 10))
         
         self.setup_progress = ctk.CTkProgressBar(login_box, width=450, height=15)
@@ -593,7 +592,7 @@ class DatariumApp(ctk.CTk):
 
     def start_setup_flow(self):
         self.btn_start_setup.configure(state="disabled")
-        quality = getattr(self, 'model_choice_var', ctk.StringVar(value="full")).get()
+        quality = getattr(self, 'model_choice_var', ctk.StringVar(value="slim")).get()
         success, error_msg = self.ai.download_model_if_needed(True, self.update_setup_status, quality)
         if success:
             self.after(0, lambda: self.show_page("Home"))
@@ -1842,8 +1841,10 @@ class DatariumApp(ctk.CTk):
             self.set_progress(0)
             text_items = []
             vision_items = []
-            
-            for root, _, files in os.walk(src):
+            # I progetti software (Android, Java, siti...) restano intatti: spostarne o rinominarne
+            # i file li rompe. walk_organizable li salta interi e li elenca in code_projects.
+            self._code_projects = []
+            for root, files in walk_organizable(src, self._code_projects):
                 if "Backup_Datarium_" in root: continue
                 for f in files:
                     if f.startswith("Backup_Datarium_"):
@@ -1904,7 +1905,10 @@ class DatariumApp(ctk.CTk):
                 if not item.get('skip'): valid_items.append(item)
 
             if not valid_items:
-                self.update_status("❌ Nessun file compatibile trovato nella cartella.")
+                if self._code_projects:
+                    self.update_status(f"ℹ️ La cartella contiene solo progetti di codice ({len(self._code_projects)}): lasciati intatti, niente da riordinare.")
+                else:
+                    self.update_status("❌ Nessun file compatibile trovato nella cartella.")
                 self.set_progress(1.0)
                 return
 
@@ -2066,7 +2070,9 @@ class DatariumApp(ctk.CTk):
 
             n_rev = getattr(self, "_review_count", 0)
             n_faces = getattr(self, "_faces_deferred", 0)
+            n_proj = len(getattr(self, "_code_projects", []))
             self.update_status("✨ Analisi completata!" + (f" {n_rev} file in 'Da_Rivedere' (l'AI non era sicura)." if n_rev else "")
+                               + (f" {n_proj} progetti di codice lasciati intatti." if n_proj else "")
                                + (f" {n_faces} volti da nominare in Persone." if n_faces else ""))
             self.after(0, lambda: self.render_groups(self.last_groups))
             self.send_local_notification("Datarium - Analisi Completata", f"Analizzati con successo {len(valid_items)} file.")
@@ -2083,6 +2089,13 @@ class DatariumApp(ctk.CTk):
         if parts[1].lower() == "generale" and parts[2].lower() in ("varie", "generale"):
             return True
         if item.get('type') == "Image" and "IMAGE_DESC" not in (item.get('context') or ""):
+            return not self.ai._is_descriptive_name(item.get('old', ''))
+        # Il modello stesso dichiara di non sapere ("Backup_Da_Verificare", "Archivio_Senza_Nome")
+        name = parts[-1].lower()
+        if any(w in name for w in ("da_verificare", "verificare", "senza_nome", "sconosciut", "non_identificat", "unknown")):
+            return True
+        # File non documento e senza contenuto leggibile: il nome sarebbe inventato
+        if item.get('type') == "Other" and not (item.get('context') or "").strip():
             return not self.ai._is_descriptive_name(item.get('old', ''))
         return False
 

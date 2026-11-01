@@ -242,6 +242,8 @@ def main():
                 os.remove(dup)
                 print("   rimossa copia duplicata di FFmpeg:", name)
 
+    bundle_vulkan_loader(internal)
+
     print("=== [4/4] Completato ===")
     print(f"Bundle protetto in: {os.path.join(ROOT, 'dist', 'Datarium')}")
     print("I moduli core sono binari compilati (.pyd/.so), non decompilabili.")
@@ -249,3 +251,28 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def bundle_vulkan_loader(internal):
+    """llama.cpp compilato con Vulkan e' collegato al loader Vulkan (vulkan-1.dll / libvulkan.so.1):
+    se manca sul PC dell'utente il motore non si carica nemmeno in modalita' CPU. Lo si include
+    accanto alle librerie di llama.cpp (Khronos Vulkan Loader, Apache-2.0): senza schede
+    compatibili non trova dispositivi e l'app resta sulla CPU come prima."""
+    import shutil
+    lib_dir = os.path.join(internal, "llama_cpp", "lib")
+    if not os.path.isdir(lib_dir):
+        return
+    names = os.listdir(lib_dir)
+    if not any(n.startswith(("ggml-vulkan", "libggml-vulkan")) for n in names):
+        return  # build solo CPU (o Metal su Mac): niente da fare
+    if sys.platform == "win32":
+        loader, target = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "vulkan-1.dll"), "vulkan-1.dll"
+    else:
+        target = "libvulkan.so.1"
+        loader = next((p for p in ("/usr/lib/x86_64-linux-gnu/libvulkan.so.1", "/usr/lib64/libvulkan.so.1",
+                                   "/usr/lib/libvulkan.so.1") if os.path.exists(p)), None)
+    if not loader or not os.path.exists(loader):
+        raise SystemExit("ERRORE: llama.cpp e' compilato con Vulkan ma il loader Vulkan non e' installato "
+                         "sulla macchina di build (serve per includerlo nel pacchetto).")
+    shutil.copy2(os.path.realpath(loader), os.path.join(lib_dir, target))
+    print("   incluso il loader Vulkan:", target)
