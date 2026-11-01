@@ -20,14 +20,18 @@ jobs:
           # Intel: runner arm64 VELOCE e disponibile, con emulazione x86_64 (Rosetta).
           # Evita la coda infinita dei runner Intel nativi (macos-13). Il link OpenSSL si
           # risolve nello step Install nascondendo OpenSSL dal filesystem.
-          - runner: macos-14
+          - runner: macos-15
             arch: Intel
             prefix: "arch -x86_64"
-          - runner: macos-14
+          - runner: macos-15
             arch: AppleSilicon
             prefix: ""
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    # macOS 14 ritirato da GitHub il 2/11/2026: si compila su macOS 15 ma per macOS 14+,
+    # come prima (senza questa variabile il motore richiederebbe macOS 15).
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
 
     steps:
     - uses: actions/checkout@v4
