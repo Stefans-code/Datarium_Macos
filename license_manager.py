@@ -25,6 +25,8 @@ mcNC+Kw8Srh5GkJ6qORapRSXXnoN6HPoYR3EwJI4WAkGOagorVcKImseUIXaJ7FA
 6wIDAQAB
 -----END PUBLIC KEY-----"""
     ALGORITHM = "RS256"
+    # Chiave "anon" pubblica del sito: consente solo le RPC di controllo licenza
+    SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhvb3dramVwdmJva3htaHNxbW5tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY3NTI2NjUsImV4cCI6MjA5MjMyODY2NX0.2S_baIWot9ZkW7bsi16hy84O9Edf_XlBcQBmhXs3H1Y"
     TRIAL_DAYS = 30
 
     def __init__(self):
@@ -176,15 +178,35 @@ mcNC+Kw8Srh5GkJ6qORapRSXXnoN6HPoYR3EwJI4WAkGOagorVcKImseUIXaJ7FA
             pass
         return None
 
+    def check_license_by_id(self, license_id, hwid):
+        """Licenze nuove (con `lid`): True se QUELLA licenza e' attiva su questo computer,
+        False se revocata/disattivata, None se offline. RPC pubblica come check_license_validity."""
+        import urllib.request
+        import json
+        url = "https://xoowkjepvbokxmhsqmnm.supabase.co/rest/v1/rpc/check_license_by_id"
+        chiave = self.SUPABASE_ANON_KEY
+        try:
+            req = urllib.request.Request(url, data=json.dumps({"p_license_id": license_id, "p_hwid": hwid}).encode(),
+                                         headers={"apikey": chiave, "Authorization": "Bearer " + chiave,
+                                                  "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=3) as response:
+                result = json.loads(response.read().decode())
+                return result if isinstance(result, bool) else None
+        except Exception:
+            return None
+
+    def _revoca_locale(self, motivo):
+        if os.path.exists(self.license_path):
+            try: os.remove(self.license_path)
+            except Exception: pass
+        return False, motivo
+
     def verify_license(self, token=None):
-        """Verifica se la licenza è valida per questo hardware."""
+        """Verifica se la licenza è valida per questo hardware.
+        Licenze nuove: contengono `product` (deve essere Datarium) e `lid` (id licenza, verificato
+        online). Licenze emesse prima della 1.4.4: senza questi campi restano valide e usano il
+        controllo online per computer di sempre."""
         current_hwid = self.get_hwid()
-        online_valid = self.check_online_validation(current_hwid)
-        if online_valid is False:
-            if os.path.exists(self.license_path):
-                try: os.remove(self.license_path)
-                except Exception: pass
-            return False, "Licenza revocata o terminata (Database validation failed)"
 
         if not token:
             if os.path.exists(self.license_path):
@@ -194,17 +216,27 @@ mcNC+Kw8Srh5GkJ6qORapRSXXnoN6HPoYR3EwJI4WAkGOagorVcKImseUIXaJ7FA
                 except Exception:
                     return False, "Errore lettura licenza"
             else:
-                if self._is_trial_build():
-                    return self.check_trial()
                 return False, "Licenza mancante"
 
         try:
             payload = jwt.decode(token, self.LICENSE_PUBLIC_KEY, algorithms=[self.ALGORITHM])
-            
+
+            # Prodotto: una licenza di Revisis/Vocius (stessa chiave) non apre Datarium
+            prodotto = str(payload.get("product") or "").lower()
+            if prodotto and "datarium" not in prodotto:
+                return False, "Questa licenza e' per un altro prodotto Nexflamma"
+
             # Controllo HWID
             if payload.get("hwid") != current_hwid:
                 return False, f"Hardware ID mismatch (Local: {current_hwid})"
-            
+
+            # Revoca online: per singola licenza se c'e' `lid`, altrimenti per computer
+            lid = payload.get("lid")
+            online_valid = (self.check_license_by_id(lid, current_hwid) if lid
+                            else self.check_online_validation(current_hwid))
+            if online_valid is False:
+                return self._revoca_locale("Licenza revocata o terminata (Database validation failed)")
+
             # Controllo Scadenza
             exp = datetime.fromtimestamp(payload['exp'], tz=timezone.utc)
             if exp < datetime.now(timezone.utc):
