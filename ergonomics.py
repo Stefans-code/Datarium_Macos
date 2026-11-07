@@ -25,7 +25,7 @@ ERROR = ("#b91c1c", "#f87171")        # errori                         6.5:1 / 6
 SUCCESS = ("#047857", "#34d399")      # esito positivo                 5.5:1 / 10:1
 INFO = ("#0369a1", "#38bdf8")         # informazioni/stato in corso    5.9:1 / 9.0:1
 WARNING = ("#b45309", "#fbbf24")      # avvisi                         5.0:1 / 11:1
-FOCUS_RING = ("#d97706", "#fbbf24")   # anello di focus (contrasto non-testo >= 3:1)
+FOCUS_RING = ("#0e7490", "#00f2fe")   # anello di focus: ciano "cristallo" Nexflamma, >= 3:1 anche accanto all'arancio
 
 _installed = False
 

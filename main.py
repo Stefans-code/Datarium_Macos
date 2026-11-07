@@ -34,8 +34,10 @@ if getattr(sys, 'frozen', False):
 
 import customtkinter as ctk
 import ergonomics as ergo
+import brand
 # Va fatto prima di creare qualunque widget: rende pulsanti/checkbox/menu raggiungibili con Tab.
 ergo.install()
+brand.install()
 import re
 import platform
 import threading
@@ -55,7 +57,7 @@ import ffmpeg_tools
 
 # Unica fonte di verita' per la versione installata: usata sia nella UI che nel check
 # aggiornamenti, cosi' non si scorda di allinearle a mano ad ogni release.
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 
 def _version_tuple(v):
     """'1.10.2' -> (1, 10, 2). Confrontare tuple di interi, non le stringhe: '1.10.0' > '1.2.0'
@@ -158,7 +160,7 @@ class ImageIdentificationDialog(ctk.CTkToplevel):
         self.btn_cancel = ctk.CTkButton(btn_frame, text="Salta", width=100, fg_color="transparent", border_width=1, command=self.on_cancel)
         self.btn_cancel.pack(side="left", padx=10)
         
-        self.btn_ok = ctk.CTkButton(btn_frame, text="Conferma", width=120, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.on_ok)
+        self.btn_ok = ctk.CTkButton(btn_frame, text="Conferma", width=120, font=ctk.CTkFont(weight="bold"), command=self.on_ok)
         self.btn_ok.pack(side="left", padx=10)
         ergo.bind_dialog_keys(self, on_ok=self.on_ok, on_cancel=self.on_cancel)
 
@@ -219,7 +221,7 @@ class FaceIdentificationDialog(ctk.CTkToplevel):
         self.btn_cancel = ctk.CTkButton(btn_frame, text="Salta Faccia", width=110, fg_color="transparent", border_width=1, command=self.on_cancel)
         self.btn_cancel.pack(side="left", padx=10)
         
-        self.btn_ok = ctk.CTkButton(btn_frame, text="Salva in Memoria", width=140, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.on_ok)
+        self.btn_ok = ctk.CTkButton(btn_frame, text="Salva in Memoria", width=140, font=ctk.CTkFont(weight="bold"), command=self.on_ok)
         self.btn_ok.pack(side="left", padx=10)
         ergo.bind_dialog_keys(self, on_ok=self.on_ok, on_cancel=self.on_cancel)
 
@@ -458,53 +460,65 @@ class DatariumApp(ctk.CTk):
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
 
-        self.logo_lbl = ctk.CTkLabel(self.sidebar, text="DATARIUM", font=ctk.CTkFont(size=24, weight="bold"))
-        self.logo_lbl.grid(row=0, column=0, padx=20, pady=(24, 24))
+        # Testata: nome del prodotto + firma della casa madre (identita' Nexflamma, vedi brand.py)
+        brand_box = ctk.CTkFrame(self.sidebar, fg_color="transparent", border_width=0)
+        brand_box.grid(row=0, column=0, padx=20, pady=(22, 20), sticky="w")
+        self.logo_lbl = ctk.CTkLabel(brand_box, text="DATARIUM", font=ctk.CTkFont(size=24, weight="bold"))
+        self.logo_lbl.pack(anchor="w")
+        firma = ctk.CTkFrame(brand_box, fg_color="transparent", border_width=0)
+        firma.pack(anchor="w", pady=(2, 0))
+        try:
+            from PIL import Image
+            _mark = Image.open(os.path.join(_resource_dir(), "assets", "nexflamma_mark.png"))
+            ctk.CTkLabel(firma, text="", image=ctk.CTkImage(light_image=_mark, size=(16, 16))).pack(side="left", padx=(0, 5))
+        except Exception:
+            pass
+        ctk.CTkLabel(firma, text=brand.FIRMA, font=ctk.CTkFont(size=12), text_color=ergo.MUTED).pack(side="left")
 
         # Voci di navigazione: niente emoji (solo testo), con uno stato attivo
         # visibile (sfondo tonale blu) che prima non esisteva -- l'utente non aveva
         # modo di vedere a colpo d'occhio in che pagina si trovava, solo l'hover al
         # passaggio del mouse.
         self.NAV_INACTIVE = {"fg_color": "transparent", "text_color": ("gray10", "gray90")}
-        self.NAV_ACTIVE = {"fg_color": ("#dbeafe", "#1e3a5f"), "text_color": ("#1d4ed8", "#7dd3fc")}
+        self.NAV_ACTIVE = {"fg_color": brand.ACCENT_SOFT, "text_color": brand.ACCENT_TEXT}
         self._nav_buttons = {}
 
-        self.btn_home = ctk.CTkButton(self.sidebar, text="Home", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Home"), **self.NAV_INACTIVE)
+        self.btn_home = ctk.CTkButton(self.sidebar, text="Home", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("Home"), **self.NAV_INACTIVE)
         self.btn_home.grid(row=1, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Home"] = self.btn_home
 
-        self.btn_organizer = ctk.CTkButton(self.sidebar, text="Organizer", hover_color=("gray70", "gray30"), anchor="w", command=self.go_to_organizer, **self.NAV_INACTIVE)
+        self.btn_organizer = ctk.CTkButton(self.sidebar, text="Organizer", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=self.go_to_organizer, **self.NAV_INACTIVE)
         self.btn_organizer.grid(row=2, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Organizer"] = self.btn_organizer
 
-        self.btn_autotag = ctk.CTkButton(self.sidebar, text="Auto Tag", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("AutoTag"), **self.NAV_INACTIVE)
+        self.btn_autotag = ctk.CTkButton(self.sidebar, text="Auto Tag", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("AutoTag"), **self.NAV_INACTIVE)
         self.btn_autotag.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["AutoTag"] = self.btn_autotag
 
-        self.btn_hash = ctk.CTkButton(self.sidebar, text="Hash Check", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("HashHome"), **self.NAV_INACTIVE)
+        self.btn_hash = ctk.CTkButton(self.sidebar, text="Hash Check", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("HashHome"), **self.NAV_INACTIVE)
         self.btn_hash.grid(row=4, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Hash"] = self.btn_hash
 
-        self.btn_offload = ctk.CTkButton(self.sidebar, text="Offload", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("OffloadHome"), **self.NAV_INACTIVE)
+        self.btn_offload = ctk.CTkButton(self.sidebar, text="Offload", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("OffloadHome"), **self.NAV_INACTIVE)
         self.btn_offload.grid(row=5, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Offload"] = self.btn_offload
 
-        self.btn_sync = ctk.CTkButton(self.sidebar, text="Sincronizza Dischi", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Sync"), **self.NAV_INACTIVE)
+        self.btn_sync = ctk.CTkButton(self.sidebar, text="Sincronizza Dischi", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("Sync"), **self.NAV_INACTIVE)
         self.btn_sync.grid(row=6, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Sync"] = self.btn_sync
 
-        self.btn_cull = ctk.CTkButton(self.sidebar, text="Selezione Foto", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Cull"), **self.NAV_INACTIVE)
+        self.btn_cull = ctk.CTkButton(self.sidebar, text="Selezione Foto", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("Cull"), **self.NAV_INACTIVE)
         self.btn_cull.grid(row=7, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["Cull"] = self.btn_cull
 
-        self.btn_people = ctk.CTkButton(self.sidebar, text="Persone", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("People"), **self.NAV_INACTIVE)
+        self.btn_people = ctk.CTkButton(self.sidebar, text="Persone", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("People"), **self.NAV_INACTIVE)
         self.btn_people.grid(row=8, column=0, padx=20, pady=5, sticky="ew")
         self._nav_buttons["People"] = self.btn_people
 
         # Bottom Buttons
         self.sidebar.grid_rowconfigure(9, weight=1)
 
-        self.btn_settings = ctk.CTkButton(self.sidebar, text="Impostazioni", hover_color=("gray70", "gray30"), anchor="w", command=lambda: self.show_page("Settings"), **self.NAV_INACTIVE)
+        self.btn_settings = ctk.CTkButton(self.sidebar, text="Impostazioni", hover_color=brand.ACCENT_SOFT_HOVER, anchor="w", command=lambda: self.show_page("Settings"), **self.NAV_INACTIVE)
         self.btn_settings.grid(row=10, column=0, padx=20, pady=10, sticky="ew")
         self._nav_buttons["Settings"] = self.btn_settings
 
@@ -569,7 +583,8 @@ class DatariumApp(ctk.CTk):
         login_box.place(relx=0.5, rely=0.5, anchor="center")
         login_box.pack_propagate(False)
         
-        ctk.CTkLabel(login_box, text="DATARIUM", font=ctk.CTkFont(size=36, weight="bold")).pack(pady=(30, 10))
+        ctk.CTkLabel(login_box, text="DATARIUM", font=ctk.CTkFont(size=36, weight="bold")).pack(pady=(30, 0))
+        ctk.CTkLabel(login_box, text=brand.FIRMA, font=ctk.CTkFont(size=13), text_color=ergo.MUTED).pack(pady=(0, 10))
         ctk.CTkLabel(login_box, text="Completamento dell'installazione...", font=ctk.CTkFont(size=18), text_color=ergo.MUTED).pack()
         
         # Default = profilo GIA' installato (se c'e'), cosi' non si propone uno switch slim<->full
@@ -624,7 +639,7 @@ class DatariumApp(ctk.CTk):
         self.pages["Home"] = page
 
         # Welcome Header Banner
-        header = ctk.CTkFrame(page, fg_color=("gray95", "gray11"), corner_radius=15, height=140)
+        header = ctk.CTkFrame(page, fg_color=brand.SURFACE, border_color=brand.BORDER, corner_radius=15, height=140)
         header.pack(fill="x", pady=(0, 20))
         header.pack_propagate(False)
 
@@ -797,7 +812,7 @@ class DatariumApp(ctk.CTk):
 
         # --- FOOTER (sempre visibile, fuori dall'area che scorre) ---
         ctk.CTkButton(btn_f, text="Annulla", fg_color="transparent", text_color=("gray10", "gray90"), border_width=2, width=120, command=lambda: self.show_page("Home")).pack(side="left")
-        ctk.CTkButton(btn_f, text="Analizza e mostra anteprima", width=220, fg_color="#10b981", hover_color="#059669", command=self.go_to_preview).pack(side="right")
+        ctk.CTkButton(btn_f, text="Analizza e mostra anteprima", width=220, command=self.go_to_preview).pack(side="right")
         ctk.CTkLabel(btn_f, text="Nessun file viene spostato finché non confermi l'anteprima.", text_color=ergo.MUTED,
                      font=ctk.CTkFont(size=12)).pack(side="right", padx=12)
 
@@ -863,7 +878,7 @@ class DatariumApp(ctk.CTk):
         self.status_lbl = ctk.CTkLabel(footer, text="In attesa di avvio...", font=ctk.CTkFont(size=12, weight="bold"))
         self.status_lbl.pack(side="left")
 
-        self.btn_apply_org = ctk.CTkButton(footer, text="Applica organizzazione", width=180, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.execute_organization)
+        self.btn_apply_org = ctk.CTkButton(footer, text="Applica organizzazione", width=180, font=ctk.CTkFont(weight="bold"), command=self.execute_organization)
         self.btn_apply_org.pack(side="right")
         ergo.tooltip(self.btn_apply_org, "Sposta i file spuntati nelle cartelle mostrate. Prima viene creato un backup ZIP;\n"
                                          "dopo potrai comunque annullare con «Annulla l'ultima organizzazione».")
@@ -916,7 +931,7 @@ class DatariumApp(ctk.CTk):
         btn_pick_ff = ctk.CTkButton(ff_row, text="📂 Sfoglia", width=100, command=self.pick_ffmpeg_path)
         btn_pick_ff.pack(side="left", padx=5)
         
-        btn_test_ff = ctk.CTkButton(ff_row, text="⚡ Verifica", width=100, fg_color="#10b981", hover_color="#059669", command=self.test_ffmpeg_path)
+        btn_test_ff = ctk.CTkButton(ff_row, text="⚡ Verifica", width=100, command=self.test_ffmpeg_path)
         btn_test_ff.pack(side="left", padx=5)
         
         self.ffmpeg_status_lbl = ctk.CTkLabel(ff_box, text="Stato FFMPEG: In attesa di verifica", font=ctk.CTkFont(size=12), text_color=ergo.MUTED)
@@ -966,7 +981,7 @@ class DatariumApp(ctk.CTk):
         self.rule_folder_entry = ctk.CTkEntry(form_row, width=150, placeholder_text="es. Foto/JPG")
         self.rule_folder_entry.pack(side="left", padx=5)
         
-        btn_add_rule = ctk.CTkButton(form_row, text="➕ Aggiungi", width=90, fg_color="#10b981", hover_color="#059669", command=self.add_custom_rule)
+        btn_add_rule = ctk.CTkButton(form_row, text="➕ Aggiungi", width=90, command=self.add_custom_rule)
         btn_add_rule.pack(side="left", padx=10)
         
         self.rules_list_frame = ctk.CTkScrollableFrame(rules_box, height=150, fg_color=("gray90", "gray15"), label_text="Regole Attive")
@@ -1041,7 +1056,7 @@ class DatariumApp(ctk.CTk):
         self.bench_size_entry = ctk.CTkEntry(bench_row3, width=70)
         self.bench_size_entry.insert(0, "20")
         self.bench_size_entry.pack(side="left", padx=(0, 20))
-        self.btn_run_bench = ctk.CTkButton(bench_row3, text="Avvia test", fg_color="#10b981", hover_color="#059669", command=self.run_disk_benchmark)
+        self.btn_run_bench = ctk.CTkButton(bench_row3, text="Avvia test", command=self.run_disk_benchmark)
         self.btn_run_bench.pack(side="left")
 
         self.bench_progress = ctk.CTkProgressBar(bench_box)
@@ -1074,7 +1089,7 @@ class DatariumApp(ctk.CTk):
         ).pack(anchor="w", padx=20, pady=(0, 10))
         ctk.CTkButton(
             uninstall_box, text="Disinstalla Datarium completamente...",
-            fg_color="#ef4444", hover_color="#b91c1c", command=self.full_uninstall
+            fg_color=brand.DANGER, hover_color=brand.DANGER_HOVER, text_color="#ffffff", command=self.full_uninstall
         ).pack(anchor="w", padx=20, pady=(0, 15))
 
     def _bench_canvas_bg(self):
@@ -2539,7 +2554,7 @@ class DatariumApp(ctk.CTk):
             else:
                 initials = "".join(w[0] for w in name.split()[:2]).upper() or "?"
                 ctk.CTkLabel(card, text=initials, width=96, height=96, corner_radius=48,
-                             fg_color=("#dbeafe", "#1e3a5f"), text_color=("#1d4ed8", "#7dd3fc"),
+                             fg_color=brand.ACCENT_SOFT, text_color=brand.ACCENT_TEXT,
                              font=ctk.CTkFont(size=30, weight="bold")).pack(pady=(14, 6))
             ctk.CTkLabel(card, text=name, font=ctk.CTkFont(size=14, weight="bold"), wraplength=170).pack(padx=8)
             ctk.CTkLabel(card, text=f"{n_samples} {'campione' if n_samples == 1 else 'campioni'} di volto",
@@ -2718,8 +2733,7 @@ class DatariumApp(ctk.CTk):
         foot.pack(fill="x")
         self.cull_summary = ctk.CTkLabel(foot, text="", font=ctk.CTkFont(weight="bold"))
         self.cull_summary.pack(side="left")
-        self.btn_cull_move = ctk.CTkButton(foot, text="Sposta le scartate", width=170, fg_color="#10b981", hover_color="#059669",
-                                           state="disabled", command=self.cull_move_selected)
+        self.btn_cull_move = ctk.CTkButton(foot, text="Sposta le scartate", width=170, state="disabled", command=self.cull_move_selected)
         self.btn_cull_move.pack(side="right")
         self.btn_cull_undo = ctk.CTkButton(foot, text="↩ Annulla ultimo spostamento", fg_color="transparent", border_width=1,
                                            text_color=("gray10", "gray90"), command=self.cull_undo)
@@ -2991,7 +3005,7 @@ class DatariumApp(ctk.CTk):
         footer_btn_f = ctk.CTkFrame(modal, fg_color="transparent")
         footer_btn_f.pack(side="bottom", fill="x", padx=40, pady=30)
         ctk.CTkButton(footer_btn_f, text="Annulla", fg_color="transparent", border_width=2, width=120, command=lambda: self.show_page("HashHome")).pack(side="left")
-        ctk.CTkButton(footer_btn_f, text="Conferma", width=140, fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.run_hash_verification).pack(side="right")
+        ctk.CTkButton(footer_btn_f, text="Conferma", width=140, font=ctk.CTkFont(weight="bold"), command=self.run_hash_verification).pack(side="right")
 
         # 3. Page: HashResults (Drawing 3)
         page_results = ctk.CTkFrame(self.content_container, fg_color="transparent")
@@ -3017,7 +3031,7 @@ class DatariumApp(ctk.CTk):
         bot_f.pack(fill="x", side="bottom")
         ctk.CTkButton(bot_f, text="Indietro", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_page("HashOptions")).pack(side="left")
         
-        self.btn_export_hash = ctk.CTkButton(bot_f, text="📄 Esporta Report PDF", fg_color="#10b981", hover_color="#059669", font=ctk.CTkFont(weight="bold"), command=self.export_hash_report)
+        self.btn_export_hash = ctk.CTkButton(bot_f, text="📄 Esporta Report PDF", font=ctk.CTkFont(weight="bold"), command=self.export_hash_report)
         self.btn_export_hash.pack(side="right", padx=10)
         
         ctk.CTkButton(bot_f, text="Torna alla Home", width=140, fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), command=lambda: self.show_page("HashHome")).pack(side="right")
@@ -3965,7 +3979,7 @@ class DatariumApp(ctk.CTk):
                      text_color=ergo.MUTED, justify="left", wraplength=640).pack(anchor="w", padx=30)
 
         # Center Crea Album button
-        btn_crea = ctk.CTkButton(recent_box, text="➕ Crea Album", font=ctk.CTkFont(size=16, weight="bold"), width=220, height=55, corner_radius=10, fg_color="#10b981", hover_color="#059669", command=lambda: self.show_autotag_subpage("Config"))
+        btn_crea = ctk.CTkButton(recent_box, text="➕ Crea Album", font=ctk.CTkFont(size=16, weight="bold"), width=220, height=55, corner_radius=10, command=lambda: self.show_autotag_subpage("Config"))
         btn_crea.place(relx=0.5, rely=0.55, anchor="center")
 
         # 2. AUTOTAG CONFIG (Drawing 3)
@@ -4014,7 +4028,7 @@ class DatariumApp(ctk.CTk):
         act_frame = ctk.CTkFrame(cfg_box, fg_color="transparent")
         act_frame.pack(fill="x", side="bottom", padx=40, pady=35)
         ctk.CTkButton(act_frame, text="Annulla", fg_color="transparent", border_width=1, width=120, height=40, command=lambda: self.show_autotag_subpage("Home")).pack(side="left")
-        self.btn_confirm_at = ctk.CTkButton(act_frame, text="Conferma", fg_color="#10b981", hover_color="#059669", width=140, height=40, font=ctk.CTkFont(weight="bold"), command=self.run_autotag_analysis)
+        self.btn_confirm_at = ctk.CTkButton(act_frame, text="Conferma", width=140, height=40, font=ctk.CTkFont(weight="bold"), command=self.run_autotag_analysis)
         self.btn_confirm_at.pack(side="right")
 
         # 3. AUTOTAG RESULTS / ALBUM (Drawing 2)
@@ -4029,7 +4043,7 @@ class DatariumApp(ctk.CTk):
         res_foot = ctk.CTkFrame(v_results, fg_color="transparent")
         res_foot.pack(fill="x", side="bottom", pady=(10, 0))
         ctk.CTkButton(res_foot, text="Indietro", fg_color="transparent", border_width=1, width=120, command=lambda: self.show_autotag_subpage("Config")).pack(side="left")
-        self.btn_save_albums = ctk.CTkButton(res_foot, text="Crea gli album", fg_color="#10b981", hover_color="#059669", width=180, font=ctk.CTkFont(weight="bold"), command=self.rename_and_create_albums)
+        self.btn_save_albums = ctk.CTkButton(res_foot, text="Crea gli album", width=180, font=ctk.CTkFont(weight="bold"), command=self.rename_and_create_albums)
         self.btn_save_albums.pack(side="right")
 
         # Start on Home view
@@ -4419,7 +4433,7 @@ class DatariumApp(ctk.CTk):
         ctk.CTkCheckBox(cfg_box, text="Spegni il PC al termine (annullabile, 60s di margine)", variable=self.offload_shutdown_after).pack(anchor="w", padx=30, pady=(6, 0))
 
         # Action Button
-        ctk.CTkButton(cfg_box, text="⚡ Avvia Offload & Genera Report", fg_color="#10b981", hover_color="#059669", height=50, width=320, font=ctk.CTkFont(weight="bold", size=15), corner_radius=10, command=self.run_offload_process).pack(pady=30)
+        ctk.CTkButton(cfg_box, text="⚡ Avvia Offload & Genera Report", height=50, width=320, font=ctk.CTkFont(weight="bold", size=15), corner_radius=10, command=self.run_offload_process).pack(pady=30)
 
         # 2. OFFLOAD RESULTS PAGE
         v_results = ctk.CTkFrame(self.offload_master_frame, fg_color="transparent")
@@ -4449,7 +4463,7 @@ class DatariumApp(ctk.CTk):
         
         ctk.CTkButton(res_foot, text="Nuovo Offload", fg_color="transparent", text_color=("gray10", "gray90"), border_width=1, width=120, command=lambda: self.show_offload_subpage("OffloadHome")).pack(side="left")
         
-        self.btn_open_report = ctk.CTkButton(res_foot, text="📄 Apri Report PDF", fg_color="#10b981", hover_color="#059669", width=220, font=ctk.CTkFont(weight="bold"), state="disabled", command=self.open_generated_report)
+        self.btn_open_report = ctk.CTkButton(res_foot, text="📄 Apri Report PDF", width=220, font=ctk.CTkFont(weight="bold"), state="disabled", command=self.open_generated_report)
         self.btn_open_report.pack(side="right")
 
         # Start on Home
@@ -5098,7 +5112,7 @@ class DatariumApp(ctk.CTk):
             system_actions.cancel_shutdown(getattr(self, "_pending_shutdown_handle", None))
             win.destroy()
 
-        ctk.CTkButton(win, text="Annulla spegnimento", fg_color="#ef4444", hover_color="#b91c1c",
+        ctk.CTkButton(win, text="Annulla spegnimento", fg_color=brand.DANGER, hover_color=brand.DANGER_HOVER, text_color="#ffffff",
                       command=do_cancel).pack(pady=10)
         # Se l'utente non annulla, la finestra si chiude da sola quando lo spegnimento
         # e' ormai imminente/avvenuto: niente resta appeso in giro.
@@ -5181,8 +5195,7 @@ class DatariumApp(ctk.CTk):
 
         bot = ctk.CTkFrame(page, fg_color="transparent")
         bot.pack(fill="x")
-        self.btn_sync_go = ctk.CTkButton(bot, text="⚡ Sincronizza", height=42, width=190, fg_color="#10b981", hover_color="#059669",
-                                         font=ctk.CTkFont(weight="bold", size=14), state="disabled", command=self.sync_apply)
+        self.btn_sync_go = ctk.CTkButton(bot, text="⚡ Sincronizza", height=42, width=190, font=ctk.CTkFont(weight="bold", size=14), state="disabled", command=self.sync_apply)
         self.btn_sync_go.pack(side="left")
         self.sync_summary_lbl = ctk.CTkLabel(page, text="Premi 🔍 Confronta per analizzare i due dischi.", font=ctk.CTkFont(size=12), anchor="w", justify="left", wraplength=780)
         self.sync_summary_lbl.pack(fill="x", pady=(0, 4), before=bot)
@@ -5330,7 +5343,7 @@ class DatariumApp(ctk.CTk):
 
             if r["status"] != "identical":
                 sym, col = self.SYNC_ACTION_LOOK[r["action"]]
-                btn = ctk.CTkButton(row, text=sym, width=58, height=28, fg_color=col, hover_color=col, font=ctk.CTkFont(size=13, weight="bold"))
+                btn = ctk.CTkButton(row, text=sym, width=58, height=28, fg_color=col, hover_color=col, text_color="#ffffff", font=ctk.CTkFont(size=13, weight="bold"))
                 btn.configure(command=lambda rr=r, b=btn: self._sync_cycle_action(rr, b))
                 btn.grid(row=0, column=1, rowspan=2, padx=6)
             else:
